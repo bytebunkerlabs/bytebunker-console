@@ -197,9 +197,11 @@ def telemetry():
         used_gb = None
         if mem_total and mem_avail:
             used_gb = round((mem_total - mem_avail) / 2**30, 1)
+        util = one('nvidia_smi_utilization_gpu_ratio{instance=~"%(i)s.*"}')
         out.append({
             "name": node["name"],
-            "util": one('nvidia_smi_utilization_gpu_ratio{instance=~"%(i)s.*"}'),
+            # exporter reports a 0-1 ratio; the UI speaks percent
+            "util": round(util * 100, 1) if util is not None else None,
             "mem_used_gb": used_gb,
             "mem_total_gb": round(mem_total / 2**30) if mem_total else None,
             "temp": one('nvidia_smi_temperature_gpu{instance=~"%(i)s.*"}'),
