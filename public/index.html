@@ -187,6 +187,15 @@
         </div>
 
         <div class="pgroup">
+          <span class="glabel">Tools · MCP</span>
+          <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:12px">
+            <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Tool calling</b><span class="hint" id="tools-count">—</span></div>
+            <button class="switch on" id="tools-switch"><span></span></button>
+          </div>
+          <div id="tools-box" style="display:flex;flex-direction:column;gap:6px"></div>
+        </div>
+
+        <div class="pgroup">
           <div class="prow">
             <div class="head"><b style="font-weight:600">System prompt</b><span class="val" id="sys-len">0 chars</span></div>
             <textarea class="sys-input" id="sys" rows="7" placeholder="You are running on a private two-node cluster…"></textarea>

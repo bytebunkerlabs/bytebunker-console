@@ -62,6 +62,21 @@ def load_config():
 CFG = load_config()
 _LOCK = threading.Lock()
 
+# MCP servers start lazily on first use: a console that never opens a tool
+# should not spawn subprocesses, and a broken server config must not stop the
+# console from booting.
+_MCP = None
+_MCP_LOCK = threading.Lock()
+
+
+def mcp_host():
+    global _MCP
+    with _MCP_LOCK:
+        if _MCP is None:
+            from mcp import MCPHost
+            _MCP = MCPHost(CFG.get("mcp_servers") or {})
+        return _MCP
+
 
 # ---------------------------------------------------------------- sessions --
 def _sessions_path():
@@ -319,6 +334,7 @@ class Handler(BaseHTTPRequestHandler):
                 "identity": CFG.get("identity", {}),
                 "upstream": CFG.get("upstream_url", ""),
                 "telemetry": bool(CFG.get("prometheus_url")),
+                "mcp": bool(CFG.get("mcp_servers")),
             })
         elif path == "/api/models":
             try:
@@ -328,6 +344,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e), "data": []}, 502)
         elif path == "/api/telemetry":
             self._json(telemetry())
+        elif path == "/api/tools":
+            try:
+                h = mcp_host()
+                defs = h.openai_tools()
+                body = {"servers": h.status, "tools": [
+                    {"name": t["function"]["name"],
+                     "description": t["function"]["description"][:200]}
+                    for t in defs]}
+                if urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("full"):
+                    body["defs"] = defs   # real JSON Schemas for the model
+                self._json(body)
+            except Exception as e:
+                self._json({"servers": {}, "tools": [], "error": str(e)[:300]})
         elif path == "/api/sessions":
             self._json(read_sessions())
         elif path == "/api/usage":
@@ -352,7 +381,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         path = urllib.parse.urlparse(self.path).path
-        if path not in ("/api/chat", "/api/sessions", "/api/usage-event"):
+        if path not in ("/api/chat", "/api/sessions", "/api/usage-event", "/api/tool-call"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -361,6 +390,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat":
             self._chat(body)
+        elif path == "/api/tool-call":
+            if not isinstance(body, dict):
+                self._json({"error": "expected object"}, 400)
+                return
+            text, is_err = mcp_host().call(body.get("name") or "", body.get("arguments") or {})
+            self._json({"content": text, "isError": is_err})
         elif path == "/api/sessions":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)

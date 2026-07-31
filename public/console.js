@@ -19,6 +19,8 @@
     abort: null,
     session: null,          // current session id
     ctxUsed: null,          // prompt+completion tokens of the last turn
+    tools: [],              // MCP tools discovered via /api/tools
+    toolsOn: true,          // send them to the model?
     hist: {},               // node name -> util history for sparklines
   };
 
@@ -73,6 +75,7 @@
   $("stops").oninput = (e) => { P.stops = e.target.value; };
   $("sys").oninput = (e) => { P.sys = e.target.value; $("sys-len").textContent = P.sys.length + " chars"; };
   $("json-switch").onclick = () => { P.json = !P.json; $("json-switch").classList.toggle("on", P.json); };
+  $("tools-switch").onclick = () => { state.toolsOn = !state.toolsOn; $("tools-switch").classList.toggle("on", state.toolsOn); };
   $("reset-params").onclick = () => location.reload();
   $("model-select").onchange = (e) => { state.model = e.target.value; servingLine(); };
 
@@ -181,6 +184,16 @@
         bot.appendChild(d);
       }
     }
+    for (const t of (m.toolUse || [])) {
+      const d = document.createElement("div");
+      d.className = "part-tool" + (t.error ? " err" : "");
+      d.innerHTML = '<div class="thead"><span class="tname mono"></span><span class="tstate mono"></span></div><pre class="targs"></pre><pre class="tres"></pre>';
+      d.querySelector(".tname").textContent = t.name;
+      d.querySelector(".tstate").textContent = t.result === "running…" ? "running…" : (t.error ? "error" : "ok");
+      d.querySelector(".targs").textContent = t.args;
+      d.querySelector(".tres").textContent = String(t.result).slice(0, 4000);
+      bot.appendChild(d);
+    }
     if (m.error) {
       const e = document.createElement("div");
       e.className = "msg-err";
@@ -232,6 +245,68 @@
     $("serving-line").textContent = txt || base;
   }
 
+  // One upstream turn. Returns {toolCalls, usage, finishReason} so the caller
+  // can decide whether to run tools and go around again.
+  async function streamTurn(msgs, bot, body0) {
+    const t0 = performance.now();
+    let tFirst = null, tLast = null, usage = null, chunks = 0, finishReason = null;
+    const calls = [];      // accumulated by index: {id, name, args}
+    const ctl = new AbortController();
+    state.abort = ctl;
+    let raf = 0;
+    const queue = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; renderMessages(true); }); };
+
+    const r = await fetch("/api/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({}, body0, { messages: msgs })), signal: ctl.signal,
+    });
+    if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        let obj;
+        try { obj = JSON.parse(payload); } catch (e) { continue; }
+        if (obj.error) throw new Error(obj.error);
+        if (obj.usage) usage = obj.usage;
+        const c0 = obj.choices && obj.choices[0];
+        if (c0 && c0.finish_reason) finishReason = c0.finish_reason;
+        const delta = c0 && c0.delta;
+        if (!delta) continue;
+        // tool calls stream in fragments keyed by index
+        for (const tc of (delta.tool_calls || [])) {
+          const i = tc.index || 0;
+          calls[i] = calls[i] || { id: "", name: "", args: "" };
+          if (tc.id) calls[i].id = tc.id;
+          if (tc.function && tc.function.name) calls[i].name += tc.function.name;
+          if (tc.function && tc.function.arguments) calls[i].args += tc.function.arguments;
+        }
+        const got = (delta.content || "") + (delta.reasoning_content || "") + (delta.reasoning || "");
+        if (got) {
+          const now = performance.now();
+          if (tFirst === null) tFirst = now;
+          tLast = now; chunks++;
+          if (delta.reasoning_content) bot.reasoning += delta.reasoning_content;
+          if (delta.reasoning) bot.reasoning += delta.reasoning;
+          if (delta.content) bot.content += delta.content;
+          queue();
+        }
+      }
+    }
+    return { calls: calls.filter(Boolean), usage, finishReason, chunks,
+             ttft: tFirst ? (tFirst - t0) / 1000 : null,
+             span: (tFirst && tLast && tLast > tFirst) ? (tLast - tFirst) / 1000 : null };
+  }
+
   async function send(text) {
     if (!text || !text.trim() || state.streaming || !state.model) return;
     const user = { role: "user", content: text.trim() };
@@ -247,11 +322,20 @@
     const msgs = [];
     if (P.sys.trim()) msgs.push({ role: "system", content: P.sys.trim() });
     for (const m of state.messages.slice(0, -1)) {
-      msgs.push({ role: m.role === "bot" ? "assistant" : "user",
-                  content: m.role === "bot" ? stripThink(m.content) : m.content });
+      if (m.role === "bot") {
+        const e = { role: "assistant", content: stripThink(m.content) };
+        if (m.tool_calls) e.tool_calls = m.tool_calls;
+        msgs.push(e);
+        for (const t of (m.toolResults || [])) {
+          msgs.push({ role: "tool", tool_call_id: t.id, content: t.content });
+        }
+      } else {
+        msgs.push({ role: "user", content: m.content });
+      }
     }
+
     const body = {
-      model: state.model, messages: msgs,
+      model: state.model,
       temperature: P.temp, top_p: P.topP, max_tokens: P.maxTok,
       top_k: P.topK, repetition_penalty: P.rep,
     };
@@ -259,69 +343,59 @@
     if (P.json) body.response_format = { type: "json_object" };
     if (P.stops.trim()) body.stop = P.stops.split(",").map((s) => s.trim()).filter(Boolean);
     if (P.effort !== 4) body.reasoning_effort = EFFORT[P.effort];
+    if (state.toolsOn && state.tools.length) {
+      body.tools = state.tools.map((t) => t.def);
+      body.tool_choice = "auto";
+    }
 
-    const t0 = performance.now();
-    let tFirst = null, tLast = null, usage = null, chunks = 0, finishReason = null;
-    const ctl = new AbortController();
-    state.abort = ctl;
-
-    let raf = 0;
-    const paint = () => { raf = 0; renderMessages(true); };
-    const queue = () => { if (!raf) raf = requestAnimationFrame(paint); };
-
+    let usage = null, finishReason = null, ttft = null, span = null, chunks = 0;
+    const MAX_HOPS = 8;   // a tool loop must terminate even if the model won't
     try {
-      const r = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body), signal: ctl.signal,
-      });
-      if (!r.ok) throw new Error((await r.text()).slice(0, 400));
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop();
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (payload === "[DONE]") continue;
-          let obj;
-          try { obj = JSON.parse(payload); } catch (e) { continue; }
-          if (obj.usage) usage = obj.usage;
-          const c0 = obj.choices && obj.choices[0];
-          if (c0 && c0.finish_reason) finishReason = c0.finish_reason;
-          const delta = c0 && c0.delta;
-          if (!delta) continue;
-          const got = (delta.content || "") + (delta.reasoning_content || "") + (delta.reasoning || "");
-          if (got) {
-            const now = performance.now();
-            if (tFirst === null) tFirst = now;
-            tLast = now; chunks++;
-            if (delta.reasoning_content) bot.reasoning += delta.reasoning_content;
-            if (delta.reasoning) bot.reasoning += delta.reasoning;
-            if (delta.content) bot.content += delta.content;
-            queue();
-          }
+      for (let hop = 0; hop < MAX_HOPS; hop++) {
+        const r = await streamTurn(msgs, bot, body);
+        usage = r.usage || usage;
+        finishReason = r.finishReason;
+        chunks += r.chunks;
+        if (ttft === null) ttft = r.ttft;
+        if (r.span) span = (span || 0) + r.span;
+        if (!r.calls.length) break;
+
+        // record the assistant's tool_calls, then run them and feed results back
+        bot.tool_calls = r.calls.map((c) => ({
+          id: c.id, type: "function",
+          function: { name: c.name, arguments: c.args || "{}" },
+        }));
+        bot.toolResults = bot.toolResults || [];
+        msgs.push({ role: "assistant", content: bot.content || "", tool_calls: bot.tool_calls });
+        for (const c of r.calls) {
+          let args = {};
+          try { args = JSON.parse(c.args || "{}"); } catch (e) {}
+          bot.toolUse = (bot.toolUse || []).concat([{ name: c.name, args: c.args || "{}", result: "running…", error: false }]);
+          renderMessages(true);
+          let out = { content: "tool call failed", isError: true };
+          try {
+            out = await (await fetch("/api/tool-call", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: c.name, arguments: args }),
+            })).json();
+          } catch (e) { out = { content: "console could not reach the tool: " + e.message, isError: true }; }
+          bot.toolUse[bot.toolUse.length - 1].result = out.content;
+          bot.toolUse[bot.toolUse.length - 1].error = !!out.isError;
+          bot.toolResults.push({ id: c.id, content: String(out.content).slice(0, 20000) });
+          msgs.push({ role: "tool", tool_call_id: c.id, content: String(out.content).slice(0, 20000) });
+          renderMessages(true);
         }
+        bot.content = "";   // the next hop writes the real answer
+        if (hop === MAX_HOPS - 1) bot.error = "stopped after " + MAX_HOPS + " tool hops";
       }
     } catch (e) {
       if (e.name !== "AbortError") bot.error = "upstream error: " + e.message;
     }
 
-    // Chunk count is not a token count (speculative decoding packs several
-    // tokens per delta). Without server usage, mark everything estimated —
-    // on screen with "~", in the ledger with a flag the medians exclude.
     const exact = !!(usage && usage.completion_tokens);
     const toks = exact ? usage.completion_tokens : chunks;
     const approx = exact ? "" : "~";
-    const ttft = tFirst ? ((tFirst - t0) / 1000) : null;
-    let decode = null;
-    if (tFirst && tLast && tLast > tFirst && toks > 1) {
-      decode = (toks - 1) / ((tLast - tFirst) / 1000);
-    }
+    const decode = (span && toks > 1) ? (toks - 1) / span : null;
     const rtok = usage && usage.completion_tokens_details &&
                  usage.completion_tokens_details.reasoning_tokens;
     bot.meta = [
@@ -329,6 +403,7 @@
       approx + toks + " tok" + (rtok ? " (" + rtok + " thinking)" : ""),
       decode ? approx + decode.toFixed(1) + " tok/s" : null,
       ttft !== null ? "ttft " + Math.round(ttft * 1000) + " ms" : null,
+      (bot.toolUse || []).length ? bot.toolUse.length + " tool call" + (bot.toolUse.length > 1 ? "s" : "") : null,
       finishReason === "length"
         ? "\u26a0 stopped at Max tokens \u2014 thinking shares the budget; raise it in the panel"
         : null,
@@ -384,7 +459,8 @@
         messages: state.messages.map((m) => ({
           role: m.role, content: m.content, reasoning: m.reasoning || "",
           meta: m.meta || "", model: m.model || "", effort: m.effort,
-          error: m.error || "",
+          error: m.error || "", toolUse: m.toolUse || [],
+          tool_calls: m.tool_calls || null, toolResults: m.toolResults || [],
         })),
       }),
     }).catch(() => {});
@@ -471,6 +547,43 @@
     if (!state.models.length) {
       lm.innerHTML = '<div class="empty-state"><b>Upstream unreachable</b><span>Point config.json upstream_url at the gateway or a vLLM server, then reload.</span></div>';
     }
+  }
+
+  /* ---------------- tools (MCP) ---------------- */
+  async function loadTools() {
+    let d = { servers: {}, tools: [] };
+    try { d = await (await fetch("/api/tools")).json(); } catch (e) {}
+    // pair each flat tool name with its OpenAI definition for the request body
+    state.tools = (d.tools || []).map((t) => ({
+      name: t.name, description: t.description,
+      def: { type: "function", function: { name: t.name, description: t.description,
+             parameters: { type: "object", properties: {}, additionalProperties: true } } },
+    }));
+    // the server knows the real schemas; fetch them in full
+    try {
+      const full = await (await fetch("/api/tools?full=1")).json();
+      if (full.defs) state.tools = full.defs.map((def) => ({ name: def.function.name, description: def.function.description, def: def }));
+    } catch (e) {}
+    const box = $("tools-box");
+    if (!box) return;
+    box.textContent = "";
+    const servers = Object.entries(d.servers || {});
+    if (!servers.length) {
+      box.innerHTML = '<span class="hint">No MCP servers configured. Add them to <span class="mono">mcp_servers</span> in config.json and restart the console.</span>';
+      $("tools-count").textContent = "off";
+      return;
+    }
+    for (const [name, st] of servers) {
+      const r = document.createElement("div");
+      r.className = "srv-row";
+      r.innerHTML = '<span class="d"></span><span class="n mono"></span><span class="s"></span>';
+      r.querySelector(".d").style.background = st.state === "ready" ? "var(--ok)" : (st.state === "error" ? "var(--err)" : "var(--faint)");
+      r.querySelector(".n").textContent = name;
+      r.querySelector(".s").textContent = st.state === "ready" ? st.tools + " tools" : (st.error ? st.state + ": " + st.error.slice(0, 60) : st.state);
+      box.appendChild(r);
+    }
+    $("tools-count").textContent = state.tools.length + " tools";
+    $("tools-switch").classList.toggle("on", state.toolsOn);
   }
 
   /* ---------------- telemetry ---------------- */
@@ -637,6 +750,7 @@
     $("code-endpoint").textContent = state.cfg.upstream;
     if (state.cfg.nodes.length) $("cluster-sub").textContent = state.cfg.nodes.length + " nodes configured";
     await loadModels();
+    if (state.cfg.mcp) loadTools();
     pollTelemetry();
     setInterval(pollTelemetry, 5000);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);

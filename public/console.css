@@ -205,3 +205,16 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 
 @media (max-width:1080px){ .panel{position:fixed;right:0;top:0;bottom:0;z-index:20;box-shadow:-12px 0 40px rgba(0,0,0,.12)} }
 @media (max-width:860px){ .side{width:64px;flex-basis:64px} .side .brand-name,.side .nav-label,.side .nav button span,.side-cluster,.side-user .who{display:none} }
+
+/* ---------- tool calls ---------- */
+.part-tool{border:1px solid var(--border);border-radius:11px;overflow:hidden;background:var(--code)}
+.part-tool.err{border-color:var(--err)}
+.part-tool .thead{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid var(--border);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:500}
+.part-tool.err .thead{color:var(--err)}
+.part-tool pre{margin:0;padding:9px 12px;overflow-x:auto;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;font-family:'Geist Mono',ui-monospace,Menlo,monospace}
+.part-tool .targs{color:var(--muted);border-bottom:1px solid var(--border)}
+.part-tool .tres{max-height:280px;overflow-y:auto}
+.srv-row{display:flex;align-items:center;gap:8px;font-size:12px}
+.srv-row .d{width:6px;height:6px;border-radius:50%;flex:0 0 6px}
+.srv-row .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srv-row .s{color:var(--faint);font-size:11.5px}

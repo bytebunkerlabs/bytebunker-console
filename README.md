@@ -14,3 +14,25 @@ Usage (aggregated from this server's own request ledger).
 
 Deliberately empty in v1: Fine-tuning, Batch jobs — the design's simulated data
 does not ship. A number without provenance is a rumor.
+
+## MCP tools
+
+Declare stdio MCP servers in `config.json` and the Playground becomes an agent
+loop — the model calls tools, the console runs them, results feed back, up to
+8 hops per turn.
+
+    "mcp_servers": {
+      "fs": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/mo/rack"],
+        "enabled": true
+      }
+    }
+
+Tools appear as `<server>__<tool>` so two servers can share a tool name.
+Toggle them per-conversation in the params panel; each call renders inline
+with its arguments and result.
+
+**Trust:** an MCP server is a local process with whatever access its arguments
+grant. The filesystem server can write anywhere under the roots you pass it —
+scope them deliberately. The console does not sandbox servers.
