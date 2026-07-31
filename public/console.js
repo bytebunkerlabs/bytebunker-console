@@ -18,6 +18,7 @@
     streaming: false,
     abort: null,
     session: null,          // current session id
+    ctxUsed: null,          // prompt+completion tokens of the last turn
     hist: {},               // node name -> util history for sparklines
   };
 
@@ -223,8 +224,12 @@
 
   /* ---------------- chat ---------------- */
   function servingLine(txt) {
-    $("serving-line").textContent =
-      txt || (state.model ? `${state.model} · ${state.cfg.upstream}` : "no models at upstream");
+    let base = state.model ? `${state.model} · ${state.cfg.upstream}` : "no models at upstream";
+    if (!txt && state.ctxUsed) {
+      const pct = Math.round(state.ctxUsed / 262144 * 100);
+      base += ` · ctx ${(state.ctxUsed / 1000).toFixed(1)}k / 262k (${pct}%)`;
+    }
+    $("serving-line").textContent = txt || base;
   }
 
   async function send(text) {
@@ -330,7 +335,11 @@
     ].filter(Boolean).join("  \u00b7  ");
     state.streaming = false;
     state.abort = null;
+    if (usage && usage.prompt_tokens) {
+      state.ctxUsed = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
+    }
     $("send-btn").classList.remove("stop");
+    servingLine();
     renderMessages();
     saveSession();
     fetch("/api/usage-event", {
