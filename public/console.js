@@ -564,26 +564,61 @@
       const full = await (await fetch("/api/tools?full=1")).json();
       if (full.defs) state.tools = full.defs.map((def) => ({ name: def.function.name, description: def.function.description, def: def }));
     } catch (e) {}
+    renderServers(d.servers || {}, d.config || {});
+    $("tools-count").textContent = state.tools.length
+      ? state.tools.length + " tools available" : "no tools";
+    $("tools-switch").classList.toggle("on", state.toolsOn);
+  }
+
+  function renderServers(status, cfg) {
     const box = $("tools-box");
     if (!box) return;
     box.textContent = "";
-    const servers = Object.entries(d.servers || {});
-    if (!servers.length) {
-      box.innerHTML = '<span class="hint">No MCP servers configured. Add them to <span class="mono">mcp_servers</span> in config.json and restart the console.</span>';
-      $("tools-count").textContent = "off";
+    const names = Object.keys(Object.assign({}, cfg, status));
+    if (!names.length) {
+      box.innerHTML = '<span class="hint">No MCP servers yet. Add one below — the model can then read and write through it.</span>';
       return;
     }
-    for (const [name, st] of servers) {
+    for (const name of names) {
+      const st = status[name] || { state: "unknown", tools: 0 };
+      const on = !cfg[name] || cfg[name].enabled !== false;
       const r = document.createElement("div");
-      r.className = "srv-row";
-      r.innerHTML = '<span class="d"></span><span class="n mono"></span><span class="s"></span>';
-      r.querySelector(".d").style.background = st.state === "ready" ? "var(--ok)" : (st.state === "error" ? "var(--err)" : "var(--faint)");
+      r.className = "srv-row" + (on ? "" : " off");
+      r.innerHTML = '<span class="d"></span><span class="n mono"></span><span class="s"></span>' +
+        '<span class="acts"><button class="t" title="Enable/disable">\u25cf</button>' +
+        '<button class="r" title="Restart">\u21bb</button>' +
+        '<button class="x danger" title="Remove">\u2715</button></span>';
+      r.querySelector(".d").style.background =
+        st.state === "ready" ? "var(--ok)" : st.state === "error" ? "var(--err)" : "var(--faint)";
       r.querySelector(".n").textContent = name;
-      r.querySelector(".s").textContent = st.state === "ready" ? st.tools + " tools" : (st.error ? st.state + ": " + st.error.slice(0, 60) : st.state);
+      r.querySelector(".s").textContent =
+        st.state === "ready" ? st.tools + " tools"
+        : st.state === "error" ? "error" : st.state;
+      if (st.error) r.querySelector(".s").title = st.error;
+      r.querySelector(".t").onclick = () => mcpAdmin({ action: "toggle", name });
+      r.querySelector(".r").onclick = () => mcpAdmin({ action: "restart" });
+      r.querySelector(".x").onclick = () => {
+        if (confirm("Remove MCP server \"" + name + "\"?")) mcpAdmin({ action: "remove", name });
+      };
       box.appendChild(r);
     }
-    $("tools-count").textContent = state.tools.length + " tools";
-    $("tools-switch").classList.toggle("on", state.toolsOn);
+  }
+
+  async function mcpAdmin(payload) {
+    const box = $("tools-box");
+    box.innerHTML = '<span class="hint">applying…</span>';
+    try {
+      const r = await fetch("/api/mcp", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (!r.ok) { $("mcp-form-err").textContent = d.error || "failed"; }
+      else { $("mcp-form").hidden = true; $("mcp-form-err").textContent = ""; }
+    } catch (e) {
+      $("mcp-form-err").textContent = e.message;
+    }
+    await loadTools();   // re-read status and tool schemas after any change
   }
 
   /* ---------------- telemetry ---------------- */
@@ -740,6 +775,25 @@
       box.innerHTML += '<div class="empty-state"><b>Nothing logged yet</b><span>Every completion through the Playground lands in this ledger.</span></div>';
     }
   }
+
+  /* ---------------- MCP form ---------------- */
+  $("mcp-add-btn").onclick = () => {
+    const f = $("mcp-form");
+    f.hidden = !f.hidden;
+    if (!f.hidden) $("mcp-name").focus();
+  };
+  $("mcp-cancel").onclick = () => { $("mcp-form").hidden = true; $("mcp-form-err").textContent = ""; };
+  document.querySelectorAll(".mcp-preset").forEach((b) => (b.onclick = () => {
+    $("mcp-name").value = b.dataset.name;
+    $("mcp-cmd").value = b.dataset.cmd;
+    $("mcp-args").value = b.dataset.args;
+  }));
+  $("mcp-save").onclick = () => mcpAdmin({
+    action: "add",
+    name: $("mcp-name").value.trim(),
+    command: $("mcp-cmd").value.trim(),
+    args: $("mcp-args").value.trim(),
+  });
 
   /* ---------------- boot ---------------- */
   (async () => {

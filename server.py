@@ -78,6 +78,30 @@ def mcp_host():
         return _MCP
 
 
+def mcp_reload():
+    """Tear down every server and start from the current config. Called after
+    any edit so changes take effect without restarting the console."""
+    global _MCP
+    with _MCP_LOCK:
+        if _MCP is not None:
+            _MCP.stop_all()
+        from mcp import MCPHost
+        _MCP = MCPHost(CFG.get("mcp_servers") or {})
+        return _MCP
+
+
+def save_config():
+    """Persist CFG back to config.json, preserving formatting sanity. Written
+    atomically so a crash mid-write cannot leave the console unbootable."""
+    path = os.path.join(ROOT, "config.json")
+    tmp = path + ".tmp"
+    with _LOCK:
+        with open(tmp, "w") as f:
+            json.dump(CFG, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+
+
 # ---------------------------------------------------------------- sessions --
 def _sessions_path():
     return os.path.join(DATA, "sessions.json")
@@ -354,6 +378,7 @@ class Handler(BaseHTTPRequestHandler):
                     for t in defs]}
                 if urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("full"):
                     body["defs"] = defs   # real JSON Schemas for the model
+                body["config"] = CFG.get("mcp_servers", {})
                 self._json(body)
             except Exception as e:
                 self._json({"servers": {}, "tools": [], "error": str(e)[:300]})
@@ -381,7 +406,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         path = urllib.parse.urlparse(self.path).path
-        if path not in ("/api/chat", "/api/sessions", "/api/usage-event", "/api/tool-call"):
+        if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
+                        "/api/tool-call", "/api/mcp"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -396,6 +422,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             text, is_err = mcp_host().call(body.get("name") or "", body.get("arguments") or {})
             self._json({"content": text, "isError": is_err})
+        elif path == "/api/mcp":
+            self._mcp_admin(body)
         elif path == "/api/sessions":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
@@ -410,6 +438,56 @@ class Handler(BaseHTTPRequestHandler):
             if evt:
                 append_usage(evt)
             self._json({"ok": bool(evt)})
+
+    # ---- MCP server management ----
+    # add / remove / toggle / restart, persisted to config.json and applied
+    # live. Command strings are never shell-parsed — they go straight to
+    # Popen as argv, so there is no shell-injection surface here.
+    def _mcp_admin(self, body):
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action")
+        servers = CFG.setdefault("mcp_servers", {})
+        name = (body.get("name") or "").strip()
+
+        if action == "add":
+            if not name or not re.match(r"^[A-Za-z0-9_-]{1,32}$", name):
+                self._json({"error": "name must be 1-32 chars: letters, digits, - or _"}, 400)
+                return
+            cmd = (body.get("command") or "").strip()
+            if not cmd:
+                self._json({"error": "command is required"}, 400)
+                return
+            args = body.get("args")
+            if isinstance(args, str):
+                args = [a for a in args.split() if a]
+            servers[name] = {
+                "command": cmd,
+                "args": list(args or []),
+                "env": body.get("env") or {},
+                "enabled": True,
+            }
+        elif action == "remove":
+            if name not in servers:
+                self._json({"error": "no such server"}, 404)
+                return
+            servers.pop(name)
+        elif action == "toggle":
+            if name not in servers:
+                self._json({"error": "no such server"}, 404)
+                return
+            servers[name]["enabled"] = not servers[name].get("enabled", True)
+        elif action == "restart":
+            pass  # config unchanged; the reload below does the work
+        else:
+            self._json({"error": "unknown action"}, 400)
+            return
+
+        save_config()
+        h = mcp_reload()
+        self._json({"ok": True, "servers": h.status,
+                    "config": CFG.get("mcp_servers", {})})
 
     # ---- streaming chat proxy ----
     RETRY_STRIP = ("reasoning_effort", "top_k", "repetition_penalty", "stream_options")

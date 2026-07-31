@@ -17,9 +17,13 @@ does not ship. A number without provenance is a rumor.
 
 ## MCP tools
 
-Declare stdio MCP servers in `config.json` and the Playground becomes an agent
-loop — the model calls tools, the console runs them, results feed back, up to
-8 hops per turn.
+Manage servers from the params panel: **Add MCP server** (with presets for
+filesystem / git / fetch / memory), then per-server enable, restart, remove.
+Changes write to `config.json` and apply immediately — no console restart.
+The Playground is then an agent loop: the model calls tools, the console runs
+them, results feed back, up to 8 hops per turn.
+
+Servers can also be declared by hand in `config.json`:
 
     "mcp_servers": {
       "fs": {
