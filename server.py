@@ -84,6 +84,32 @@ def write_sessions(sessions):
 
 
 # ------------------------------------------------------------------- usage --
+def sanitize_usage(body):
+    """The ledger is permanent; one garbage line must never poison every read.
+    Coerce to known-good types here, and drop the event if nothing survives."""
+    if not isinstance(body, dict):
+        return None
+    def as_int(v):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return None
+    def as_float(v):
+        try:
+            return round(float(v), 3)
+        except (TypeError, ValueError):
+            return None
+    evt = {
+        "model": str(body.get("model") or "unknown")[:200],
+        "prompt_tokens": as_int(body.get("prompt_tokens")),
+        "completion_tokens": as_int(body.get("completion_tokens")),
+        "ttft_s": as_float(body.get("ttft_s")),
+        "decode_tok_s": as_float(body.get("decode_tok_s")),
+        "estimated": bool(body.get("estimated")),
+    }
+    return evt if evt["completion_tokens"] else None
+
+
 def append_usage(evt):
     evt["ts"] = int(time.time())
     with _LOCK:
@@ -105,18 +131,22 @@ def usage_summary():
                     e = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if e.get("ts", 0) < horizon:
+                if not isinstance(e, dict) or e.get("ts", 0) < horizon:
                     continue
-                out = int(e.get("completion_tokens") or 0)
-                inn = int(e.get("prompt_tokens") or 0)
+                try:  # old or hand-edited lines must not poison the ledger
+                    out = int(e.get("completion_tokens") or 0)
+                    inn = int(e.get("prompt_tokens") or 0)
+                    dec = float(e["decode_tok_s"]) if e.get("decode_tok_s") else None
+                except (TypeError, ValueError):
+                    continue
                 tot_out += out
                 tot_in += inn
                 day = time.strftime("%d", time.localtime(e["ts"]))
                 days[day] = days.get(day, 0) + out
-                m = e.get("model") or "unknown"
+                m = str(e.get("model") or "unknown")
                 by_model[m] = by_model.get(m, 0) + out
-                if e.get("decode_tok_s"):
-                    tps.append(float(e["decode_tok_s"]))
+                if dec and not e.get("estimated"):
+                    tps.append(dec)
     except FileNotFoundError:
         pass
     tps.sort()
@@ -197,12 +227,49 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet
         pass
 
+    # Loopback binding stops remote packets, not the operator's own browser.
+    # A hostile page can reach 127.0.0.1 via DNS rebinding (its origin becomes
+    # this host) or fire preflight-free "simple" POSTs cross-origin. So: only
+    # accept our own Host, reject foreign Origins, and require JSON POSTs.
+    def _guard(self):
+        hostname = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        if hostname not in ("127.0.0.1", "localhost", "::1", CFG.get("bind", "")):
+            self._json({"error": "bad host"}, 403, close=True)
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            ohost = urllib.parse.urlparse(origin).hostname
+            if ohost not in ("127.0.0.1", "localhost", "::1", CFG.get("bind", "")):
+                self._json({"error": "cross-origin denied"}, 403, close=True)
+                return False
+        if self.command in ("POST", "DELETE"):
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+            if self.command == "POST" and ctype != "application/json":
+                self._drain()
+                self._json({"error": "expected application/json"}, 415, close=True)
+                return False
+        return True
+
+    def _drain(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            while n > 0:
+                n -= len(self.rfile.read(min(n, 65536)) or b"x")
+        except (ValueError, OSError):
+            self.close_connection = True
+
+    def do_OPTIONS(self):
+        self._json({"error": "forbidden"}, 403, close=True)
+
     # ---- helpers ----
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, close=False):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if close:
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.end_headers()
         self.wfile.write(body)
 
@@ -228,15 +295,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(n) or b"{}")
+        """Read and parse the JSON body; None (plus a 400 already sent) on garbage."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(n) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid JSON body"}, 400, close=True)
+            return None
 
     # ---- routes ----
     def do_GET(self):
+        if not self._guard():
+            return
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/config":
             self._json({
-                "nodes": [n["name"] for n in CFG.get("nodes", [])],
+                # spec is optional operator-declared hardware copy; the UI
+                # renders it verbatim or omits the line — it never invents one
+                "nodes": [{"name": n["name"], "spec": n.get("spec", "")}
+                          for n in CFG.get("nodes", [])],
                 "identity": CFG.get("identity", {}),
                 "upstream": CFG.get("upstream_url", ""),
                 "telemetry": bool(CFG.get("prometheus_url")),
@@ -257,7 +334,10 @@ class Handler(BaseHTTPRequestHandler):
             self._static(path)
 
     def do_DELETE(self):
+        if not self._guard():
+            return
         u = urllib.parse.urlparse(self.path)
+        self._drain()
         if u.path == "/api/sessions":
             sid = urllib.parse.parse_qs(u.query).get("id", [None])[0]
             with _LOCK:
@@ -267,27 +347,40 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._guard():
+            return
         path = urllib.parse.urlparse(self.path).path
+        if path not in ("/api/chat", "/api/sessions", "/api/usage-event"):
+            self._drain()  # unread bodies desync HTTP/1.1 keep-alive
+            self._json({"error": "not found"}, 404)
+            return
+        body = self._body()
+        if body is None:
+            return
         if path == "/api/chat":
-            self._chat()
+            self._chat(body)
         elif path == "/api/sessions":
-            s = self._body()
+            if not isinstance(body, dict):
+                self._json({"error": "expected object"}, 400)
+                return
             with _LOCK:
-                cur = [x for x in read_sessions() if x.get("id") != s.get("id")]
-                cur.insert(0, s)
+                cur = [x for x in read_sessions() if x.get("id") != body.get("id")]
+                cur.insert(0, body)
                 write_sessions(cur[:200])
             self._json({"ok": True})
         elif path == "/api/usage-event":
-            append_usage(self._body())
-            self._json({"ok": True})
-        else:
-            self._json({"error": "not found"}, 404)
+            evt = sanitize_usage(body)
+            if evt:
+                append_usage(evt)
+            self._json({"ok": bool(evt)})
 
     # ---- streaming chat proxy ----
-    RETRY_STRIP = ("reasoning_effort", "top_k", "repetition_penalty")
+    RETRY_STRIP = ("reasoning_effort", "top_k", "repetition_penalty", "stream_options")
 
-    def _chat(self):
-        payload = self._body()
+    def _chat(self, payload):
+        if not isinstance(payload, dict):
+            self._json({"error": "expected object"}, 400)
+            return
         payload["stream"] = True
         payload.setdefault("stream_options", {"include_usage": True})
 
@@ -316,18 +409,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
+        # Forward raw bytes as they arrive — the client parses SSE framing.
+        # (A readline-per-event loop holds each event's terminating blank line
+        # hostage until the NEXT event arrives: the stream renders one token
+        # late, permanently.) read1 returns whatever the socket has.
         try:
-            while True:
-                chunk = resp.read(1)
-                if not chunk:
-                    break
-                # accumulate a line at a time for prompt flushing
-                line = chunk + resp.readline()
-                self.wfile.write(line)
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            try:
+                while True:
+                    chunk = resp.read1(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # client went away — nothing to tell it
+            except Exception as e:
+                # upstream died mid-stream: without this, the client sees a
+                # clean EOF and silently renders a truncated reply as complete
+                try:
+                    msg = json.dumps({"error": "upstream stream failed: " + str(e)[:200]})
+                    self.wfile.write(("data: " + msg + "\n\n").encode())
+                    self.wfile.flush()
+                except OSError:
+                    pass
         finally:
             resp.close()
 
@@ -337,6 +443,14 @@ def main():
     ap.add_argument("--port", type=int, default=CFG.get("port", 8765))
     ap.add_argument("--bind", default=CFG.get("bind", "127.0.0.1"))
     args = ap.parse_args()
+    if args.bind not in ("127.0.0.1", "localhost", "::1"):
+        # There is no auth on any route. Loopback-only is the security model;
+        # a wider bind turns the rack into an open inference gateway for the
+        # whole LAN. Refuse rather than warn — reach it over SSH or the overlay.
+        raise SystemExit(
+            "refusing to bind %s: the console has no auth and is loopback-only "
+            "by design. Reach it via SSH tunnel or overlay network." % args.bind)
+    CFG["bind"] = args.bind
     srv = ThreadingHTTPServer((args.bind, args.port), Handler)
     print("ByteBunker Console on http://%s:%d  (upstream %s)" %
           (args.bind, args.port, CFG.get("upstream_url")))

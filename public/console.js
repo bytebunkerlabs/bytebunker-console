@@ -105,92 +105,120 @@
   }
 
   /* ---------------- transcript rendering ---------------- */
+  // One left-to-right pass so parts keep document order and a literal <think>
+  // inside a code fence stays inside the code. An unterminated fence or think
+  // block (mid-stream) runs to end of text.
   function parseParts(m) {
     const parts = [];
     if (m.reasoning) parts.push({ kind: "think", text: m.reasoning });
-    let text = m.content || "";
-    // <think> blocks emitted inline by models without a reasoning parser
-    text = text.replace(/<think>([\s\S]*?)(<\/think>|$)/g, (_, t) => {
-      if (t.trim()) parts.push({ kind: "think", text: t.trim() });
-      return "";
-    });
-    // fenced code blocks; an unterminated fence is a code block mid-stream
-    const re = /```([\w+-]*)\n?([\s\S]*?)(```|$)/g;
+    const text = m.content || "";
+    const re = /```([\w+-]*)\n?([\s\S]*?)(```|$)|<think>([\s\S]*?)(<\/think>|$)/g;
     let last = 0, mt;
     while ((mt = re.exec(text))) {
       const before = text.slice(last, mt.index).trim();
       if (before) parts.push({ kind: "text", text: before });
-      parts.push({ kind: "code", lang: mt[1] || "text", text: mt[2].replace(/\n$/, "") });
+      if (mt[4] !== undefined) {
+        if (mt[4].trim()) parts.push({ kind: "think", text: mt[4].trim() });
+      } else {
+        parts.push({ kind: "code", lang: mt[1] || "text", text: mt[2].replace(/\n$/, "") });
+      }
       last = re.lastIndex;
+      if (mt.index === re.lastIndex) re.lastIndex++; // safety on empty match
     }
     const tail = text.slice(last).trim();
     if (tail) parts.push({ kind: "text", text: tail });
     return parts;
   }
 
-  function renderMessages() {
+  // History resent to the model must not include think blocks: reasoning
+  // models expect prior thinking stripped, and it balloons context otherwise.
+  function stripThink(s) {
+    return (s || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
+  }
+
+  function buildMessageNode(m) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg";
+    if (m.role === "user") {
+      const u = document.createElement("div");
+      u.className = "msg-user";
+      const b = document.createElement("div");
+      b.textContent = m.content;
+      u.appendChild(b);
+      wrap.appendChild(u);
+      return wrap;
+    }
+    const bot = document.createElement("div");
+    bot.className = "msg-bot";
+    for (const p of parseParts(m)) {
+      if (p.kind === "think") {
+        const d = document.createElement("div");
+        d.className = "part-think";
+        d.innerHTML = '<span class="label"></span><div class="body"></div>';
+        // provenance is stamped on the message at send time — the label must
+        // not follow the slider after the fact
+        d.querySelector(".label").textContent =
+          m.effort != null ? "Reasoning · " + EFFORT_LABEL[m.effort] : "Reasoning";
+        d.querySelector(".body").textContent = p.text;
+        bot.appendChild(d);
+      } else if (p.kind === "code") {
+        const d = document.createElement("div");
+        d.className = "part-code";
+        const h = document.createElement("div");
+        h.className = "head";
+        h.innerHTML = "<span></span><span></span>";
+        h.children[0].textContent = p.lang;
+        h.children[1].textContent = m.model || "";
+        const pre = document.createElement("pre");
+        pre.textContent = p.text;
+        d.appendChild(h); d.appendChild(pre);
+        bot.appendChild(d);
+      } else {
+        const d = document.createElement("div");
+        d.className = "part-text";
+        d.textContent = p.text;
+        bot.appendChild(d);
+      }
+    }
+    if (m.error) {
+      const e = document.createElement("div");
+      e.className = "msg-err";
+      e.textContent = m.error;
+      bot.appendChild(e);
+    }
+    if (m.meta) {
+      const mt = document.createElement("div");
+      mt.className = "msg-meta mono";
+      mt.textContent = m.meta;
+      bot.appendChild(mt);
+    }
+    wrap.appendChild(bot);
+    return wrap;
+  }
+
+  function atBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
+
+  // lastOnly: during streaming, rebuild just the in-flight message — a full
+  // transcript rebuild per frame is O(n²) in stream length and janks long
+  // replies. Scroll pins only if the user is already at the bottom.
+  function renderMessages(lastOnly) {
     const box = $("msgs");
+    const tr = $("transcript");
+    const pin = atBottom(tr);
     const empty = state.messages.length === 0;
     $("empty-state").style.display = empty ? "flex" : "none";
     box.hidden = empty;
-    box.textContent = "";
-    for (const m of state.messages) {
-      const wrap = document.createElement("div");
-      wrap.className = "msg";
-      if (m.role === "user") {
-        const u = document.createElement("div");
-        u.className = "msg-user";
-        const b = document.createElement("div");
-        b.textContent = m.content;
-        u.appendChild(b);
-        wrap.appendChild(u);
-      } else {
-        const bot = document.createElement("div");
-        bot.className = "msg-bot";
-        for (const p of parseParts(m)) {
-          if (p.kind === "think") {
-            const d = document.createElement("div");
-            d.className = "part-think";
-            d.innerHTML = '<span class="label"></span><div class="body"></div>';
-            d.querySelector(".label").textContent = "Reasoning · " + EFFORT_LABEL[P.effort];
-            d.querySelector(".body").textContent = p.text;
-            bot.appendChild(d);
-          } else if (p.kind === "code") {
-            const d = document.createElement("div");
-            d.className = "part-code";
-            const h = document.createElement("div");
-            h.className = "head";
-            h.innerHTML = "<span></span><span></span>";
-            h.children[0].textContent = p.lang;
-            h.children[1].textContent = state.model || "";
-            const pre = document.createElement("pre");
-            pre.textContent = p.text;
-            d.appendChild(h); d.appendChild(pre);
-            bot.appendChild(d);
-          } else {
-            const d = document.createElement("div");
-            d.className = "part-text";
-            d.textContent = p.text;
-            bot.appendChild(d);
-          }
-        }
-        if (m.error) {
-          const e = document.createElement("div");
-          e.className = "msg-err";
-          e.textContent = m.error;
-          bot.appendChild(e);
-        }
-        if (m.meta) {
-          const mt = document.createElement("div");
-          mt.className = "msg-meta mono";
-          mt.textContent = m.meta;
-          bot.appendChild(mt);
-        }
-        wrap.appendChild(bot);
-      }
-      box.appendChild(wrap);
+    if (lastOnly && box.lastElementChild && state.messages.length &&
+        box.childElementCount === state.messages.length) {
+      box.replaceChild(buildMessageNode(state.messages[state.messages.length - 1]),
+                       box.lastElementChild);
+    } else {
+      box.textContent = "";
+      for (const m of state.messages) box.appendChild(buildMessageNode(m));
     }
-    $("transcript").scrollTop = $("transcript").scrollHeight;
+    if (pin) tr.scrollTop = tr.scrollHeight;
   }
 
   /* ---------------- chat ---------------- */
@@ -202,7 +230,10 @@
   async function send(text) {
     if (!text || !text.trim() || state.streaming || !state.model) return;
     const user = { role: "user", content: text.trim() };
-    const bot = { role: "bot", content: "", reasoning: "", meta: "" };
+    // model + effort stamped now: the transcript renders provenance, not
+    // whatever the controls happen to say later
+    const bot = { role: "bot", content: "", reasoning: "", meta: "",
+                  model: state.model, effort: P.effort };
     state.messages.push(user, bot);
     state.streaming = true;
     $("send-btn").classList.add("stop");
@@ -211,7 +242,8 @@
     const msgs = [];
     if (P.sys.trim()) msgs.push({ role: "system", content: P.sys.trim() });
     for (const m of state.messages.slice(0, -1)) {
-      msgs.push({ role: m.role === "bot" ? "assistant" : "user", content: m.content });
+      msgs.push({ role: m.role === "bot" ? "assistant" : "user",
+                  content: m.role === "bot" ? stripThink(m.content) : m.content });
     }
     const body = {
       model: state.model, messages: msgs,
@@ -229,7 +261,7 @@
     state.abort = ctl;
 
     let raf = 0;
-    const paint = () => { raf = 0; renderMessages(); };
+    const paint = () => { raf = 0; renderMessages(true); };
     const queue = () => { if (!raf) raf = requestAnimationFrame(paint); };
 
     try {
@@ -271,16 +303,21 @@
       if (e.name !== "AbortError") bot.error = "upstream error: " + e.message;
     }
 
-    const toks = (usage && usage.completion_tokens) || chunks;
+    // Chunk count is not a token count (speculative decoding packs several
+    // tokens per delta). Without server usage, mark everything estimated —
+    // on screen with "~", in the ledger with a flag the medians exclude.
+    const exact = !!(usage && usage.completion_tokens);
+    const toks = exact ? usage.completion_tokens : chunks;
+    const approx = exact ? "" : "~";
     const ttft = tFirst ? ((tFirst - t0) / 1000) : null;
     let decode = null;
     if (tFirst && tLast && tLast > tFirst && toks > 1) {
       decode = (toks - 1) / ((tLast - tFirst) / 1000);
     }
     bot.meta = [
-      state.model,
-      toks + " tok",
-      decode ? decode.toFixed(1) + " tok/s" : null,
+      bot.model,
+      approx + toks + " tok",
+      decode ? approx + decode.toFixed(1) + " tok/s" : null,
       ttft !== null ? "ttft " + Math.round(ttft * 1000) + " ms" : null,
     ].filter(Boolean).join("  ·  ");
     state.streaming = false;
@@ -291,10 +328,11 @@
     fetch("/api/usage-event", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: state.model,
+        model: bot.model,
         prompt_tokens: usage && usage.prompt_tokens,
         completion_tokens: toks,
         ttft_s: ttft, decode_tok_s: decode,
+        estimated: !exact,
       }),
     }).catch(() => {});
   }
@@ -327,7 +365,9 @@
         chars: toks,
         updated: Date.now(),
         messages: state.messages.map((m) => ({
-          role: m.role, content: m.content, reasoning: m.reasoning || "", meta: m.meta || "",
+          role: m.role, content: m.content, reasoning: m.reasoning || "",
+          meta: m.meta || "", model: m.model || "", effort: m.effort,
+          error: m.error || "",
         })),
       }),
     }).catch(() => {});
@@ -358,6 +398,13 @@
       r.onclick = () => {
         state.session = s.id;
         state.messages = (s.messages || []).map((m) => ({ ...m }));
+        // restore the session's model too — otherwise the next turn silently
+        // sends yesterday's conversation to whatever is selected today
+        if (s.model && state.models.includes(s.model)) {
+          state.model = s.model;
+          $("model-select").value = s.model;
+          servingLine();
+        }
         go("playground");
         renderMessages();
       };
@@ -451,12 +498,15 @@
       mini.querySelector(".bar>div").style.width = (util || 0) + "%";
       side.appendChild(mini);
 
+      // spec line comes from config.json (operator-declared) or is omitted —
+      // the console never invents hardware
+      const spec = (state.cfg.nodes.find((c) => c.name === n.name) || {}).spec || "";
       const card = document.createElement("div");
       card.className = "card";
       card.innerHTML =
         '<div style="display:flex;align-items:flex-start;gap:10px">' +
         '<div style="display:flex;flex-direction:column;gap:2px"><span class="mono" style="font-size:15px;font-weight:600"></span>' +
-        '<span style="font-size:11.5px;color:var(--faint)">GB10 Grace Blackwell · 128 GB unified</span></div>' +
+        (spec ? '<span class="spec" style="font-size:11.5px;color:var(--faint)"></span>' : '') +
         '<div style="flex:1"></div><span class="pill"><span class="d"></span>reporting</span></div>' +
         '<div style="display:flex;flex-direction:column;gap:6px">' +
         '<div style="display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:var(--muted)">GPU utilization</span>' +
@@ -471,13 +521,15 @@
         '<div><span class="kv-label">CPU</span><span class="v"></span></div>' +
         '<div><span class="kv-label">Uptime</span><span class="v"></span></div></div>';
       card.querySelector(".mono").textContent = n.name;
+      if (spec) card.querySelector(".spec").textContent = spec;
       card.querySelectorAll(".mono")[1].textContent = util != null ? util + "%" : "—";
       card.querySelector("polyline").setAttribute("points", sparkline(state.hist[n.name]));
       const memLine = card.querySelectorAll(".mono")[2];
-      memLine.textContent = n.mem_used_gb != null
-        ? n.mem_used_gb + " / " + (n.mem_total_gb || 128) + " GB" : "—";
+      memLine.textContent = (n.mem_used_gb != null && n.mem_total_gb)
+        ? n.mem_used_gb + " / " + n.mem_total_gb + " GB" : "—";
       card.querySelector(".bar5>div").style.width =
-        n.mem_used_gb != null ? (n.mem_used_gb / (n.mem_total_gb || 128)) * 100 + "%" : "0";
+        (n.mem_used_gb != null && n.mem_total_gb)
+          ? (n.mem_used_gb / n.mem_total_gb) * 100 + "%" : "0";
       const vs = card.querySelectorAll(".stat-grid .v");
       vs[0].textContent = n.temp != null ? Math.round(n.temp) + "°C" : "—";
       vs[1].textContent = n.power != null ? Math.round(n.power) + " W" : "—";
@@ -566,6 +618,7 @@
     $("who-host").textContent = state.cfg.identity.host || "";
     $("avatar").textContent = (state.cfg.identity.user || "B")[0].toUpperCase();
     $("code-endpoint").textContent = state.cfg.upstream;
+    if (state.cfg.nodes.length) $("cluster-sub").textContent = state.cfg.nodes.length + " nodes configured";
     await loadModels();
     pollTelemetry();
     setInterval(pollTelemetry, 5000);
