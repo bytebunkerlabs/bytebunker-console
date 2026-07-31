@@ -84,10 +84,17 @@ class MCPServer:
 
     # ---- lifecycle ----
     def start(self):
-        cmd = [self.spec["command"]] + list(self.spec.get("args", []))
         import os
+        import shutil
         env = dict(os.environ)
+        # launchd hands us a minimal PATH, so `npx`/`uvx` are invisible even
+        # when installed. Search the usual install roots before giving up.
+        env["PATH"] = env.get("PATH", "") + ":" + ":".join([
+            "/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"),
+        ])
         env.update(self.spec.get("env") or {})
+        exe = shutil.which(self.spec["command"], path=env["PATH"]) or self.spec["command"]
+        cmd = [exe] + list(self.spec.get("args", []))
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env,
