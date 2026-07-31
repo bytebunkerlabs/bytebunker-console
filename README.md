@@ -1,5 +1,7 @@
 # ByteBunker Console
 
+**[Interactive demo →](https://claude.ai/code/artifact/329d8db0-1193-4c67-beb9-9c707527a4fe)** — the real interface replaying a real session: streaming replies, a tool call, both nodes' utilization moving together.
+
 The console for the rack — implemented from the "ByteBunker Console" Claude Design
 project. One stdlib-Python server (3.9+, zero dependencies — chatserve's successor),
 one vanilla-JS page. Nothing leaves the rack.
@@ -36,6 +38,9 @@ Servers can also be declared by hand in `config.json`:
 Tools appear as `<server>__<tool>` so two servers can share a tool name.
 Toggle them per-conversation in the params panel; each call renders inline
 with its arguments and result.
+
+See [ROADMAP.md](ROADMAP.md) for what's next (agents, schedules) and what is
+deliberately still an empty state.
 
 **Trust:** an MCP server is a local process with whatever access its arguments
 grant. The filesystem server can write anywhere under the roots you pass it —

@@ -442,10 +442,25 @@
   document.querySelectorAll("[data-chip]").forEach((b) => (b.onclick = () => send(b.dataset.chip)));
 
   /* ---------------- sessions ---------------- */
+  // Without this, state.session is set once and never cleared, so every later
+  // conversation appends to the first one forever. A "new chat" is simply:
+  // drop the transcript and forget the id, so the next save mints a fresh one.
+  function newChat() {
+    if (state.streaming && state.abort) state.abort.abort();
+    state.messages = [];
+    state.session = null;
+    state.ctxUsed = null;
+    go("playground");
+    servingLine();
+    renderMessages();
+    const el = $("input");
+    if (el) el.focus();
+  }
+
   function saveSession() {
     if (!state.messages.length) return;
     if (!state.session) state.session = "s-" + Date.now().toString(36);
-    const first = state.messages.find((m) => m.role === "user");
+    const first = state.messages.find((m) => m.role === "user" && (m.content || "").trim());
     const toks = state.messages.reduce((a, m) => a + (m.content || "").length, 0);
     fetch("/api/sessions", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -466,12 +481,22 @@
     }).catch(() => {});
   }
 
+  function relTime(ms) {
+    if (!ms) return "";
+    const d = (Date.now() - ms) / 1000;
+    if (d < 60) return "just now";
+    if (d < 3600) return Math.floor(d / 60) + " min ago";
+    if (d < 86400) return Math.floor(d / 3600) + " h ago";
+    if (d < 604800) return Math.floor(d / 86400) + " d ago";
+    return new Date(ms).toLocaleDateString();
+  }
+
   async function renderSessions() {
     const box = $("sessions-box");
     let list = [];
     try { list = await (await fetch("/api/sessions")).json(); } catch (e) {}
     if (!list.length) {
-      box.innerHTML = '<div class="empty-state"><b>No sessions yet</b><span>Conversations save here automatically, on this host only.</span></div>';
+      box.innerHTML = '<div class="empty-state"><b>No sessions yet</b><span>Conversations save here automatically, on this host only. Start one from the Playground.</span></div>';
       return;
     }
     box.textContent = "";
@@ -480,19 +505,25 @@
     t.innerHTML = '<div class="trow head"><span>Session</span><span>Model</span><span>Turns</span><span>Chars</span><span>Last active</span></div>';
     for (const s of list) {
       const r = document.createElement("div");
-      r.className = "trow";
-      const when = new Date(s.updated || 0);
-      r.innerHTML = '<span class="t"></span><span class="m mono"></span><span class="m mono"></span><span class="m mono"></span><span class="w"></span>';
+      r.className = "trow" + (s.id === state.session ? " active" : "");
+      r.innerHTML = '<span class="t"></span><span class="m mono"></span><span class="m mono"></span><span class="m mono"></span>' +
+                    '<span class="w"><span class="when"></span><button class="del" title="Delete">\u2715</button></span>';
       r.children[0].textContent = s.title || "untitled";
       r.children[1].textContent = s.model || "";
       r.children[2].textContent = s.turns || 0;
       r.children[3].textContent = (s.chars || 0).toLocaleString();
-      r.children[4].textContent = when.toLocaleString();
+      r.querySelector(".when").textContent = relTime(s.updated || 0);
+      r.querySelector(".del").onclick = async (ev) => {
+        ev.stopPropagation();
+        if (!confirm("Delete this session?")) return;
+        await fetch("/api/sessions?id=" + encodeURIComponent(s.id), { method: "DELETE" })
+          .catch(() => {});
+        if (s.id === state.session) newChat();
+        renderSessions();
+      };
       r.onclick = () => {
         state.session = s.id;
         state.messages = (s.messages || []).map((m) => ({ ...m }));
-        // restore the session's model too — otherwise the next turn silently
-        // sends yesterday's conversation to whatever is selected today
         if (s.model && state.models.includes(s.model)) {
           state.model = s.model;
           $("model-select").value = s.model;
@@ -775,6 +806,15 @@
       box.innerHTML += '<div class="empty-state"><b>Nothing logged yet</b><span>Every completion through the Playground lands in this ledger.</span></div>';
     }
   }
+
+  $("new-chat").onclick = newChat;
+  $("new-chat-2").onclick = newChat;
+  document.addEventListener("keydown", (e) => {
+    // cmd/ctrl-shift-O: new chat, the convention every chat app shares
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
+      e.preventDefault(); newChat();
+    }
+  });
 
   /* ---------------- MCP form ---------------- */
   $("mcp-add-btn").onclick = () => {

@@ -18,6 +18,8 @@
       <div class="brand-name"><b>ByteBunker</b><small>Labs · local</small></div>
     </div>
 
+    <button class="new-chat" id="new-chat"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>New chat</button>
+
     <nav class="nav">
       <button data-nav="playground"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><rect x="2" y="3" width="12" height="9" rx="2"/><path d="M5.5 14.2h5"/></svg><span>Playground</span></button>
       <button data-nav="sessions"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 6.4h6M5 9.4h3.6"/></svg><span>Sessions</span></button>
@@ -83,7 +85,9 @@
 
     <!-- Sessions -->
     <section class="screen" id="screen-sessions">
-      <header><h1>Sessions</h1><span class="sub">Stored on this host, never off it</span></header>
+      <header><h1>Sessions</h1><span class="sub">Stored on this host, never off it</span><div class="grow"></div>
+        <button class="ghost-btn" id="new-chat-2"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>New chat</button>
+      </header>
       <div class="scroll"><div id="sessions-box"></div></div>
     </section>
 
