@@ -1,0 +1,18 @@
+{
+  "bind": "127.0.0.1",
+  "port": 8765,
+
+  "upstream_url": "http://127.0.0.1:4000/v1",
+  "upstream_key": "bb-local",
+
+  "prometheus_url": "",
+
+  "nodes": [
+    { "name": "spark-1", "instance": "spark-1" },
+    { "name": "spark-2", "instance": "spark-2" }
+  ],
+
+  "identity": { "user": "mo@bunker", "host": "tailnet" },
+
+  "frontier_rates_per_mtok": { "input": 3.0, "output": 15.0 }
+}
