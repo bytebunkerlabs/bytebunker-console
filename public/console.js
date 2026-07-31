@@ -12,7 +12,7 @@
     cfg: { nodes: [], identity: {}, upstream: "", telemetry: false },
     models: [],
     model: null,
-    params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 4096,
+    params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 8192,
               seed: 0, effort: 4, json: false, stops: "", sys: "" },
     messages: [],           // {role:'user'|'bot', content, reasoning, meta, error}
     streaming: false,
@@ -256,7 +256,7 @@
     if (P.effort !== 4) body.reasoning_effort = EFFORT[P.effort];
 
     const t0 = performance.now();
-    let tFirst = null, tLast = null, usage = null, chunks = 0;
+    let tFirst = null, tLast = null, usage = null, chunks = 0, finishReason = null;
     const ctl = new AbortController();
     state.abort = ctl;
 
@@ -286,14 +286,17 @@
           let obj;
           try { obj = JSON.parse(payload); } catch (e) { continue; }
           if (obj.usage) usage = obj.usage;
-          const delta = obj.choices && obj.choices[0] && obj.choices[0].delta;
+          const c0 = obj.choices && obj.choices[0];
+          if (c0 && c0.finish_reason) finishReason = c0.finish_reason;
+          const delta = c0 && c0.delta;
           if (!delta) continue;
-          const got = (delta.content || "") + (delta.reasoning_content || "");
+          const got = (delta.content || "") + (delta.reasoning_content || "") + (delta.reasoning || "");
           if (got) {
             const now = performance.now();
             if (tFirst === null) tFirst = now;
             tLast = now; chunks++;
             if (delta.reasoning_content) bot.reasoning += delta.reasoning_content;
+            if (delta.reasoning) bot.reasoning += delta.reasoning;
             if (delta.content) bot.content += delta.content;
             queue();
           }
@@ -314,12 +317,17 @@
     if (tFirst && tLast && tLast > tFirst && toks > 1) {
       decode = (toks - 1) / ((tLast - tFirst) / 1000);
     }
+    const rtok = usage && usage.completion_tokens_details &&
+                 usage.completion_tokens_details.reasoning_tokens;
     bot.meta = [
       bot.model,
-      approx + toks + " tok",
+      approx + toks + " tok" + (rtok ? " (" + rtok + " thinking)" : ""),
       decode ? approx + decode.toFixed(1) + " tok/s" : null,
       ttft !== null ? "ttft " + Math.round(ttft * 1000) + " ms" : null,
-    ].filter(Boolean).join("  ·  ");
+      finishReason === "length"
+        ? "\u26a0 stopped at Max tokens \u2014 thinking shares the budget; raise it in the panel"
+        : null,
+    ].filter(Boolean).join("  \u00b7  ");
     state.streaming = false;
     state.abort = null;
     $("send-btn").classList.remove("stop");
