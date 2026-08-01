@@ -313,25 +313,64 @@
     }, 500);
 
     try {
+    // Never request more output than the window has room for: vLLM rejects
+    // prompt + max_tokens > ctx outright instead of trimming, so a big Max
+    // tokens dial turns a long tool conversation into a 400. Estimate the
+    // prompt (~3.2 chars/token is conservative for English + code + JSON)
+    // and clamp per hop — the prompt grows every time a tool result lands.
+    const tcaps = capsFor(bot.model || state.model);
+    const ctxWin = tcaps.ctx || 131072;
+    const estPrompt = Math.ceil(JSON.stringify(msgs).length / 3.2);
+    const room = ctxWin - estPrompt - 512;
+    if (room < 256) {
+      throw new Error("context is full: the prompt is ~" + estPrompt.toLocaleString() +
+        " tokens of a " + ctxWin.toLocaleString() + "-token window. Start a New chat," +
+        " or trim history / tool output.");
+    }
+    const body1 = Object.assign({}, body0, { messages: msgs });
+    if (body1.max_tokens && body1.max_tokens > room) {
+      body1.max_tokens = room;
+      bot.notice = "Max tokens clamped to " + room.toLocaleString() + " for this hop — " +
+        "the prompt already uses ~" + estPrompt.toLocaleString() + " of " +
+        ctxWin.toLocaleString() + " context tokens.";
+    }
     const post = (b) => fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(b), signal: ctl.signal,
     });
-    let r = await post(Object.assign({}, body0, { messages: msgs }));
+    let r = await post(body1);
     if (!r.ok) {
       const err = (await r.text()).slice(0, 800);
-      // A server started without --enable-auto-tool-choice rejects the whole
-      // request. That is a served-with-the-wrong-flags problem, not a crash, so
-      // say it in a sentence and answer without tools rather than dumping JSON.
-      const noTools = body0.tools &&
-        /enable-auto-tool-choice|tool-call-parser|tool choice/i.test(err);
-      if (!noTools) throw new Error(err.slice(0, 400));
-      const retry = Object.assign({}, body0, { messages: msgs });
-      delete retry.tools; delete retry.tool_choice;
-      bot.notice = "This model is not served with tool support " +
-        "(needs --enable-auto-tool-choice and --tool-call-parser). Answered without tools.";
-      r = await post(retry);
-      if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+      // Context overflow: our char-based estimate lost to the real tokenizer.
+      // The error names the exact numbers, so redo the arithmetic with those
+      // and retry once — precisely, instead of estimating harder.
+      const ctxErr = /maximum context length is (\d+).*?prompt contains at least (\d+) input tokens/s.exec(err);
+      if (ctxErr) {
+        const exactRoom = parseInt(ctxErr[1], 10) - parseInt(ctxErr[2], 10) - 64;
+        if (exactRoom < 128) {
+          throw new Error("context is full: the prompt is " + (+ctxErr[2]).toLocaleString() +
+            " tokens of a " + (+ctxErr[1]).toLocaleString() + "-token window. Start a New chat.");
+        }
+        body1.max_tokens = exactRoom;
+        bot.notice = "Max tokens clamped to " + exactRoom.toLocaleString() +
+          " — the prompt uses " + (+ctxErr[2]).toLocaleString() + " of " +
+          (+ctxErr[1]).toLocaleString() + " context tokens.";
+        r = await post(body1);
+        if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+      } else {
+        // A server started without --enable-auto-tool-choice rejects the whole
+        // request. That is a served-with-the-wrong-flags problem, not a crash, so
+        // say it in a sentence and answer without tools rather than dumping JSON.
+        const noTools = body0.tools &&
+          /enable-auto-tool-choice|tool-call-parser|tool choice/i.test(err);
+        if (!noTools) throw new Error(err.slice(0, 400));
+        const retry = Object.assign({}, body1);
+        delete retry.tools; delete retry.tool_choice;
+        bot.notice = "This model is not served with tool support " +
+          "(needs --enable-auto-tool-choice and --tool-call-parser). Answered without tools.";
+        r = await post(retry);
+        if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+      }
     }
     phase = "stream";
     const reader = r.body.getReader();
@@ -406,10 +445,13 @@
       if (m.role === "bot") {
         // Most reasoning models want prior thinking dropped. DeepSeek-V4 is the
         // exception once tools are in play: it 400s when reasoning_content is
-        // missing from history. The manifest decides; this used to always strip.
+        // missing from a tool exchange. Without tool calls its docs allow
+        // dropping prior reasoning — so only turns that called tools carry it,
+        // which keeps long chats from silently spending context on old thinking.
         const e = { role: "assistant",
                     content: caps.strip_reasoning ? stripThink(m.content) : m.content };
-        if (!caps.strip_reasoning && m.reasoning) e.reasoning_content = m.reasoning;
+        if (!caps.strip_reasoning && m.reasoning && m.tool_calls)
+          e.reasoning_content = m.reasoning;
         if (m.tool_calls) e.tool_calls = m.tool_calls;
         msgs.push(e);
         for (const t of (m.toolResults || [])) {
@@ -441,11 +483,17 @@
     }
 
     let usage = null, finishReason = null, ttft = null, span = null, chunks = 0;
+    let totToks = 0, totRToks = 0;   // summed across hops — last-hop usage alone lies
     const MAX_HOPS = 8;   // a tool loop must terminate even if the model won't
     try {
       for (let hop = 0; hop < MAX_HOPS; hop++) {
+        const rLen = bot.reasoning.length;
         const r = await streamTurn(msgs, bot, body);
         usage = r.usage || usage;
+        if (r.usage) {
+          totToks += r.usage.completion_tokens || 0;
+          totRToks += (r.usage.completion_tokens_details || {}).reasoning_tokens || 0;
+        }
         finishReason = r.finishReason;
         chunks += r.chunks;
         if (ttft === null) ttft = r.ttft;
@@ -458,7 +506,13 @@
           function: { name: c.name, arguments: c.args || "{}" },
         }));
         bot.toolResults = bot.toolResults || [];
-        msgs.push({ role: "assistant", content: bot.content || "", tool_calls: bot.tool_calls });
+        const hopMsg = { role: "assistant", content: bot.content || "", tool_calls: bot.tool_calls };
+        // DeepSeek's rule: the thinking that produced a tool call must ride
+        // along on the next hop of THIS exchange. Most models must never see
+        // prior thinking again — the manifest decides.
+        if (!capsFor(state.model).strip_reasoning && bot.reasoning.length > rLen)
+          hopMsg.reasoning_content = bot.reasoning.slice(rLen);
+        msgs.push(hopMsg);
         for (const c of r.calls) {
           let args = {};
           try { args = JSON.parse(c.args || "{}"); } catch (e) {}
@@ -484,12 +538,12 @@
       if (e.name !== "AbortError") bot.error = "upstream error: " + e.message;
     }
 
-    const exact = !!(usage && usage.completion_tokens);
-    const toks = exact ? usage.completion_tokens : chunks;
+    const exact = totToks > 0;
+    const toks = exact ? totToks : chunks;
     const approx = exact ? "" : "~";
     const decode = (span && toks > 1) ? (toks - 1) / span : null;
-    const rtok = usage && usage.completion_tokens_details &&
-                 usage.completion_tokens_details.reasoning_tokens;
+    const rtok = totRToks || (usage && usage.completion_tokens_details &&
+                 usage.completion_tokens_details.reasoning_tokens);
     bot.meta = [
       bot.model,
       approx + toks + " tok" + (rtok ? " (" + rtok + " thinking)" : ""),
