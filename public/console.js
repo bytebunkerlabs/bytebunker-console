@@ -6,6 +6,11 @@
   const $ = (id) => document.getElementById(id);
   const EFFORT = ["none", "minimal", "low", "medium", "high", "xhigh"];
   const EFFORT_LABEL = ["None", "Min", "Low", "Medium", "High", "XHigh"];
+  // Seconds before the heartbeat stops saying "working" and starts saying
+  // "this is longer than normal". Prefill is generous: a 100k-token prompt on
+  // a two-node rack legitimately takes tens of seconds before the first token.
+  const STALL_PREFILL = 45;
+  const STALL_STREAM = 10;   // mid-stream gaps this long are not normal decode
 
   const state = {
     screen: "playground",
@@ -200,6 +205,16 @@
       e.textContent = m.error;
       bot.appendChild(e);
     }
+    // Live status while a turn is in flight. Without this an empty bubble is
+    // indistinguishable from a dead connection — prefill on a long prompt
+    // emits no deltas for many seconds, so nothing would repaint at all.
+    if (m.status) {
+      const s = document.createElement("div");
+      s.className = "msg-status" + (m.status.slow ? " slow" : "");
+      s.innerHTML = '<span class="dot"></span><span class="txt"></span>';
+      s.querySelector(".txt").textContent = m.status.text;
+      bot.appendChild(s);
+    }
     if (m.meta) {
       const mt = document.createElement("div");
       mt.className = "msg-meta mono";
@@ -256,11 +271,39 @@
     let raf = 0;
     const queue = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; renderMessages(true); }); };
 
+    // A heartbeat, not a spinner. It reports which phase the turn is actually
+    // in and how long it has been there, so "the model is thinking" and "the
+    // connection died" stop looking the same. Driven by a timer because the
+    // interesting case is precisely when no data is arriving.
+    let phase = "connect", shown = "";
+    const beat = setInterval(() => {
+      const el = (performance.now() - t0) / 1000;
+      let text, slow = false;
+      if (phase === "connect") {
+        text = "connecting to " + (bot.model || "model") + "…";
+        slow = el > 15;
+      } else if (tFirst === null) {
+        // prefill: no deltas by definition. Long prompts legitimately sit here.
+        text = "prefilling · " + el.toFixed(1) + "s";
+        if (el > STALL_PREFILL) { slow = true; text += " — no first token yet; Stop to cancel"; }
+      } else {
+        const gap = (performance.now() - tLast) / 1000;
+        if (gap < STALL_STREAM) { text = ""; }
+        else { slow = true; text = "no tokens for " + gap.toFixed(0) + "s — stream may have stalled"; }
+      }
+      if (text === shown) return;          // don't fight the rAF renderer
+      shown = text;
+      bot.status = text ? { text, slow } : null;
+      renderMessages(true);
+    }, 500);
+
+    try {
     const r = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(Object.assign({}, body0, { messages: msgs })), signal: ctl.signal,
     });
     if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+    phase = "stream";
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -305,6 +348,12 @@
     return { calls: calls.filter(Boolean), usage, finishReason, chunks,
              ttft: tFirst ? (tFirst - t0) / 1000 : null,
              span: (tFirst && tLast && tLast > tFirst) ? (tLast - tFirst) / 1000 : null };
+    } finally {
+      // must clear on every exit — success, upstream error, or user Stop —
+      // or a dead heartbeat keeps repainting a finished message
+      clearInterval(beat);
+      bot.status = null;
+    }
   }
 
   async function send(text) {

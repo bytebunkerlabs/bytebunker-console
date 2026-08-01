@@ -109,6 +109,11 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .part-code .head{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid var(--border);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:500}
 .part-code pre{margin:0;padding:13px 14px;overflow-x:auto;font-size:12.5px;line-height:1.65;white-space:pre;font-family:'Geist Mono',ui-monospace,Menlo,monospace}
 .msg-meta{display:flex;align-items:center;gap:14px;font-size:11.5px;color:var(--faint)}
+.msg-status{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--faint);padding:2px 0}
+.msg-status .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none;animation:pulse 1.2s ease-in-out infinite}
+.msg-status.slow{color:var(--warn,#b7791f)}
+@keyframes pulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){.msg-status .dot{animation:none;opacity:.7}}
 .msg-err{color:var(--err);font-size:13px;white-space:pre-wrap}
 .composer-wrap{flex:0 0 auto;padding:10px 24px 16px}
 .composer{max-width:768px;margin:0 auto;width:100%;display:flex;flex-direction:column;gap:8px}
