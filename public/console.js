@@ -145,6 +145,15 @@
     return (s || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
   }
 
+  // Capabilities published by the server for the selected model. The fallback
+  // is deliberately conservative-but-working: assume tools are fine, assume no
+  // effort dial, assume prior thinking should be stripped.
+  const CAPS_FALLBACK = { tools: true, effort: [], ctk: {}, strip_reasoning: true,
+                          ctx: 131072 };
+  function capsFor(id) {
+    return (state.caps && state.caps[id]) || CAPS_FALLBACK;
+  }
+
   function buildMessageNode(m) {
     const wrap = document.createElement("div");
     wrap.className = "msg";
@@ -198,6 +207,12 @@
       d.querySelector(".targs").textContent = t.args;
       d.querySelector(".tres").textContent = String(t.result).slice(0, 4000);
       bot.appendChild(d);
+    }
+    if (m.notice) {
+      const n = document.createElement("div");
+      n.className = "msg-note";
+      n.textContent = m.notice;
+      bot.appendChild(n);
     }
     if (m.error) {
       const e = document.createElement("div");
@@ -298,11 +313,26 @@
     }, 500);
 
     try {
-    const r = await fetch("/api/chat", {
+    const post = (b) => fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(Object.assign({}, body0, { messages: msgs })), signal: ctl.signal,
+      body: JSON.stringify(b), signal: ctl.signal,
     });
-    if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+    let r = await post(Object.assign({}, body0, { messages: msgs }));
+    if (!r.ok) {
+      const err = (await r.text()).slice(0, 800);
+      // A server started without --enable-auto-tool-choice rejects the whole
+      // request. That is a served-with-the-wrong-flags problem, not a crash, so
+      // say it in a sentence and answer without tools rather than dumping JSON.
+      const noTools = body0.tools &&
+        /enable-auto-tool-choice|tool-call-parser|tool choice/i.test(err);
+      if (!noTools) throw new Error(err.slice(0, 400));
+      const retry = Object.assign({}, body0, { messages: msgs });
+      delete retry.tools; delete retry.tool_choice;
+      bot.notice = "This model is not served with tool support " +
+        "(needs --enable-auto-tool-choice and --tool-call-parser). Answered without tools.";
+      r = await post(retry);
+      if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+    }
     phase = "stream";
     const reader = r.body.getReader();
     const dec = new TextDecoder();
@@ -368,11 +398,18 @@
     $("send-btn").classList.add("stop");
     renderMessages();
 
+    const caps = capsFor(state.model);
+
     const msgs = [];
     if (P.sys.trim()) msgs.push({ role: "system", content: P.sys.trim() });
     for (const m of state.messages.slice(0, -1)) {
       if (m.role === "bot") {
-        const e = { role: "assistant", content: stripThink(m.content) };
+        // Most reasoning models want prior thinking dropped. DeepSeek-V4 is the
+        // exception once tools are in play: it 400s when reasoning_content is
+        // missing from history. The manifest decides; this used to always strip.
+        const e = { role: "assistant",
+                    content: caps.strip_reasoning ? stripThink(m.content) : m.content };
+        if (!caps.strip_reasoning && m.reasoning) e.reasoning_content = m.reasoning;
         if (m.tool_calls) e.tool_calls = m.tool_calls;
         msgs.push(e);
         for (const t of (m.toolResults || [])) {
@@ -391,8 +428,14 @@
     if (P.seed) body.seed = P.seed;
     if (P.json) body.response_format = { type: "json_object" };
     if (P.stops.trim()) body.stop = P.stops.split(",").map((s) => s.trim()).filter(Boolean);
-    if (P.effort !== 4) body.reasoning_effort = EFFORT[P.effort];
-    if (state.toolsOn && state.tools.length) {
+    // Only send an effort the model actually accepts. DeepSeek's encoder
+    // asserts on the value, so "low" is a 500, not a no-op.
+    const eff = EFFORT[P.effort];
+    if (P.effort !== 4 && (caps.effort || []).includes(eff)) body.reasoning_effort = eff;
+    // Thinking is off by default on vLLM's DeepSeek-V4 path and must be asked
+    // for; other models ignore an empty object.
+    if (caps.ctk && Object.keys(caps.ctk).length) body.chat_template_kwargs = caps.ctk;
+    if (caps.tools && state.toolsOn && state.tools.length) {
       body.tools = state.tools.map((t) => t.def);
       body.tool_choice = "auto";
     }
@@ -591,6 +634,10 @@
     let data = { data: [] };
     try { data = await (await fetch("/api/models")).json(); } catch (e) {}
     state.models = (data.data || []).map((m) => m.id);
+    // The server publishes what each model actually supports; without this the
+    // client guesses, and a wrong guess is a 400 that reads like a crash.
+    state.caps = {};
+    for (const m of (data.data || [])) if (m.caps) state.caps[m.id] = m.caps;
     const sel = $("model-select");
     sel.textContent = "";
     for (const id of state.models) {

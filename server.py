@@ -50,6 +50,48 @@ DEFAULT_CONFIG = {
 }
 
 
+# What each model can actually do. An OpenAI-compatible gateway normalises the
+# envelope, not the behaviour: two models behind the same LiteLLM will disagree
+# about whether tools are accepted, whether thinking is on by default, which
+# effort values are legal, and whether prior reasoning must be resent or
+# stripped. Guessing produces a 400 that reads like a crash, so the client asks
+# instead. Keys are matched as substrings of the model id, first match wins;
+# override or extend via "model_capabilities" in config.json.
+#
+#   tools           send the tools array at all
+#   effort          legal reasoning-effort values; [] hides the dial entirely
+#   ctk             merged into chat_template_kwargs on every request
+#   strip_reasoning drop prior <think> from resent history
+#   ctx             context window, for the meter's denominator
+CAPS_FALLBACK = {"tools": True, "effort": [], "ctk": {}, "strip_reasoning": True,
+                 "ctx": 131072}
+DEFAULT_CAPS = {
+    # vLLM defaults DeepSeek-V4 thinking OFF (DeepSeek's own API defaults it
+    # ON at high) — so it must be asked for explicitly. The encoder asserts
+    # reasoning_effort in ['max', 'high', None] and only 'max' changes the
+    # prompt, so 'low' is not merely useless, it raises.
+    # strip_reasoning is False because DeepSeek 400s if reasoning_content is
+    # missing from history once tool calls are in play.
+    "deepseek-v4": {"tools": True, "effort": ["max"], "strip_reasoning": False,
+                    "ctk": {"thinking": True, "reasoning_effort": "max"},
+                    "ctx": 131072},
+    "inkling": {"tools": True, "effort": ["none", "min", "low", "medium", "high", "xhigh"],
+                "strip_reasoning": True, "ctk": {}, "ctx": 262144},
+}
+
+
+def caps_for(model_id):
+    table = dict(DEFAULT_CAPS)
+    table.update(CFG.get("model_capabilities") or {})
+    mid = (model_id or "").lower()
+    for key, caps in table.items():
+        if key.lower() in mid:
+            merged = dict(CAPS_FALLBACK)
+            merged.update(caps)
+            return merged
+    return dict(CAPS_FALLBACK)
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
     path = os.path.join(ROOT, "config.json")
@@ -363,7 +405,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/models":
             try:
                 with urllib.request.urlopen(upstream_request("/models"), timeout=8) as r:
-                    self._json(json.load(r))
+                    body = json.load(r)
+                for m in body.get("data") or []:
+                    m["caps"] = caps_for(m.get("id"))
+                self._json(body)
             except Exception as e:
                 self._json({"error": str(e), "data": []}, 502)
         elif path == "/api/telemetry":
