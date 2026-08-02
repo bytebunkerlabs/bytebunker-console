@@ -432,7 +432,17 @@
         }
       }
     }
-    return { calls: calls.filter(Boolean), usage, finishReason, chunks,
+    // A call whose arguments don't parse is a stream that died mid-call (or a
+    // model that hit the token ceiling mid-JSON). Executing it is wrong and
+    // recording it poisons the session — the server json-parses arguments
+    // while rendering the prompt, so one unterminated string 400s every
+    // subsequent request. Quarantine instead of trusting.
+    const okCalls = [], brokenCalls = [];
+    for (const c of calls.filter(Boolean)) {
+      try { JSON.parse(c.args || "{}"); okCalls.push(c); }
+      catch (err) { brokenCalls.push(c); }
+    }
+    return { calls: okCalls, brokenCalls, usage, finishReason, chunks,
              ttft: tFirst ? (tFirst - t0) / 1000 : null,
              span: (tFirst && tLast && tLast > tFirst) ? (tLast - tFirst) / 1000 : null };
     } finally {
@@ -468,12 +478,22 @@
         // which keeps long chats from silently spending context on old thinking.
         const e = { role: "assistant",
                     content: caps.strip_reasoning ? stripThink(m.content) : m.content };
-        if (!caps.strip_reasoning && m.reasoning && m.tool_calls)
+        // Scrub broken tool calls on EVERY rebuild, not just at record time:
+        // a truncated call that slipped into a saved session would otherwise
+        // 400 every request forever — the server json-parses arguments while
+        // rendering the prompt, and history is resent whole each turn.
+        const okCalls = (m.tool_calls || []).filter((tc) => {
+          try { JSON.parse((tc.function && tc.function.arguments) || "{}"); return true; }
+          catch (err) { return false; }
+        });
+        if (okCalls.length) e.tool_calls = okCalls;
+        if (!caps.strip_reasoning && m.reasoning && e.tool_calls)
           e.reasoning_content = m.reasoning;
-        if (m.tool_calls) e.tool_calls = m.tool_calls;
-        msgs.push(e);
+        if (e.content || e.tool_calls || e.reasoning_content) msgs.push(e);
+        const okIds = new Set(okCalls.map((tc) => tc.id));
         for (const t of (m.toolResults || [])) {
-          msgs.push({ role: "tool", tool_call_id: t.id, content: t.content });
+          if (okIds.has(t.id))
+            msgs.push({ role: "tool", tool_call_id: t.id, content: t.content });
         }
       } else {
         msgs.push({ role: "user", content: m.content });
@@ -516,6 +536,14 @@
         chunks += r.chunks;
         if (ttft === null) ttft = r.ttft;
         if (r.span) span = (span || 0) + r.span;
+        if (r.brokenCalls && r.brokenCalls.length) {
+          const b = r.brokenCalls[0];
+          bot.notice = "Dropped a truncated tool call — " + (b.name || "unnamed") + " arrived with " +
+            (b.args || "").length.toLocaleString() + " chars of arguments and no closing brace. " +
+            (r.finishReason === "length"
+              ? "It hit the Max tokens ceiling: raise Max tokens and ask again."
+              : "The stream was cut mid-call: just ask again.");
+        }
         if (!r.calls.length) break;
 
         // record the assistant's tool_calls, then run them and feed results back
