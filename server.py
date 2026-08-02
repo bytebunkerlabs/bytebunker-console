@@ -67,15 +67,21 @@ CAPS_FALLBACK = {"tools": True, "effort": [], "ctk": {}, "strip_reasoning": True
                  "ctx": 131072}
 DEFAULT_CAPS = {
     # vLLM defaults DeepSeek-V4 thinking OFF (DeepSeek's own API defaults it
-    # ON at high) — so it must be asked for explicitly. The encoder asserts
-    # reasoning_effort in ['max', 'high', None] and only 'max' changes the
-    # prompt, so 'low' is not merely useless, it raises.
+    # ON at high) — so it must be asked for explicitly. The tokenizer wrapper
+    # coerces any unrecognized effort string ('low', 'medium', ...) to 'high',
+    # and only 'max' changes the prompt — so 'max' is the only value worth
+    # offering. (The encoder one layer down does assert on 'low', but the
+    # wrapper is its only caller, so the assert is unreachable via requests.)
     # strip_reasoning is False because DeepSeek 400s if reasoning_content is
-    # missing from history once tool calls are in play.
+    # missing from a tool exchange.
     "deepseek-v4": {"tools": True, "effort": ["max"], "strip_reasoning": False,
                     "ctk": {"thinking": True, "reasoning_effort": "max"},
                     "ctx": 131072},
-    "inkling": {"tools": True, "effort": ["none", "min", "low", "medium", "high", "xhigh"],
+    # Inkling's renderer accepts none/minimal/low/medium/high/xhigh/max —
+    # 'minimal', not 'min': an unknown name resolves to None and the template
+    # falls back to its 0.9 default, i.e. the dial silently stops working.
+    "inkling": {"tools": True,
+                "effort": ["none", "minimal", "low", "medium", "high", "xhigh"],
                 "strip_reasoning": True, "ctk": {}, "ctx": 262144},
 }
 
