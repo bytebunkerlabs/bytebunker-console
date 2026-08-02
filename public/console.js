@@ -290,7 +290,7 @@
     // in and how long it has been there, so "the model is thinking" and "the
     // connection died" stop looking the same. Driven by a timer because the
     // interesting case is precisely when no data is arriving.
-    let phase = "connect", shown = "";
+    let phase = "connect", shown = "", lastKind = "text", toolChars = 0, toolName = "";
     const beat = setInterval(() => {
       const el = (performance.now() - t0) / 1000;
       let text, slow = false;
@@ -303,8 +303,15 @@
         if (el > STALL_PREFILL) { slow = true; text += " — no first token yet; Stop to cancel"; }
       } else {
         const gap = (performance.now() - tLast) / 1000;
-        if (gap < STALL_STREAM) { text = ""; }
-        else { slow = true; text = "no tokens for " + gap.toFixed(0) + "s — stream may have stalled"; }
+        if (gap >= STALL_STREAM) {
+          slow = true; text = "no tokens for " + gap.toFixed(0) + "s — stream may have stalled";
+        } else if (lastKind === "tool") {
+          // args stream invisibly — narrate the work or it looks like a hang
+          text = "writing a tool call" + (toolName ? " · " + toolName : "") +
+                 " · " + toolChars.toLocaleString() + " chars of arguments";
+        } else {
+          text = "";   // visible tokens are their own feedback
+        }
       }
       if (text === shown) return;          // don't fight the rAF renderer
       shown = text;
@@ -402,11 +409,22 @@
           if (tc.function && tc.function.name) calls[i].name += tc.function.name;
           if (tc.function && tc.function.arguments) calls[i].args += tc.function.arguments;
         }
+        if (delta.tool_calls && delta.tool_calls.length) {
+          // Argument fragments ARE tokens — a model writing a whole file into
+          // a tool call streams here for minutes with zero visible content.
+          // Without this the heartbeat reads that as a stall and says so.
+          const now = performance.now();
+          if (tFirst === null) tFirst = now;
+          tLast = now;
+          lastKind = "tool";
+          toolChars = calls.reduce((n, c) => n + (c ? c.args.length : 0), 0);
+          toolName = (calls[calls.length - 1] || {}).name || toolName;
+        }
         const got = (delta.content || "") + (delta.reasoning_content || "") + (delta.reasoning || "");
         if (got) {
           const now = performance.now();
           if (tFirst === null) tFirst = now;
-          tLast = now; chunks++;
+          tLast = now; chunks++; lastKind = "text";
           if (delta.reasoning_content) bot.reasoning += delta.reasoning_content;
           if (delta.reasoning) bot.reasoning += delta.reasoning;
           if (delta.content) bot.content += delta.content;
