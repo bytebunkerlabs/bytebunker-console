@@ -76,7 +76,7 @@ DEFAULT_CAPS = {
     # missing from a tool exchange.
     "deepseek-v4": {"tools": True, "effort": ["max"], "strip_reasoning": False,
                     "ctk": {"thinking": True, "reasoning_effort": "max"},
-                    "ctx": 131072},
+                    "ctx": 1048576},   # native YaRN 1M; recipe serves full window
     # Inkling's renderer accepts none/minimal/low/medium/high/xhigh/max —
     # 'minimal', not 'min': an unknown name resolves to None and the template
     # falls back to its 0.9 default, i.e. the dial silently stops working.
@@ -290,10 +290,12 @@ def engine_stats():
         return {"ok": False}
     try:
         rate = _prom_query('sum(rate({__name__="vllm:generation_tokens_total"}[20s]))')
+        prompt = _prom_query('sum(rate({__name__="vllm:prompt_tokens_total"}[20s]))')
         running = _prom_query('sum({__name__="vllm:num_requests_running"})')
-        if rate is None and running is None:
+        if rate is None and prompt is None and running is None:
             return {"ok": False, "error": "prometheus has no vllm metrics"}
-        return {"ok": True, "rate": rate or 0.0, "running": -1 if running is None else running}
+        return {"ok": True, "rate": rate or 0.0, "prompt_rate": prompt or 0.0,
+                "running": -1 if running is None else running}
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
 

@@ -269,8 +269,12 @@
   function servingLine(txt) {
     let base = state.model ? `${state.model} · ${state.cfg.upstream}` : "no models at upstream";
     if (!txt && state.ctxUsed) {
-      const pct = Math.round(state.ctxUsed / 262144 * 100);
-      base += ` · ctx ${(state.ctxUsed / 1000).toFixed(1)}k / 262k (${pct}%)`;
+      // denominator from the manifest — a hardcoded window is wrong the
+      // moment the served model changes (262k Inkling vs 1M DeepSeek)
+      const win = capsFor(state.model).ctx || 131072;
+      const fmt = (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : Math.round(v / 1000) + "k";
+      const pct = Math.round(state.ctxUsed / win * 100);
+      base += ` · ctx ${fmt(state.ctxUsed)} / ${fmt(win)} (${pct}%)`;
     }
     $("serving-line").textContent = txt || base;
   }
@@ -309,9 +313,16 @@
         text = "connecting to " + (bot.model || "model") + "…";
         slow = el > 15;
       } else if (tFirst === null) {
-        // prefill: no deltas by definition. Long prompts legitimately sit here.
+        // prefill: no deltas by definition. Long prompts legitimately sit
+        // here — at a 1M window, for minutes — so past 20s ask the engine
+        // for its prompt-processing rate instead of assuming the worst.
         text = "prefilling · " + el.toFixed(1) + "s";
-        if (el > STALL_PREFILL) { slow = true; text += " — no first token yet; Stop to cancel"; }
+        if (el > 20 && engTick++ % 4 === 0) pollEngine();
+        if (eng && eng.prompt_rate > 50) {
+          text += " · engine chewing " + Math.round(eng.prompt_rate).toLocaleString() + " tok/s of prompt";
+        } else if (el > STALL_PREFILL) {
+          slow = true; text += " — no first token yet; Stop to cancel";
+        }
       } else {
         const gap = (performance.now() - tLast) / 1000;
         if (gap >= STALL_STREAM) {
