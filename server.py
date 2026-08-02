@@ -269,6 +269,35 @@ def prom_query(q):
 # Queries assume utkuozdemir/nvidia_gpu_exporter + node-exporter, one pair per
 # node, labelled by instance. Adjust to your labels; every query failing just
 # renders as an em-dash in the UI, never a fake number.
+def _prom_query(q):
+    base = CFG.get("prometheus_url", "").rstrip("/")
+    url = base + "/api/v1/query?query=" + urllib.parse.quote(q)
+    with urllib.request.urlopen(url, timeout=3) as r:
+        d = json.load(r)
+    vals = [float(s["value"][1]) for s in d.get("data", {}).get("result", [])]
+    return sum(vals) if vals else None
+
+
+def engine_stats():
+    """The engine's own word on whether it is working. Some tool parsers
+    (measured: deepseek_v4 — 64s of silent wire, then a whole file in 15
+    bursts) buffer a tool call server-side while the GPU streams into a
+    buffer. A dead stream and a busy-but-buffered stream are identical from
+    the client, so the console asks Prometheus, which scrapes vLLM directly.
+    Colons are legal in Prometheus metric names but not in PromQL bare
+    selectors — hence the __name__ form."""
+    if not CFG.get("prometheus_url"):
+        return {"ok": False}
+    try:
+        rate = _prom_query('sum(rate({__name__="vllm:generation_tokens_total"}[20s]))')
+        running = _prom_query('sum({__name__="vllm:num_requests_running"})')
+        if rate is None and running is None:
+            return {"ok": False, "error": "prometheus has no vllm metrics"}
+        return {"ok": True, "rate": rate or 0.0, "running": -1 if running is None else running}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
 def telemetry():
     out = []
     for node in CFG.get("nodes", []):
@@ -419,6 +448,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e), "data": []}, 502)
         elif path == "/api/telemetry":
             self._json(telemetry())
+        elif path == "/api/engine":
+            self._json(engine_stats())
         elif path == "/api/tools":
             try:
                 h = mcp_host()

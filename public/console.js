@@ -291,6 +291,17 @@
     // connection died" stop looking the same. Driven by a timer because the
     // interesting case is precisely when no data is arriving.
     let phase = "connect", shown = "", lastKind = "text", toolChars = 0, toolName = "";
+    // When the wire goes quiet, ask the engine itself. Some tool parsers
+    // (measured: deepseek_v4 — 64s of silence, then a whole file in 15
+    // bursts) buffer the call server-side while the GPU streams into a
+    // buffer. A dead stream and a busy-but-buffered one look identical from
+    // here; the server-side tok/s from Prometheus is what tells them apart.
+    let eng = null, engTick = 0;
+    const pollEngine = () => {
+      fetch("/api/engine").then((r) => r.json()).then((d) => {
+        if (d && d.ok) eng = d;
+      }).catch(() => {});
+    };
     const beat = setInterval(() => {
       const el = (performance.now() - t0) / 1000;
       let text, slow = false;
@@ -304,13 +315,29 @@
       } else {
         const gap = (performance.now() - tLast) / 1000;
         if (gap >= STALL_STREAM) {
-          slow = true; text = "no tokens for " + gap.toFixed(0) + "s — stream may have stalled";
-        } else if (lastKind === "tool") {
-          // args stream invisibly — narrate the work or it looks like a hang
-          text = "writing a tool call" + (toolName ? " · " + toolName : "") +
-                 " · " + toolChars.toLocaleString() + " chars of arguments";
+          if (engTick++ % 4 === 0) pollEngine();   // every ~2s while quiet
+          if (eng && eng.rate > 0.5) {
+            text = "wire quiet " + gap.toFixed(0) + "s · engine generating " +
+                   eng.rate.toFixed(0) + " tok/s — output is buffered upstream" +
+                   " (usually a tool call being assembled)";
+            slow = gap > 180;
+          } else if (eng && eng.rate <= 0.5 && eng.running === 0) {
+            slow = true;
+            text = "no tokens for " + gap.toFixed(0) +
+                   "s — nothing running on the engine. Stop and retry.";
+          } else {
+            slow = true;
+            text = "no tokens for " + gap.toFixed(0) + "s — stream may have stalled";
+          }
         } else {
-          text = "";   // visible tokens are their own feedback
+          eng = null; engTick = 0;   // wire is live again; stale samples lie
+          if (lastKind === "tool") {
+            // args stream invisibly — narrate the work or it looks like a hang
+            text = "writing a tool call" + (toolName ? " · " + toolName : "") +
+                   " · " + toolChars.toLocaleString() + " chars of arguments";
+          } else {
+            text = "";   // visible tokens are their own feedback
+          }
         }
       }
       if (text === shown) return;          // don't fight the rAF renderer
