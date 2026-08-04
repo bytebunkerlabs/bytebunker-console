@@ -41,7 +41,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "models", "tuning", "batch", "cluster", "usage"];
+  const screens = ["playground", "sessions", "video", "models", "tuning", "batch", "cluster", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -51,6 +51,7 @@
     $("panel").classList.toggle("on", s === "playground" && panelWanted);
     if (s === "sessions") renderSessions();
     if (s === "usage") renderUsage();
+    if (s === "video") vidRefresh();
   }
   document.querySelectorAll("[data-nav]").forEach((b) => (b.onclick = () => go(b.dataset.nav)));
 
@@ -1124,6 +1125,279 @@
     args: $("mcp-args").value.trim(),
   });
 
+  /* ---------------- video studio (MiniMax-H3 via /api/video) ---------------- */
+  // A different animal from the chat upstream: multipart form in, an async job
+  // out, an MP4 with its own soundtrack at the end. Jobs live on the engine,
+  // not in this tab — everything re-renders from GET /api/video, and cards
+  // update their mutable bits in place so a poll never tears down a playing
+  // <video>. FL2VA partition serves t2va + fl2va; ref2va needs the Ref2VA
+  // partition racked instead, and the engine says so honestly if it isn't.
+  const VID = {
+    files: [],          // File objects attached to the composer
+    prompts: {},        // job id -> prompt, best-effort (jobs born in this tab)
+    cards: new Map(),   // job id -> live DOM refs
+    steps: 50,
+    timer: null,        // 5 s status poll
+    tick: null,         // 1 s elapsed repaint
+  };
+  const VID_DONE = new Set(["completed", "succeeded"]);
+  const VID_FAIL = new Set(["failed", "error", "cancelled"]);
+  const VID_TASK_HINT = {
+    t2va: "prompt only — the model invents the shot and its soundtrack",
+    fl2va: "one image; the clip starts on that exact frame (size follows it, 768p short edge)",
+    ref2va: "needs the Ref2VA partition serving — one image + one audio, or 1–3 videos",
+  };
+
+  const vidKind = (f) =>
+    /^image\//.test(f.type) ? "image" : /^video\//.test(f.type) ? "video" :
+    /^audio\//.test(f.type) ? "audio" : "other";
+  const fmtMB = (n) => (n / 1048576).toFixed(1) + " MB";
+  const fmtElapsed = (s) => s >= 3600
+    ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+    : s >= 60 ? `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s` : `${Math.floor(s)}s`;
+  const asDataURL = (f) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result); r.onerror = () => rej(r.error);
+    r.readAsDataURL(f);
+  });
+
+  function vidTaskUI() {
+    const t = $("vid-task").value;
+    $("vid-task-hint").textContent = VID_TASK_HINT[t];
+    $("vid-ref-row").hidden = t === "t2va";
+    $("vid-attach-label").textContent =
+      t === "fl2va" ? "Attach first frame" : "Attach image · audio · video";
+    $("vid-file").accept = t === "fl2va" ? "image/*" : "image/*,audio/*,video/*";
+    $("vid-file").multiple = t === "ref2va";
+    $("vid-size").disabled = t === "fl2va";
+    if (t === "fl2va") VID.files = VID.files.filter((f) => vidKind(f) === "image").slice(0, 1);
+    if (t === "t2va") VID.files = [];
+    vidChips();
+  }
+
+  function vidChips() {
+    const box = $("vid-chips");
+    box.textContent = "";
+    VID.files.forEach((f, i) => {
+      const c = document.createElement("span"); c.className = "vfile-chip";
+      const n = document.createElement("span"); n.className = "fn"; n.textContent = f.name;
+      const s = document.createElement("small"); s.textContent = fmtMB(f.size);
+      const x = document.createElement("button"); x.textContent = "×"; x.title = "remove";
+      x.onclick = () => { VID.files.splice(i, 1); vidChips(); };
+      c.append(n, s, x);
+      box.appendChild(c);
+    });
+  }
+
+  function vidProblem() {
+    const task = $("vid-task").value;
+    const prompt = $("vid-prompt").value.trim();
+    if (!prompt) return "write a prompt first";
+    if (prompt.length > 7000) return "prompt is over the 7,000-character limit";
+    const dur = parseFloat($("vid-dur").value);
+    if (!(dur >= 4 && dur <= 15)) return "duration must be 4–15 seconds";
+    const kinds = VID.files.map(vidKind);
+    if (VID.files.reduce((a, f) => a + f.size, 0) > 60 * 1048576)
+      return "references exceed 60 MB — the engine caps the whole request at 64";
+    if (task === "fl2va" && kinds.join() !== "image")
+      return "first-frame mode needs exactly one image";
+    if (task === "ref2va") {
+      const img = kinds.filter((k) => k === "image").length;
+      const aud = kinds.filter((k) => k === "audio").length;
+      const vid = kinds.filter((k) => k === "video").length;
+      if (!((vid >= 1 && vid <= 3 && !img && !aud) || (img === 1 && aud === 1 && !vid)))
+        return "reference mode takes one image + one audio, or 1–3 videos";
+    }
+    return null;
+  }
+
+  async function vidGenerate() {
+    const bad = vidProblem();
+    $("vid-err").textContent = bad || "";
+    if (bad) return;
+    const task = $("vid-task").value;
+    const fd = new FormData();
+    fd.append("prompt", $("vid-prompt").value.trim());
+    fd.append("fps", "24");
+    fd.append("num_inference_steps", String(VID.steps));
+    fd.append("flow_shift", "12");
+    const seed = $("vid-seed").value.trim();
+    if (seed) fd.append("seed", seed);
+    if (task !== "fl2va") {
+      const wh = $("vid-size").value.split("x");
+      fd.append("width", wh[0]); fd.append("height", wh[1]);
+    }
+    fd.append("extra_params", JSON.stringify(
+      { task, duration: parseFloat($("vid-dur").value), audio_flow_shift: 3.0 }));
+    const vids = VID.files.filter((f) => vidKind(f) === "video");
+    if (task === "fl2va") fd.append("input_reference", VID.files[0]);
+    else if (task === "ref2va" && vids.length)
+      vids.forEach((f) => fd.append("input_references", f));
+    else if (task === "ref2va") {
+      fd.append("input_reference", VID.files.find((f) => vidKind(f) === "image"));
+      fd.append("audio_reference", JSON.stringify(
+        { audio_url: await asDataURL(VID.files.find((f) => vidKind(f) === "audio")) }));
+    }
+    $("vid-go").disabled = true;
+    try {
+      const r = await fetch("/api/video", { method: "POST", body: fd });
+      const body = await r.json();
+      if (!r.ok || body.error) throw new Error(body.error || "HTTP " + r.status);
+      VID.prompts[body.id] = $("vid-prompt").value.trim();
+      $("vid-prompt").value = "";
+      VID.files = []; vidChips();
+      await vidRefresh();
+    } catch (e) {
+      $("vid-err").textContent = "submit failed: " + (e.message || e);
+    } finally {
+      $("vid-go").disabled = false;
+    }
+  }
+
+  function vidLive(ok) {
+    const box = $("video-live");
+    while (box.childNodes.length > 1) box.removeChild(box.lastChild);
+    box.appendChild(document.createTextNode(ok ? "engine ready" : "offline"));
+    box.style.color = ok ? "var(--ok)" : "var(--muted)";
+  }
+
+  function vidEmpty(title, body) {
+    $("vid-empty").hidden = false;
+    $("vid-empty-title").textContent = title;
+    $("vid-empty-body").textContent = body;
+  }
+
+  function vidTime(c) {
+    if (!c.created) { c.time.textContent = ""; return; }
+    c.time.textContent = c.pending
+      ? fmtElapsed(Math.max(0, Date.now() / 1000 - c.created)) + " elapsed"
+      : "started " + new Date(c.created * 1000).toLocaleTimeString();
+  }
+
+  function vidCard(j) {
+    let c = VID.cards.get(j.id);
+    if (!c) {
+      const root = document.createElement("div"); root.className = "vjob";
+      const head = document.createElement("div"); head.className = "vjob-head";
+      const pill = document.createElement("span"); pill.className = "vpill";
+      const id = document.createElement("span"); id.className = "mono";
+      id.style.cssText = "font-size:12px;color:var(--faint)"; id.textContent = j.id;
+      const time = document.createElement("span"); time.className = "mono";
+      time.style.cssText = "font-size:12px;color:var(--muted)";
+      const grow = document.createElement("span"); grow.className = "grow";
+      const del = document.createElement("button"); del.className = "ghost-btn";
+      del.textContent = "Delete";
+      del.onclick = async () => {
+        del.disabled = true;
+        try { await fetch("/api/video/" + j.id, { method: "DELETE" }); } catch (e) {}
+        vidRefresh();
+      };
+      head.append(pill, id, time, grow, del);
+      const prompt = document.createElement("div"); prompt.className = "vjob-prompt";
+      prompt.textContent = VID.prompts[j.id] || j.prompt || "";
+      const media = document.createElement("div");
+      media.style.cssText = "display:flex;flex-direction:column;gap:8px;align-items:flex-start";
+      const err = document.createElement("div"); err.className = "verr";
+      root.append(head, prompt, media, err);
+      c = { root, pill, time, media, err, created: j.created_at, done: false, pending: true };
+      VID.cards.set(j.id, c);
+      $("vid-jobs").appendChild(root);
+    }
+    c.created = j.created_at || c.created;
+    const st = (j.status || "queued").toLowerCase();
+    const done = VID_DONE.has(st), fail = VID_FAIL.has(st);
+    c.pending = !done && !fail;
+    c.pill.textContent = st;
+    c.pill.className = "vpill " + (done ? "done" : fail ? "fail" : "run");
+    c.err.textContent = fail
+      ? (typeof j.error === "string" ? j.error : (j.error && j.error.message) || "generation failed")
+      : "";
+    if (done && !c.done) {
+      c.done = true;
+      const v = document.createElement("video");
+      v.controls = true; v.preload = "metadata";
+      v.src = "/api/video/" + j.id + "/content";
+      const dl = document.createElement("a"); dl.className = "ghost-btn";
+      dl.style.textDecoration = "none";
+      dl.textContent = "Download MP4"; dl.href = v.src; dl.download = j.id + ".mp4";
+      c.media.append(v, dl);
+    }
+    vidTime(c);
+  }
+
+  async function vidRefresh() {
+    let jobs;
+    try {
+      const r = await fetch("/api/video");
+      const body = await r.json();
+      if (!r.ok || body.error) throw new Error(body.error || "HTTP " + r.status);
+      jobs = body.data || body.jobs || (Array.isArray(body) ? body : []);
+    } catch (e) {
+      vidLive(false);
+      if (!VID.cards.size) vidEmpty("Engine offline",
+        "Nothing answers on the H3 tunnel. On spark-1: rack down, then rack up h3 — " +
+        "loading takes a while, and the first render pays a torch.compile warmup on top.");
+      vidPollControl([]);
+      return;
+    }
+    vidLive(true);
+    jobs.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    if (!jobs.length) vidEmpty("No renders yet",
+      "Describe a shot above and hit Generate. The job runs on the engine, so you can " +
+      "close this tab and come back — it will still be here.");
+    else $("vid-empty").hidden = true;
+    for (const j of jobs) vidCard(j);
+    for (const [id, c] of VID.cards)
+      if (!jobs.some((j) => j.id === id)) { c.root.remove(); VID.cards.delete(id); }
+    // settle order without touching nodes already in place — moving a node
+    // reloads its <video>, so only genuinely out-of-place cards move
+    let prev = null;
+    for (const j of jobs) {
+      const node = VID.cards.get(j.id).root;
+      const want = prev ? prev.nextSibling : $("vid-jobs").firstChild;
+      if (node !== want) $("vid-jobs").insertBefore(node, want);
+      prev = node;
+    }
+    vidPollControl(jobs);
+  }
+
+  function vidPollControl(jobs) {
+    const pending = jobs.some((j) => {
+      const s = (j.status || "queued").toLowerCase();
+      return !VID_DONE.has(s) && !VID_FAIL.has(s);
+    });
+    const want = pending || state.screen === "video";
+    if (want && !VID.timer) {
+      VID.timer = setInterval(vidRefresh, 5000);
+      VID.tick = setInterval(() => {
+        for (const c of VID.cards.values()) if (c.pending) vidTime(c);
+      }, 1000);
+    } else if (!want && VID.timer) {
+      clearInterval(VID.timer); clearInterval(VID.tick);
+      VID.timer = VID.tick = null;
+    }
+  }
+
+  $("vid-task").onchange = vidTaskUI;
+  $("vid-attach").onclick = () => $("vid-file").click();
+  $("vid-file").onchange = (e) => {
+    const task = $("vid-task").value;
+    for (const f of e.target.files) {
+      const kind = vidKind(f);
+      if (kind === "other") continue;
+      if (task === "fl2va") { if (kind === "image") VID.files = [f]; }
+      else VID.files.push(f);
+    }
+    e.target.value = "";
+    vidChips();
+  };
+  $("vid-steps").oninput = (e) => {
+    VID.steps = +e.target.value;
+    $("vid-steps-val").textContent = e.target.value;
+  };
+  $("vid-go").onclick = vidGenerate;
+  vidTaskUI();
+
   /* ---------------- boot ---------------- */
   (async () => {
     try { state.cfg = await (await fetch("/api/config")).json(); } catch (e) {}
@@ -1132,6 +1406,7 @@
     $("avatar").textContent = (state.cfg.identity.user || "B")[0].toUpperCase();
     $("code-endpoint").textContent = state.cfg.upstream;
     if (state.cfg.nodes.length) $("cluster-sub").textContent = state.cfg.nodes.length + " nodes configured";
+    if (state.cfg.video) { $("nav-video").hidden = false; vidRefresh(); }
     await loadModels();
     if (state.cfg.mcp) loadTools();
     pollTelemetry();

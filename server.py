@@ -18,6 +18,9 @@ API:
   GET  /api/sessions         list sessions  |  POST save  |  DELETE ?id=
   POST /api/usage-event      client-reported completion stats -> usage.jsonl
   GET  /api/usage            14-day aggregates for the Usage screen
+  POST /api/video            multipart passthrough -> H3 /v1/videos (job id)
+  GET  /api/video[/id[/content]]   job list / status / the finished MP4
+  DELETE /api/video/<id>     drop a job and its stored output
 """
 import argparse
 import json
@@ -41,6 +44,7 @@ DEFAULT_CONFIG = {
     "upstream_url": "http://127.0.0.1:8000/v1",
     "upstream_key": "bb-local",
     "prometheus_url": "",
+    "h3_url": "",
     "nodes": [
         {"name": "spark-1", "instance": "spark-1"},
         {"name": "spark-2", "instance": "spark-2"},
@@ -364,9 +368,15 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         if self.command in ("POST", "DELETE"):
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
-            if self.command == "POST" and ctype != "application/json":
+            # /api/video carries file uploads; everything else stays JSON-only.
+            # Multipart is a "simple request" a hostile form could fire without
+            # preflight — but form POSTs carry Origin, and the check above
+            # already rejected foreign ones.
+            path = urllib.parse.urlparse(self.path).path
+            want = "multipart/form-data" if path == "/api/video" else "application/json"
+            if self.command == "POST" and ctype != want:
                 self._drain()
-                self._json({"error": "expected application/json"}, 415, close=True)
+                self._json({"error": "expected " + want}, 415, close=True)
                 return False
         return True
 
@@ -423,6 +433,74 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "invalid JSON body"}, 400, close=True)
             return None
 
+    # ---- video (MiniMax-H3 via vLLM-Omni) ----
+    # /v1/videos is multipart form in, MP4 out, with async job polling. The
+    # engine binds to loopback on spark-1 and is reached through the same SSH
+    # tunnel that carries Prometheus — this proxy adds only the hop, plus the
+    # host/origin guard every other route gets. Nothing new opens on the LAN.
+    def _video_post(self):
+        base = (CFG.get("h3_url") or "").rstrip("/")
+        if not base:
+            self._drain()
+            self._json({"error": "no h3_url configured"}, 503)
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if not 0 < n <= 80 * 1024 * 1024:  # engine rejects >64 MB; fail fast here
+            self._drain()
+            self._json({"error": "body missing or over 80 MB"}, 413)
+            return
+        req = urllib.request.Request(
+            base + "/v1/videos", data=self.rfile.read(n), method="POST",
+            headers={"Content-Type": self.headers.get("Content-Type") or ""})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                self._json(json.load(r))
+        except urllib.error.HTTPError as e:
+            self._json({"error": e.read().decode("utf-8", "replace")[:500]}, e.code)
+        except Exception as e:
+            self._json({"error": str(e)[:300]}, 502)
+
+    def _video_get(self, path):
+        base = (CFG.get("h3_url") or "").rstrip("/")
+        if not base:
+            self._json({"error": "no h3_url configured", "data": []}, 503)
+            return
+        parts = [p for p in path[len("/api/video"):].split("/") if p]
+        bad = (len(parts) > 2 or (len(parts) == 2 and parts[1] != "content")
+               or (parts and not re.fullmatch(r"[\w.-]+", parts[0])))
+        if bad:
+            self._json({"error": "not found"}, 404)
+            return
+        url = base + "/v1/videos" + "".join("/" + p for p in parts)
+        try:
+            if len(parts) == 2:  # the MP4 itself — stream it through
+                with urllib.request.urlopen(url, timeout=600) as r:
+                    self.send_response(200)
+                    self.send_header("Content-Type",
+                                     r.headers.get("Content-Type") or "video/mp4")
+                    clen = r.headers.get("Content-Length")
+                    if clen:
+                        self.send_header("Content-Length", clen)
+                    else:  # unknown length can't keep-alive on HTTP/1.1
+                        self.send_header("Connection", "close")
+                        self.close_connection = True
+                    self.end_headers()
+                    while True:
+                        chunk = r.read(256 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            else:  # job status, or the job list
+                with urllib.request.urlopen(url, timeout=30) as r:
+                    self._json(json.load(r))
+        except urllib.error.HTTPError as e:
+            self._json({"error": e.read().decode("utf-8", "replace")[:500]}, e.code)
+        except Exception as e:
+            self._json({"error": str(e)[:300]}, 502)
+
     # ---- routes ----
     def do_GET(self):
         if not self._guard():
@@ -438,6 +516,7 @@ class Handler(BaseHTTPRequestHandler):
                 "upstream": CFG.get("upstream_url", ""),
                 "telemetry": bool(CFG.get("prometheus_url")),
                 "mcp": bool(CFG.get("mcp_servers")),
+                "video": bool(CFG.get("h3_url")),
             })
         elif path == "/api/models":
             try:
@@ -470,6 +549,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(read_sessions())
         elif path == "/api/usage":
             self._json(usage_summary())
+        elif path == "/api/video" or path.startswith("/api/video/"):
+            self._video_get(path)
         else:
             self._static(path)
 
@@ -483,6 +564,19 @@ class Handler(BaseHTTPRequestHandler):
             with _LOCK:
                 write_sessions([s for s in read_sessions() if s.get("id") != sid])
             self._json({"ok": True})
+        elif u.path.startswith("/api/video/"):
+            base = (CFG.get("h3_url") or "").rstrip("/")
+            vid = u.path.rsplit("/", 1)[1]
+            if not base or not re.fullmatch(r"[\w.-]+", vid):
+                self._json({"error": "not found"}, 404)
+                return
+            try:
+                req = urllib.request.Request(base + "/v1/videos/" + vid,
+                                             method="DELETE")
+                with urllib.request.urlopen(req, timeout=30):
+                    self._json({"ok": True})
+            except Exception as e:
+                self._json({"error": str(e)[:300]}, 502)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -490,6 +584,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/video":  # multipart, not JSON — handled whole
+            self._video_post()
+            return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive

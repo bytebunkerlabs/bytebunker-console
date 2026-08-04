@@ -23,6 +23,7 @@
     <nav class="nav">
       <button data-nav="playground"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><rect x="2" y="3" width="12" height="9" rx="2"/><path d="M5.5 14.2h5"/></svg><span>Playground</span></button>
       <button data-nav="sessions"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 6.4h6M5 9.4h3.6"/></svg><span>Sessions</span></button>
+      <button data-nav="video" id="nav-video" hidden><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"><rect x="2" y="3.2" width="12" height="9.6" rx="2"/><path d="M6.6 6l3.2 2-3.2 2z" fill="currentColor" stroke="none"/></svg><span>Video studio</span></button>
     </nav>
 
     <div class="nav-label">Serving</div>
@@ -89,6 +90,67 @@
         <button class="ghost-btn" id="new-chat-2"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>New chat</button>
       </header>
       <div class="scroll"><div id="sessions-box"></div></div>
+    </section>
+
+    <!-- Video studio -->
+    <section class="screen" id="screen-video">
+      <header>
+        <h1>Video studio</h1><span class="sub">MiniMax-H3 · rendered on the rack, stereo sound included</span><div class="grow"></div>
+        <span class="live mono" id="video-live" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"><span class="dot"></span>—</span>
+      </header>
+      <div class="scroll" style="display:flex;flex-direction:column;gap:18px">
+
+        <div class="vcompose">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <select class="text-input" id="vid-task" style="width:auto">
+              <option value="t2va">Text → video</option>
+              <option value="fl2va">First frame → video</option>
+              <option value="ref2va">Reference → video</option>
+            </select>
+            <span class="hint" id="vid-task-hint">prompt only — the model invents the shot and its soundtrack</span>
+          </div>
+
+          <textarea class="sys-input" id="vid-prompt" rows="3" placeholder="Describe the shot — subject, motion, light, and what it should sound like…"></textarea>
+
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap" id="vid-ref-row" hidden>
+            <button class="ghost-btn" id="vid-attach"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg><span id="vid-attach-label">Attach first frame</span></button>
+            <input type="file" id="vid-file" hidden>
+            <div id="vid-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+          </div>
+
+          <div class="vparams">
+            <label class="vparam"><span>Size</span>
+              <select class="text-input" id="vid-size">
+                <option value="672x384" selected>672 × 384 · fast preview</option>
+                <option value="384x672">384 × 672 · fast portrait</option>
+                <option value="1344x768">1344 × 768 · reference 16:9</option>
+                <option value="768x1344">768 × 1344 · 9:16</option>
+                <option value="768x768">768 × 768 · 1:1</option>
+                <option value="1024x768">1024 × 768 · 4:3</option>
+                <option value="1792x768">1792 × 768 · 21:9</option>
+              </select>
+            </label>
+            <label class="vparam"><span>Seconds</span>
+              <input class="text-input" id="vid-dur" type="number" min="4" max="15" step="0.1" value="5">
+            </label>
+            <label class="vparam"><span>Steps <b class="mono" id="vid-steps-val">50</b></span>
+              <input type="range" id="vid-steps" min="10" max="50" step="1" value="50">
+            </label>
+            <label class="vparam"><span>Seed</span>
+              <input class="text-input" id="vid-seed" placeholder="random">
+            </label>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <button class="solid-btn" id="vid-go">Generate</button>
+            <span class="hint">24 fps fixed · flow shift 12 / audio 3 · one render at a time on the Spark — jobs queue, and a clip takes tens of minutes, not seconds. Fewer steps ≈ proportionally faster; 50 is the reference, 10 is the validated floor.</span>
+          </div>
+          <span class="hint" id="vid-err" style="color:var(--err)"></span>
+        </div>
+
+        <div class="empty-state" id="vid-empty" hidden><b id="vid-empty-title">—</b><span id="vid-empty-body"></span></div>
+        <div id="vid-jobs" style="display:flex;flex-direction:column;gap:12px"></div>
+      </div>
     </section>
 
     <!-- Models -->
