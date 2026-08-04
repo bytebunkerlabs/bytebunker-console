@@ -64,3 +64,11 @@ results.
   adding accounts would imply a security model it doesn't have.
 - A build step. Vanilla JS, stdlib Python, no dependencies — the whole thing
   should stay readable in one sitting.
+
+## bytebunkercode (requested 2026-08-04)
+
+A Claude Code-style agent UI on the same stack: terminal-first transcript,
+tool-use rendering as first-class blocks, plan/execute loops, session
+resume. The console's MCP host, caps manifest, and engine telemetry are the
+foundation; what's missing is the agent loop with editing tools and a
+permission model. Big enough to design deliberately, not bolt on.

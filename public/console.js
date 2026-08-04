@@ -154,6 +154,58 @@
     return (state.caps && state.caps[id]) || CAPS_FALLBACK;
   }
 
+  function copyBtn(getText) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "copy-btn";
+    b.textContent = "copy";
+    b.setAttribute("aria-label", "Copy to clipboard");
+    b.onclick = (ev) => {
+      // lives inside a <summary>: a plain click must copy, not toggle
+      ev.preventDefault(); ev.stopPropagation();
+      const done = () => {
+        b.textContent = "copied"; b.classList.add("did");
+        setTimeout(() => { b.textContent = "copy"; b.classList.remove("did"); }, 1200);
+      };
+      const txt = getText();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(done, done);
+      } else {
+        const t = document.createElement("textarea");
+        t.value = txt; document.body.appendChild(t); t.select();
+        try { document.execCommand("copy"); } catch (e) {}
+        t.remove(); done();
+      }
+    };
+    return b;
+  }
+
+  function buildThink(m, text) {
+    // A <details>, because thinking is context, not content: open while the
+    // turn streams (watching the model work is the point), auto-collapsed on
+    // completion, and the reader's own toggle is remembered on the message so
+    // streaming rebuilds don't fight them.
+    const d = document.createElement("details");
+    d.className = "part-think";
+    d.open = !!m.thinkOpen;
+    const sum = document.createElement("summary");
+    const lab = document.createElement("span");
+    lab.className = "label";
+    // provenance is stamped on the message at send time — the label must
+    // not follow the slider after the fact
+    lab.textContent =
+      (m.effort != null ? "Reasoning · " + EFFORT_LABEL[m.effort] : "Reasoning") +
+      " · " + (text.length > 1000 ? (text.length / 1000).toFixed(1) + "k" : text.length) + " chars";
+    sum.appendChild(lab);
+    sum.appendChild(copyBtn(() => text));
+    const body = document.createElement("div");
+    body.className = "body";
+    body.textContent = text;
+    d.appendChild(sum); d.appendChild(body);
+    d.addEventListener("toggle", () => { m.thinkOpen = d.open; });
+    return d;
+  }
+
   function buildMessageNode(m) {
     const wrap = document.createElement("div");
     wrap.className = "msg";
@@ -171,22 +223,21 @@
     for (const p of parseParts(m)) {
       if (p.kind === "think") {
         const d = document.createElement("div");
-        d.className = "part-think";
-        d.innerHTML = '<span class="label"></span><div class="body"></div>';
-        // provenance is stamped on the message at send time — the label must
-        // not follow the slider after the fact
-        d.querySelector(".label").textContent =
-          m.effort != null ? "Reasoning · " + EFFORT_LABEL[m.effort] : "Reasoning";
-        d.querySelector(".body").textContent = p.text;
-        bot.appendChild(d);
+        bot.appendChild(buildThink(m, p.text));
       } else if (p.kind === "code") {
         const d = document.createElement("div");
         d.className = "part-code";
         const h = document.createElement("div");
         h.className = "head";
-        h.innerHTML = "<span></span><span></span>";
-        h.children[0].textContent = p.lang;
-        h.children[1].textContent = m.model || "";
+        const lang = document.createElement("span");
+        lang.textContent = p.lang;
+        const right = document.createElement("span");
+        right.className = "head-right";
+        const model = document.createElement("span");
+        model.textContent = m.model || "";
+        right.appendChild(model);
+        right.appendChild(copyBtn(() => p.text));
+        h.appendChild(lang); h.appendChild(right);
         const pre = document.createElement("pre");
         pre.textContent = p.text;
         d.appendChild(h); d.appendChild(pre);
@@ -497,7 +548,8 @@
     // model + effort stamped now: the transcript renders provenance, not
     // whatever the controls happen to say later
     const bot = { role: "bot", content: "", reasoning: "", meta: "",
-                  model: state.model, effort: P.effort };
+                  model: state.model, effort: P.effort,
+                  thinkOpen: true };   // watch it stream; collapsed on completion
     state.messages.push(user, bot);
     state.streaming = true;
     $("send-btn").classList.add("stop");
@@ -640,6 +692,9 @@
     ].filter(Boolean).join("  \u00b7  ");
     state.streaming = false;
     state.abort = null;
+    // thinking is scaffolding: fold it away once the answer exists, and give
+    // the reader back the toggle from here on
+    if (bot.reasoning) bot.thinkOpen = false;
     if (usage && usage.prompt_tokens) {
       state.ctxUsed = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
     }
