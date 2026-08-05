@@ -196,7 +196,21 @@
         <h1>Cluster</h1><span class="sub" id="cluster-sub">node telemetry</span><div class="grow"></div>
         <span class="live mono" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)" id="cluster-poll"><span class="dot"></span>—</span>
       </header>
-      <div class="scroll"><div class="card-grid" id="node-cards"></div><div id="cluster-note"></div></div>
+      <div class="scroll">
+        <div class="card-grid" id="node-cards"></div>
+        <div id="cluster-note"></div>
+        <div class="netcheck" id="netcheck-card" hidden>
+          <div class="netcheck-head">
+            <div>
+              <b>Is it local?</b>
+              <span class="hint">Every established connection of the serving engine, audited from inside its own pid namespace and tagged LOCAL or INTERNET. Measured, not assumed.</span>
+            </div>
+            <button class="ghost-btn" id="netcheck-btn">Verify now</button>
+          </div>
+          <pre class="netcheck-out mono" id="netcheck-out" hidden></pre>
+          <div class="netcheck-verdict mono" id="netcheck-verdict"></div>
+        </div>
+      </div>
     </section>
 
     <!-- Usage -->

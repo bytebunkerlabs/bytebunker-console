@@ -280,3 +280,13 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
   .vpill.run{animation:vpulse 2.2s ease-in-out infinite}
   @keyframes vpulse{50%{opacity:.55}}
 }
+
+/* ---------- netcheck: is it local? ---------- */
+.netcheck{margin-top:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.netcheck-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.netcheck-head b{font-size:13.5px;display:block;margin-bottom:3px}
+.netcheck-head .hint{max-width:56ch;display:block}
+.netcheck-out{margin:0;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--code);font-size:12px;line-height:1.65;overflow-x:auto;white-space:pre}
+.netcheck-verdict{font-size:12.5px}
+.netcheck-verdict.good{color:var(--ok)}
+.netcheck-verdict.bad{color:var(--err)}

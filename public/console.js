@@ -1125,6 +1125,37 @@
     args: $("mcp-args").value.trim(),
   });
 
+  /* ---------------- netcheck (Cluster: "is it local?") ---------------- */
+  // The verdict comes from rack net on the head node — an in-container /proc
+  // audit of every serving engine's established connections. The server
+  // caches it for 5 minutes; the button forces a fresh run.
+  async function netcheckRun(fresh) {
+    const btn = $("netcheck-btn"), out = $("netcheck-out"), ver = $("netcheck-verdict");
+    btn.disabled = true; btn.textContent = "auditing…";
+    ver.textContent = ""; ver.className = "netcheck-verdict mono";
+    try {
+      const r = await fetch("/api/netcheck" + (fresh ? "?fresh=1" : ""));
+      const d = await r.json();
+      if (!d.ok && d.error) throw new Error(d.error);
+      const lines = d.lines || [];
+      out.hidden = !lines.length;
+      out.textContent = lines.filter((l) => !/^VERDICT|verdict:/i.test(l.trim())).join("\n");
+      const bad = lines.some((l) => l.includes("INTERNET"));
+      ver.classList.add(bad ? "bad" : "good");
+      ver.textContent = (bad
+        ? "✗ internet traffic present — see audit above"
+        : "✓ all connections local — nothing leaves the rack")
+        + "  ·  checked " + new Date((d.at || 0) * 1000).toLocaleTimeString();
+    } catch (e) {
+      out.hidden = true;
+      ver.classList.add("bad");
+      ver.textContent = "audit failed: " + (e.message || e);
+    } finally {
+      btn.disabled = false; btn.textContent = "Verify now";
+    }
+  }
+  $("netcheck-btn").onclick = () => netcheckRun(true);
+
   /* ---------------- video studio (MiniMax-H3 via /api/video) ---------------- */
   // A different animal from the chat upstream: multipart form in, an async job
   // out, an MP4 with its own soundtrack at the end. Jobs live on the engine,
@@ -1407,6 +1438,7 @@
     $("code-endpoint").textContent = state.cfg.upstream;
     if (state.cfg.nodes.length) $("cluster-sub").textContent = state.cfg.nodes.length + " nodes configured";
     if (state.cfg.video) { $("nav-video").hidden = false; vidRefresh(); }
+    if (state.cfg.netcheck) $("netcheck-card").hidden = false;
     await loadModels();
     if (state.cfg.mcp) loadTools();
     pollTelemetry();

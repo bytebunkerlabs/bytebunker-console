@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
     "upstream_key": "bb-local",
     "prometheus_url": "",
     "h3_url": "",
+    "netcheck_ssh": "",
     "nodes": [
         {"name": "spark-1", "instance": "spark-1"},
         {"name": "spark-2", "instance": "spark-2"},
@@ -304,6 +305,43 @@ def engine_stats():
         return {"ok": False, "error": str(e)[:120]}
 
 
+# ---------------------------------------------------------------- netcheck --
+# "Is my model truly local?" deserves a measurement, not an assurance. The
+# head node's rack net audits every serving container from inside its own
+# pid namespace (host-side ss -p silently loses root-owned sockets without
+# sudo) and tags each established connection LOCAL or INTERNET. This runs it
+# over SSH and caches the answer — a verdict is stable for minutes, and a
+# page refresh should not fork ssh.
+_NET = {"at": 0, "result": None}
+_NET_LOCK = threading.Lock()
+
+
+def netcheck(fresh=False):
+    target = CFG.get("netcheck_ssh", "")
+    if not target:
+        return {"ok": False, "error": "netcheck_ssh not configured"}
+    with _NET_LOCK:
+        if not fresh and _NET["result"] and time.time() - _NET["at"] < 300:
+            return _NET["result"]
+        import subprocess
+        try:
+            p = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target,
+                 "cd dgx/dgx-spark-serve && ./rack net"],
+                capture_output=True, text=True, timeout=60)
+            out = re.sub(r"\x1b\[[0-9;]*m", "", (p.stdout + p.stderr)).strip()
+            res = {"ok": p.returncode == 0 or "VERDICT" in out,
+                   "at": int(time.time()),
+                   "lines": out.splitlines()[:40]}
+        except subprocess.TimeoutExpired:
+            res = {"ok": False, "at": int(time.time()),
+                   "error": "audit timed out after 60s"}
+        except Exception as e:
+            res = {"ok": False, "at": int(time.time()), "error": str(e)[:200]}
+        _NET.update(at=time.time(), result=res)
+        return res
+
+
 def telemetry():
     out = []
     for node in CFG.get("nodes", []):
@@ -517,6 +555,7 @@ class Handler(BaseHTTPRequestHandler):
                 "telemetry": bool(CFG.get("prometheus_url")),
                 "mcp": bool(CFG.get("mcp_servers")),
                 "video": bool(CFG.get("h3_url")),
+                "netcheck": bool(CFG.get("netcheck_ssh")),
             })
         elif path == "/api/models":
             try:
@@ -531,6 +570,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(telemetry())
         elif path == "/api/engine":
             self._json(engine_stats())
+        elif path == "/api/netcheck":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._json(netcheck(fresh=bool(q.get("fresh"))))
         elif path == "/api/tools":
             try:
                 h = mcp_host()
