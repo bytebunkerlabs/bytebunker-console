@@ -72,3 +72,10 @@ tool-use rendering as first-class blocks, plan/execute loops, session
 resume. The console's MCP host, caps manifest, and engine telemetry are the
 foundation; what's missing is the agent loop with editing tools and a
 permission model. Big enough to design deliberately, not bolt on.
+
+## Video studio: archive completed renders (noted 2026-08-05)
+The engine's job store is container-local scratch — a restart deletes every
+MP4 not manually downloaded (learned when a crash-restart ate an undownloaded
+render). The console proxy could archive completed clips server-side on the
+mini (poll for completed → fetch content → data/renders/) so the Download
+button becomes a convenience, not the only copy.
