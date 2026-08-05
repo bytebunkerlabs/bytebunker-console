@@ -143,7 +143,7 @@
 
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
             <button class="solid-btn" id="vid-go">Generate</button>
-            <span class="hint">24 fps fixed · flow shift 12 / audio 3 · one render at a time on the Spark — jobs queue, and a clip takes tens of minutes, not seconds. Fewer steps ≈ proportionally faster; 50 is the reference, 10 is the validated floor.</span>
+            <span class="hint">24 fps fixed · flow shift 12 / audio 3 · one render at a time — jobs queue, a clip takes ~10 min. Keep clips ≤ 8 s on one Spark: attention memory grows with the square of the frame count, and a 15 s request can crash the engine (measured 2026-08-05). Steps scale nearly linearly; 50 is reference, 10 the validated floor.</span>
           </div>
           <span class="hint" id="vid-err" style="color:var(--err)"></span>
         </div>
