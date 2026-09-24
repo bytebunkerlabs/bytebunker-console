@@ -94,10 +94,18 @@ class MCPServer:
         ])
         env.update(self.spec.get("env") or {})
         exe = shutil.which(self.spec["command"], path=env["PATH"]) or self.spec["command"]
-        cmd = [exe] + list(self.spec.get("args", []))
+        # `~` in an argument means the user's home, as it would in a shell —
+        # Popen passes it literally, and the filesystem server then roots
+        # itself at a directory called "~" that does not exist.
+        args = [os.path.expanduser(a) if a.startswith("~") else a
+                for a in self.spec.get("args", [])]
+        cmd = [exe] + args
+        # Servers shipped with the console (mcp_terminal.py) are named by a
+        # path relative to it; launchd's cwd is wherever it feels like.
+        here = os.path.dirname(os.path.abspath(__file__))
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, cwd=here,
         )
         self._rpc("initialize", {
             "protocolVersion": "2025-06-18",

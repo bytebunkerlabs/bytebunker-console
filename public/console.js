@@ -19,7 +19,7 @@
     model: null,
     params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 8192,
               seed: 0, effort: 4, json: false, stops: "", sys: "",
-              autoCompress: true },
+              autoCompress: true, maxHops: 40 },
     messages: [],           // {role:'user'|'bot', content, reasoning, meta, error}
     streaming: false,
     abort: null,
@@ -80,6 +80,7 @@
   bindRange("rep", "rep-val", "rep", (v) => v.toFixed(2));
   bindRange("maxtok", "max-val", "maxTok", fmtTok);
   bindRange("effort", "effort-val", "effort", (v) => EFFORT_LABEL[v]);
+  bindRange("maxhops", "maxhops-val", "maxHops", String);
   $("seed").oninput = (e) => { P.seed = parseInt(e.target.value || "0", 10) || 0; };
   $("stops").oninput = (e) => { P.stops = e.target.value; };
   $("sys").oninput = (e) => { P.sys = e.target.value; $("sys-len").textContent = P.sys.length + " chars"; };
@@ -673,30 +674,42 @@
     for (const m of list) {
       if (m.role === "bot") {
         if (m.kind === "compress") continue;   // a summary in flight, or one that failed
-        // Most reasoning models want prior thinking dropped. DeepSeek-V4 is the
-        // exception once tools are in play: it 400s when reasoning_content is
-        // missing from a tool exchange. Without tool calls its docs allow
-        // dropping prior reasoning — so only turns that called tools carry it,
-        // which keeps long chats from silently spending context on old thinking.
-        const e = { role: "assistant",
-                    content: caps.strip_reasoning ? stripThink(m.content) : m.content };
-        // Scrub broken tool calls on EVERY rebuild, not just at record time:
-        // a truncated call that slipped into a saved session would otherwise
-        // 400 every request forever — the server json-parses arguments while
-        // rendering the prompt, and history is resent whole each turn.
-        const okCalls = (m.tool_calls || []).filter((tc) => {
-          try { JSON.parse((tc.function && tc.function.arguments) || "{}"); return true; }
-          catch (err) { return false; }
-        });
-        if (okCalls.length) e.tool_calls = okCalls;
-        if (!caps.strip_reasoning && m.reasoning && e.tool_calls)
-          e.reasoning_content = m.reasoning;
-        if (e.content || e.tool_calls || e.reasoning_content) msgs.push(e);
-        const okIds = new Set(okCalls.map((tc) => tc.id));
-        for (const t of (m.toolResults || [])) {
-          if (okIds.has(t.id))
-            msgs.push({ role: "tool", tool_call_id: t.id, content: t.content });
+        // A tool turn is several hops: text + calls, results, text + calls,
+        // results ... answer. Every hop is replayed, because a model that is
+        // shown only its last hop re-does the other seven. Sessions saved
+        // before hops were recorded carry one flattened hop instead.
+        const hops = m.hops || (m.tool_calls
+          ? [{ content: "", reasoning: m.reasoning || "", tool_calls: m.tool_calls, results: m.toolResults || [] }]
+          : []);
+        for (const h of hops) {
+          // Scrub broken tool calls on EVERY rebuild, not just at record time:
+          // a truncated call that slipped into a saved session would otherwise
+          // 400 every request forever — the server json-parses arguments while
+          // rendering the prompt, and history is resent whole each turn.
+          const okCalls = (h.tool_calls || []).filter((tc) => {
+            try { JSON.parse((tc.function && tc.function.arguments) || "{}"); return true; }
+            catch (err) { return false; }
+          });
+          const text = caps.strip_reasoning ? stripThink(h.content || "") : (h.content || "");
+          if (!okCalls.length) {
+            if (text) msgs.push({ role: "assistant", content: text });
+            continue;
+          }
+          const e = { role: "assistant", content: text, tool_calls: okCalls };
+          // Most reasoning models want prior thinking dropped. DeepSeek-V4 is
+          // the exception once tools are in play: it 400s when
+          // reasoning_content is missing from a tool exchange — so the thinking
+          // that produced each call rides with it, and only there.
+          if (!caps.strip_reasoning && h.reasoning) e.reasoning_content = h.reasoning;
+          msgs.push(e);
+          const okIds = new Set(okCalls.map((tc) => tc.id));
+          for (const t of (h.results || [])) {
+            if (okIds.has(t.id))
+              msgs.push({ role: "tool", tool_call_id: t.id, content: t.content });
+          }
         }
+        const answer = caps.strip_reasoning ? stripThink(m.content) : m.content;
+        if (answer) msgs.push({ role: "assistant", content: answer });
       } else {
         msgs.push({ role: "user", content: m.content });
       }
@@ -768,9 +781,13 @@
 
     let usage = null, finishReason = null, ttft = null, span = null, chunks = 0;
     let totToks = 0, totRToks = 0;   // summed across hops — last-hop usage alone lies
-    const MAX_HOPS = 8;   // a tool loop must terminate even if the model won't
+    // The Stop button is the real brake. The hop ceiling (panel: Tool hops)
+    // is for a runaway model nobody is watching — and a model that repeats
+    // the identical call is stopped well before it.
+    const maxHops = Math.max(1, P.maxHops | 0);
+    let lastSig = "", repeats = 0;
     try {
-      for (let hop = 0; hop < MAX_HOPS; hop++) {
+      for (let hop = 0; hop < maxHops; hop++) {
         const rLen = bot.reasoning.length;
         const r = await streamTurn(msgs, bot, body);
         usage = r.usage || usage;
@@ -792,18 +809,28 @@
         }
         if (!r.calls.length) break;
 
-        // record the assistant's tool_calls, then run them and feed results back
-        bot.tool_calls = r.calls.map((c) => ({
-          id: c.id, type: "function",
-          function: { name: c.name, arguments: c.args || "{}" },
-        }));
-        bot.toolResults = bot.toolResults || [];
-        const hopMsg = { role: "assistant", content: bot.content || "", tool_calls: bot.tool_calls };
+        const sig = r.calls.map((c) => c.name + ":" + (c.args || "")).join("\n");
+        repeats = sig === lastSig ? repeats + 1 : 0;
+        lastSig = sig;
+
+        // Record the hop on the message — text, calls, then results as they
+        // land. Later turns and the archive rebuild the exchange from here.
+        const hopRec = {
+          content: bot.content || "",
+          tool_calls: r.calls.map((c) => ({
+            id: c.id, type: "function",
+            function: { name: c.name, arguments: c.args || "{}" },
+          })),
+          results: [],
+        };
         // DeepSeek's rule: the thinking that produced a tool call must ride
         // along on the next hop of THIS exchange. Most models must never see
         // prior thinking again — the manifest decides.
         if (!capsFor(state.model).strip_reasoning && bot.reasoning.length > rLen)
-          hopMsg.reasoning_content = bot.reasoning.slice(rLen);
+          hopRec.reasoning = bot.reasoning.slice(rLen);
+        bot.hops = (bot.hops || []).concat([hopRec]);
+        const hopMsg = { role: "assistant", content: hopRec.content, tool_calls: hopRec.tool_calls };
+        if (hopRec.reasoning) hopMsg.reasoning_content = hopRec.reasoning;
         msgs.push(hopMsg);
         for (const c of r.calls) {
           let args = {};
@@ -819,12 +846,21 @@
           } catch (e) { out = { content: "console could not reach the tool: " + e.message, isError: true }; }
           bot.toolUse[bot.toolUse.length - 1].result = out.content;
           bot.toolUse[bot.toolUse.length - 1].error = !!out.isError;
-          bot.toolResults.push({ id: c.id, content: String(out.content).slice(0, 20000) });
-          msgs.push({ role: "tool", tool_call_id: c.id, content: String(out.content).slice(0, 20000) });
+          const text = String(out.content).slice(0, 20000);
+          hopRec.results.push({ id: c.id, content: text });
+          msgs.push({ role: "tool", tool_call_id: c.id, content: text });
           renderMessages(true);
         }
         bot.content = "";   // the next hop writes the real answer
-        if (hop === MAX_HOPS - 1) bot.error = "stopped after " + MAX_HOPS + " tool hops";
+        if (repeats >= 2) {
+          bot.notice = "Stopped: the model made the identical tool call three times in a row (" +
+            r.calls[0].name + "). Tell it what to do differently, or send \"continue\".";
+          break;
+        }
+        if (hop === maxHops - 1) {
+          bot.notice = "Paused after " + maxHops + " tool hops. Send \"continue\" to keep going," +
+            " or raise Tool hops in the panel.";
+        }
       }
     } catch (e) {
       if (e.name !== "AbortError") bot.error = "upstream error: " + e.message;
@@ -1043,7 +1079,8 @@
     const o = { role: m.role, content: m.content, reasoning: m.reasoning || "",
                 meta: m.meta || "", model: m.model || "", effort: m.effort,
                 error: m.error || "", toolUse: m.toolUse || [],
-                tool_calls: m.tool_calls || null, toolResults: m.toolResults || [] };
+                tool_calls: m.tool_calls || null, toolResults: m.toolResults || [],
+                hops: m.hops || null };
     if (m.kind) { o.kind = m.kind; o.archive = m.archive || ""; o.count = m.count || 0; }
     return o;
   }

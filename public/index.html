@@ -280,6 +280,7 @@
             <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Tool calling</b><span class="hint" id="tools-count">—</span></div>
             <button class="switch on" id="tools-switch"><span></span></button>
           </div>
+          <div class="prow"><div class="head"><b>Tool hops</b><span class="val" id="maxhops-val">40</span></div><input type="range" id="maxhops" min="1" max="200" step="1" value="40"><span class="hint">Calls the model may chain in one turn before it pauses. Stop always works; an identical call repeated three times stops the turn early.</span></div>
           <div id="tools-box" style="display:flex;flex-direction:column;gap:7px"></div>
           <button class="ghost-btn" id="mcp-add-btn" style="justify-content:center;width:100%;padding:7px 0">Add MCP server</button>
 
@@ -289,6 +290,7 @@
               <button class="chip-btn mcp-preset" data-name="git" data-cmd="uvx" data-args="mcp-server-git --repository ~/rack" style="padding:4px 10px;font-size:11.5px">git</button>
               <button class="chip-btn mcp-preset" data-name="fetch" data-cmd="uvx" data-args="mcp-server-fetch" style="padding:4px 10px;font-size:11.5px">fetch</button>
               <button class="chip-btn mcp-preset" data-name="memory" data-cmd="npx" data-args="-y @modelcontextprotocol/server-memory" style="padding:4px 10px;font-size:11.5px">memory</button>
+              <button class="chip-btn mcp-preset" data-name="terminal" data-cmd="python3" data-args="mcp_terminal.py ~/rack" style="padding:4px 10px;font-size:11.5px">terminal</button>
             </div>
             <input class="text-input" id="mcp-name" placeholder="name (e.g. fs)">
             <input class="text-input" id="mcp-cmd" placeholder="command (npx, uvx, python3…)">

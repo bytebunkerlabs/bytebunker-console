@@ -106,20 +106,33 @@ for the common servers), or declare it in `config.json`:
       "enabled": true
     },
     "git":   { "command": "uvx", "args": ["mcp-server-git", "--repository", "/Users/you/repo"] },
-    "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] }
+    "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] },
+    "terminal": { "command": "python3", "args": ["mcp_terminal.py", "~/rack"] }
   }
 }
 ```
 
-Needs `npx` (Node) or `uvx` (uv) on PATH depending on the server. Tools appear as
-`server__tool` so two servers can share a name. The Playground then runs a bounded
-agent loop — the model requests a call, the console executes it, the result feeds
-back, up to 8 hops per turn — and every call renders inline with its arguments and
-result as it runs.
+Needs `npx` (Node) or `uvx` (uv) on PATH depending on the server; `~` in an
+argument is expanded. Tools appear as `server__tool` so two servers can share a
+name. The Playground then runs an agent loop — the model requests a call, the
+console executes it, the result feeds back — and every call renders inline with
+its arguments and result as it runs. **Tool hops** in the panel (default 40) is
+how many calls the model may chain in one turn before it pauses; send
+`continue` to let it carry on. A model that makes the identical call three times
+in a row is stopped early. Stop always works.
+
+**Terminal.** `mcp_terminal.py` ships with the console: one tool, `run`, that
+executes a shell command on the host and returns exit code, stdout and stderr.
+The working directory follows the model's `cd`s from call to call; the argument
+is where it starts. Commands are killed after 60 s (the model can ask for up to
+600) and long output is elided in the middle. Add it with the **terminal** preset.
 
 > **Trust boundary.** An MCP server is a local process with exactly the access its
 > arguments grant. The filesystem server can write anywhere under the roots you
-> pass it. The console does not sandbox that. Scope the roots deliberately.
+> pass it, and the terminal server is a shell running as you — files, keys,
+> network, everything. The console does not sandbox that. Enable the terminal
+> because you want the model to have one, and switch it off (one click in the
+> panel) when you don't.
 
 ---
 
