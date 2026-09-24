@@ -190,9 +190,35 @@ WireGuard) works the same way.
 | `nodes` | two examples | `name`, `instance` (Prometheus label prefix), `spec` |
 | `mcp_servers` | *(empty)* | `command`, `args`, `env`, `enabled` |
 | `frontier_rates_per_mtok` | 3 / 15 | used for the "not spent" figure on Usage |
+| `model_capabilities` | *(built-in table)* | per-model overrides keyed by a substring of the model id: `ctx` (the window the engine *serves*, `--max-model-len`), `tools`, `effort`, `ctk`, `strip_reasoning` |
 
-State lives in `data/` — `sessions.json` and `usage.jsonl`, plain files on the
-host, both gitignored.
+State lives in `data/` — `sessions.json`, `usage.jsonl` and `archive/`, plain
+files on the host, all gitignored.
+
+---
+
+## Long conversations
+
+The window is shared between the prompt and the answer, and vLLM refuses a
+request that asks for more than fits rather than trimming it. The console
+keeps you inside it three ways:
+
+- **Max tokens is clamped per request** to what the window has left. The prompt
+  size is estimated, then calibrated against the engine's own count of the
+  previous prompt. If the engine still says no, its error names the real
+  window; the console remembers that figure for the session and backs off
+  below the reported floor (vLLM's "at least N input tokens" is where its
+  tokenizer *stopped*, not the prompt's length).
+- **Auto-compress** (on by default, in the panel under *Context*): when the
+  prompt nears the limit, the model writes a dense summary of the older turns
+  and that summary takes their place. The last two exchanges stay verbatim,
+  so the chat carries on for as long as you want.
+- **`/compress`** typed into the chat does the same on demand.
+
+Nothing is thrown away. Every compression files the original messages —
+reasoning, tool calls and results included — under `data/archive/` as JSON
+plus a readable `.md` transcript, and the marker in the transcript links to
+it. If the served window ever changes, set `ctx` in `model_capabilities`.
 
 ---
 

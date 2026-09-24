@@ -255,6 +255,14 @@
         </div>
 
         <div class="pgroup">
+          <span class="glabel">Context</span>
+          <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:12px">
+            <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Auto-compress</b><span class="hint">When the window fills, older turns are summarized by the model and the originals filed under data/archive/. Type <span class="mono">/compress</span> to do it now.</span></div>
+            <button class="switch on" id="compress-switch"><span></span></button>
+          </div>
+        </div>
+
+        <div class="pgroup">
           <span class="glabel">Output</span>
           <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:12px">
             <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">JSON mode</b><span class="hint">Constrain output to valid JSON.</span></div>

@@ -16,6 +16,7 @@ API:
   POST /api/chat             proxied streaming /v1/chat/completions (SSE)
   GET  /api/telemetry        Prometheus-backed node cards (or {"nodes": []})
   GET  /api/sessions         list sessions  |  POST save  |  DELETE ?id=
+  POST /api/archive          file away compressed turns  |  GET /api/archive/<name>
   POST /api/usage-event      client-reported completion stats -> usage.jsonl
   GET  /api/usage            14-day aggregates for the Usage screen
   POST /api/video            multipart passthrough -> H3 /v1/videos (job id)
@@ -60,14 +61,19 @@ DEFAULT_CONFIG = {
 # about whether tools are accepted, whether thinking is on by default, which
 # effort values are legal, and whether prior reasoning must be resent or
 # stripped. Guessing produces a 400 that reads like a crash, so the client asks
-# instead. Keys are matched as substrings of the model id, first match wins;
-# override or extend via "model_capabilities" in config.json.
+# instead. Keys are matched as substrings of the model id, longest match
+# wins (so "deepseek-v4-vision" beats "deepseek-v4"); override or extend via
+# "model_capabilities" in config.json.
 #
 #   tools           send the tools array at all
 #   effort          legal reasoning-effort values; [] hides the dial entirely
 #   ctk             merged into chat_template_kwargs on every request
 #   strip_reasoning drop prior <think> from resent history
-#   ctx             context window, for the meter's denominator
+#   ctx             context window the engine is SERVING (--max-model-len),
+#                   not what the weights could do: it drives the meter and the
+#                   max_tokens clamp. If the engine's window turns out smaller,
+#                   the client learns the real figure from its overflow error
+#                   and uses that for the rest of the session.
 CAPS_FALLBACK = {"tools": True, "effort": [], "ctk": {}, "strip_reasoning": True,
                  "ctx": 131072}
 DEFAULT_CAPS = {
@@ -82,6 +88,12 @@ DEFAULT_CAPS = {
     "deepseek-v4": {"tools": True, "effort": ["max"], "strip_reasoning": False,
                     "ctk": {"thinking": True, "reasoning_effort": "max"},
                     "ctx": 1048576},   # native YaRN 1M; recipe serves full window
+    # The vision recipe is served at 262k on both Sparks (--max-model-len,
+    # measured 2026-09-24). Same caps otherwise. Re-serve it wider and this
+    # line (or a model_capabilities override) must follow.
+    "deepseek-v4-vision": {"tools": True, "effort": ["max"], "strip_reasoning": False,
+                           "ctk": {"thinking": True, "reasoning_effort": "max"},
+                           "ctx": 262144},
     # Inkling's renderer accepts none/minimal/low/medium/high/xhigh/max —
     # 'minimal', not 'min': an unknown name resolves to None and the template
     # falls back to its 0.9 default, i.e. the dial silently stops working.
@@ -95,12 +107,38 @@ def caps_for(model_id):
     table = dict(DEFAULT_CAPS)
     table.update(CFG.get("model_capabilities") or {})
     mid = (model_id or "").lower()
-    for key, caps in table.items():
-        if key.lower() in mid:
-            merged = dict(CAPS_FALLBACK)
-            merged.update(caps)
-            return merged
+    hits = [k for k in table if k.lower() in mid]
+    if hits:
+        merged = dict(CAPS_FALLBACK)
+        merged.update(table[max(hits, key=len)])
+        return merged
     return dict(CAPS_FALLBACK)
+
+
+def upstream_message(detail):
+    """The sentence inside an upstream error body.
+
+    A proxy chain wraps errors in envelopes — litellm puts vLLM's message
+    inside {"error": {"message": ...}} and the console used to wrap that
+    again — so the browser ended up rendering 400 characters of escaped JSON.
+    Peel the envelopes; hand back the original text if they don't parse."""
+    obj = detail
+    for _ in range(3):
+        if isinstance(obj, str):
+            try:
+                obj = json.loads(obj)
+            except ValueError:
+                break
+        if isinstance(obj, dict):
+            inner = obj.get("error", obj.get("message", obj.get("detail")))
+            if isinstance(inner, dict):
+                inner = inner.get("message")
+            if not isinstance(inner, str):
+                break
+            obj = inner
+            continue
+        break
+    return obj if isinstance(obj, str) else detail
 
 
 def load_config():
@@ -153,6 +191,62 @@ def save_config():
             json.dump(CFG, f, indent=2)
             f.write("\n")
         os.replace(tmp, path)
+
+
+# ------------------------------------------------------------------ archive --
+# Compression moves the older part of a conversation out of the model's
+# window and replaces it with a summary. The originals are not thrown away:
+# each compression writes one file here, full fidelity (reasoning, tool
+# calls, tool results) as JSON, with a readable Markdown transcript beside
+# it. The transcript marker keeps the file name so it can link back.
+ARCHIVE = os.path.join(DATA, "archive")
+_ARCHIVE_NAME = re.compile(r"^[A-Za-z0-9_-]+\.(json|md)$")
+
+
+def write_archive(body):
+    session = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("session") or ""))[:40] or "nosession"
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    os.makedirs(ARCHIVE, exist_ok=True)
+    name, n = "%s_%s" % (session, stamp), 0
+    while os.path.exists(os.path.join(ARCHIVE, name + ".json")):
+        n += 1   # two compressions in one second must not overwrite each other
+        name = "%s_%s-%d" % (session, stamp, n)
+    msgs = body.get("messages") if isinstance(body.get("messages"), list) else []
+    rec = {"session": session, "model": str(body.get("model") or ""),
+           "created": time.time(), "summary": str(body.get("summary") or ""),
+           "messages": msgs}
+    with open(os.path.join(ARCHIVE, name + ".json"), "w") as f:
+        json.dump(rec, f, indent=1)
+    with open(os.path.join(ARCHIVE, name + ".md"), "w") as f:
+        f.write(archive_markdown(rec))
+    return name
+
+
+def archive_markdown(rec):
+    out = ["# Archived conversation \u2014 %s" % rec["session"], "",
+           "model: %s  " % rec["model"],
+           "archived: %s  " % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(rec["created"])),
+           "messages: %d" % len(rec["messages"]), "",
+           "## Summary that replaced these messages", "", rec["summary"] or "(none)", "",
+           "## Transcript", ""]
+    for m in rec["messages"]:
+        if not isinstance(m, dict):
+            continue
+        role = "User" if m.get("role") == "user" else "Assistant"
+        if m.get("kind") == "summary":
+            role = "Context summary (an earlier compression)"
+        elif m.get("kind") == "summary-ack":
+            continue
+        out.append("### " + role)
+        if m.get("reasoning"):
+            out += ["", "<details><summary>reasoning</summary>", "", str(m["reasoning"]), "", "</details>"]
+        out += ["", str(m.get("content") or ""), ""]
+        for t in (m.get("toolUse") or []):
+            if not isinstance(t, dict):
+                continue
+            out += ["**tool: %s**" % t.get("name", ""), "", "```json", str(t.get("args") or "{}"),
+                    "```", "", "```", str(t.get("result", ""))[:20000], "```", ""]
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------- sessions --
@@ -459,6 +553,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # revalidate every load: a fix to console.js must not wait on a
+        # heuristic browser cache to expire
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _archive_get(self, name):
+        if not _ARCHIVE_NAME.match(name):
+            self._json({"error": "not found"}, 404)
+            return
+        fs = os.path.join(ARCHIVE, name)
+        if not os.path.isfile(fs):
+            self._json({"error": "not found"}, 404)
+            return
+        with open(fs, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        # text/plain for the .md: the browser shows it instead of downloading
+        self.send_header("Content-Type", "application/json" if name.endswith(".json")
+                         else "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -589,6 +704,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"servers": {}, "tools": [], "error": str(e)[:300]})
         elif path == "/api/sessions":
             self._json(read_sessions())
+        elif path.startswith("/api/archive/"):
+            self._archive_get(path[len("/api/archive/"):])
         elif path == "/api/usage":
             self._json(usage_summary())
         elif path == "/api/video" or path.startswith("/api/video/"):
@@ -630,7 +747,7 @@ class Handler(BaseHTTPRequestHandler):
             self._video_post()
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
-                        "/api/tool-call", "/api/mcp"):
+                        "/api/tool-call", "/api/mcp", "/api/archive"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -647,6 +764,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"content": text, "isError": is_err})
         elif path == "/api/mcp":
             self._mcp_admin(body)
+        elif path == "/api/archive":
+            if not isinstance(body, dict):
+                self._json({"error": "expected object"}, 400)
+                return
+            try:
+                self._json({"ok": True, "file": write_archive(body)})
+            except OSError as e:
+                self._json({"error": "could not write archive: " + str(e)[:200]}, 500)
         elif path == "/api/sessions":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
@@ -737,7 +862,7 @@ class Handler(BaseHTTPRequestHandler):
                         payload.pop(k, None)
                     resp = attempt(payload)
                 else:
-                    self._json({"error": detail[:500]}, e.code)
+                    self._json({"error": upstream_message(detail)[:1000]}, e.code)
                     return
         except Exception as e:
             self._json({"error": str(e)}, 502)

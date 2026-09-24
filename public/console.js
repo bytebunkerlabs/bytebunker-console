@@ -18,12 +18,15 @@
     models: [],
     model: null,
     params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 8192,
-              seed: 0, effort: 4, json: false, stops: "", sys: "" },
+              seed: 0, effort: 4, json: false, stops: "", sys: "",
+              autoCompress: true },
     messages: [],           // {role:'user'|'bot', content, reasoning, meta, error}
     streaming: false,
     abort: null,
     session: null,          // current session id
     ctxUsed: null,          // prompt+completion tokens of the last turn
+    ctxLearned: {},         // model id -> window the engine really serves, per its own 400
+    calib: null,            // {model, chars, tokens}: the last prompt the engine counted for us
     tools: [],              // MCP tools discovered via /api/tools
     toolsOn: true,          // send them to the model?
     hist: {},               // node name -> util history for sparklines
@@ -81,6 +84,10 @@
   $("stops").oninput = (e) => { P.stops = e.target.value; };
   $("sys").oninput = (e) => { P.sys = e.target.value; $("sys-len").textContent = P.sys.length + " chars"; };
   $("json-switch").onclick = () => { P.json = !P.json; $("json-switch").classList.toggle("on", P.json); };
+  $("compress-switch").onclick = () => {
+    P.autoCompress = !P.autoCompress;
+    $("compress-switch").classList.toggle("on", P.autoCompress);
+  };
   $("tools-switch").onclick = () => { state.toolsOn = !state.toolsOn; $("tools-switch").classList.toggle("on", state.toolsOn); };
   $("reset-params").onclick = () => location.reload();
   $("model-select").onchange = (e) => { state.model = e.target.value; servingLine(); };
@@ -152,7 +159,63 @@
   const CAPS_FALLBACK = { tools: true, effort: [], ctk: {}, strip_reasoning: true,
                           ctx: 131072 };
   function capsFor(id) {
-    return (state.caps && state.caps[id]) || CAPS_FALLBACK;
+    const c = (state.caps && state.caps[id]) || CAPS_FALLBACK;
+    // The manifest says what the model can do; the engine may be serving
+    // less (measured: DeepSeek-V4 vision at 262k under a 1M manifest). Its
+    // overflow error names the real window, and that figure wins.
+    const learned = state.ctxLearned[id];
+    return learned ? Object.assign({}, c, { ctx: learned }) : c;
+  }
+
+  // The server forwards upstream errors as {"error": text}. Dig the sentence
+  // out of that (and out of any envelope the proxy chain left inside it);
+  // hand back what we were given if it is not JSON at all.
+  function upstreamText(raw) {
+    let s = String(raw || "");
+    for (let i = 0; i < 3; i++) {
+      let o;
+      try { o = JSON.parse(s); } catch (e) { break; }
+      if (!o || typeof o !== "object") break;
+      let e = "error" in o ? o.error : ("message" in o ? o.message : o.detail);
+      if (e && typeof e === "object") e = e.message;
+      if (typeof e !== "string") break;
+      s = e;
+    }
+    return s;
+  }
+
+  // vLLM's refusal of prompt + max_tokens > window names the window and a
+  // prompt size, in one of two phrasings. The newer one says "at least N"
+  // because its tokenizer stops at N = window - max_tokens + 1: a floor, not
+  // the prompt's length. `bound` says which kind of number `prompt` is.
+  function parseCtxError(text) {
+    const win = /maximum context length is (\d+)/.exec(text);
+    if (!win) return null;
+    let m = /prompt contains (at least )?(\d+) input tokens/.exec(text);
+    if (m) return { win: +win[1], prompt: +m[2], bound: !!m[1] };
+    m = /\((\d+) in the messages/.exec(text);
+    return m ? { win: +win[1], prompt: +m[1], bound: false } : null;
+  }
+
+  // How many tokens is this prompt? Chars ÷ 3.2 is a guess good to a few
+  // percent, and at 200k tokens a few percent is thousands of tokens — more
+  // than the output budget can absorb near the edge of the window. So the
+  // engine's own count of the last prompt it saw (usage.prompt_tokens, kept
+  // in state.calib with the chars that produced it) calibrates the ratio for
+  // this model and conversation. `margin` is what to leave unspent: 1% when
+  // calibrated plus a quarter of whatever is new since the measured prompt
+  // (a fresh paste of code tokenizes unlike the prose before it), 2% when
+  // guessing. Tool definitions ride along on every request, so they count.
+  function estimatePrompt(msgs, tools, model) {
+    const chars = JSON.stringify({ m: msgs, t: tools || null }).length;
+    const k = state.calib;
+    const cal = !!(k && k.model === model && k.tokens > 1000 && k.chars > 4000);
+    const ratio = cal ? Math.min(6, Math.max(2, k.chars / k.tokens)) : 3.2;
+    const tokens = Math.ceil(chars / ratio);
+    const fresh = cal ? Math.max(0, chars - k.chars) : 0;
+    const margin = 256 + Math.ceil(tokens * (cal ? 0.01 : 0.02)) +
+                   Math.ceil(fresh / ratio * 0.25);
+    return { tokens, margin, calibrated: cal };
   }
 
   function copyBtn(getText) {
@@ -210,6 +273,34 @@
   function buildMessageNode(m) {
     const wrap = document.createElement("div");
     wrap.className = "msg";
+    if (m.kind === "summary-ack") {
+      // the model sees this turn; the reader has the card above it
+      wrap.hidden = true;
+      return wrap;
+    }
+    if (m.kind === "summary") {
+      const d = document.createElement("details");
+      d.className = "msg-summary";
+      const sum = document.createElement("summary");
+      const lab = document.createElement("span");
+      lab.className = "label";
+      lab.textContent = "Compressed " + (m.count || 0) + " earlier messages into a summary";
+      sum.appendChild(lab);
+      if (m.archive) {
+        const a = document.createElement("a");
+        a.href = "/api/archive/" + m.archive + ".md";
+        a.target = "_blank"; a.rel = "noopener";
+        a.textContent = "originals · " + m.archive + ".md";
+        sum.appendChild(a);
+      }
+      sum.appendChild(copyBtn(() => m.content));
+      const body = document.createElement("div");
+      body.className = "body";
+      body.textContent = m.content;
+      d.appendChild(sum); d.appendChild(body);
+      wrap.appendChild(d);
+      return wrap;
+    }
     if (m.role === "user") {
       const u = document.createElement("div");
       u.className = "msg-user";
@@ -412,23 +503,25 @@
     try {
     // Never request more output than the window has room for: vLLM rejects
     // prompt + max_tokens > ctx outright instead of trimming, so a big Max
-    // tokens dial turns a long tool conversation into a 400. Estimate the
-    // prompt (~3.2 chars/token is conservative for English + code + JSON)
-    // and clamp per hop — the prompt grows every time a tool result lands.
-    const tcaps = capsFor(bot.model || state.model);
-    const ctxWin = tcaps.ctx || 131072;
-    const estPrompt = Math.ceil(JSON.stringify(msgs).length / 3.2);
-    const room = ctxWin - estPrompt - 512;
+    // tokens dial turns a long conversation into a 400. The window is the
+    // manifest's figure until the engine corrects it (see capsFor); the
+    // prompt is estimated — calibrated against the engine's own count of the
+    // last prompt when there is one — and clamped per hop, since the prompt
+    // grows every time a tool result lands.
+    const mid = bot.model || state.model;
+    let ctxWin = capsFor(mid).ctx || 131072;
+    const est = estimatePrompt(msgs, body0.tools, mid);
+    const room = ctxWin - est.tokens - est.margin;
     if (room < 256) {
-      throw new Error("context is full: the prompt is ~" + estPrompt.toLocaleString() +
-        " tokens of a " + ctxWin.toLocaleString() + "-token window. Start a New chat," +
-        " or trim history / tool output.");
+      throw new Error("context is full: the prompt is ~" + est.tokens.toLocaleString() +
+        " tokens of a " + ctxWin.toLocaleString() + "-token window. Type /compress to fold" +
+        " older turns into a summary, or start a New chat.");
     }
     const body1 = Object.assign({}, body0, { messages: msgs });
     if (body1.max_tokens && body1.max_tokens > room) {
       body1.max_tokens = room;
       bot.notice = "Max tokens clamped to " + room.toLocaleString() + " for this hop — " +
-        "the prompt already uses ~" + estPrompt.toLocaleString() + " of " +
+        "the prompt already uses ~" + est.tokens.toLocaleString() + " of " +
         ctxWin.toLocaleString() + " context tokens.";
     }
     const post = (b) => fetch("/api/chat", {
@@ -436,38 +529,59 @@
       body: JSON.stringify(b), signal: ctl.signal,
     });
     let r = await post(body1);
-    if (!r.ok) {
-      const err = (await r.text()).slice(0, 800);
-      // Context overflow: our char-based estimate lost to the real tokenizer.
-      // The error names the exact numbers, so redo the arithmetic with those
-      // and retry once — precisely, instead of estimating harder.
-      const ctxErr = /maximum context length is (\d+).*?prompt contains at least (\d+) input tokens/s.exec(err);
-      if (ctxErr) {
-        const exactRoom = parseInt(ctxErr[1], 10) - parseInt(ctxErr[2], 10) - 64;
-        if (exactRoom < 128) {
-          throw new Error("context is full: the prompt is " + (+ctxErr[2]).toLocaleString() +
-            " tokens of a " + (+ctxErr[1]).toLocaleString() + "-token window. Start a New chat.");
+    for (let attempt = 0; !r.ok; attempt++) {
+      const err = upstreamText(await r.text()).slice(0, 800);
+      const over = parseCtxError(err);
+      if (over) {
+        // Context overflow: the estimate lost to the real tokenizer, or the
+        // manifest's window was wrong. The error names the engine's real
+        // window — believe it, for the meter and every clamp from now on.
+        if (over.win !== ctxWin) {
+          state.ctxLearned[mid] = over.win;
+          ctxWin = over.win;
+          servingLine();
         }
-        body1.max_tokens = exactRoom;
-        bot.notice = "Max tokens clamped to " + exactRoom.toLocaleString() +
-          " — the prompt uses " + (+ctxErr[2]).toLocaleString() + " of " +
-          (+ctxErr[1]).toLocaleString() + " context tokens.";
+        if (attempt >= 4) {
+          throw new Error("still over the context window after 4 retries — type /compress" +
+            " to fold older turns into a summary. Engine said: " + err.slice(0, 300));
+        }
+        // "at least N input tokens" is not the prompt's size. vLLM stops
+        // tokenizing at window - max_tokens + 1 and reports THAT (renderers/
+        // params.py, _token_len_check), so N is a floor and the real prompt
+        // is N plus an unknown amount. Retrying at N + 64 is how this used to
+        // fail by exactly one token, twice. Back off below the floor
+        // geometrically instead: 0.5%, 2%, 8%, 32% of the window — each
+        // refusal is cheap, the engine checks before it schedules. The older
+        // phrasing gives an exact count and fits on the first go.
+        // Capped at half of what the floor leaves, so a late retry cannot
+        // talk itself into "full" while room remains.
+        const left = over.win - over.prompt;
+        const margin = over.bound
+          ? Math.min(Math.ceil(over.win * 0.005 * Math.pow(4, attempt)), Math.floor(left / 2))
+          : 64;
+        const fit = left - margin;
+        if (fit < 128) {
+          throw new Error("context is full: the prompt is " + (over.bound ? "over " : "") +
+            over.prompt.toLocaleString() + " tokens of a " + over.win.toLocaleString() +
+            "-token window. Type /compress, or start a New chat.");
+        }
+        body1.max_tokens = Math.min(body1.max_tokens || fit, fit);
+        bot.notice = "Max tokens clamped to " + fit.toLocaleString() + " — the prompt is " +
+          (over.bound ? "over " : "") + over.prompt.toLocaleString() + " of " +
+          over.win.toLocaleString() + " context tokens.";
         r = await post(body1);
-        if (!r.ok) throw new Error((await r.text()).slice(0, 400));
-      } else {
-        // A server started without --enable-auto-tool-choice rejects the whole
-        // request. That is a served-with-the-wrong-flags problem, not a crash, so
-        // say it in a sentence and answer without tools rather than dumping JSON.
-        const noTools = body0.tools &&
-          /enable-auto-tool-choice|tool-call-parser|tool choice/i.test(err);
-        if (!noTools) throw new Error(err.slice(0, 400));
-        const retry = Object.assign({}, body1);
-        delete retry.tools; delete retry.tool_choice;
-        bot.notice = "This model is not served with tool support " +
-          "(needs --enable-auto-tool-choice and --tool-call-parser). Answered without tools.";
-        r = await post(retry);
-        if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+        continue;
       }
+      // A server started without --enable-auto-tool-choice rejects the whole
+      // request. That is a served-with-the-wrong-flags problem, not a crash, so
+      // say it in a sentence and answer without tools rather than dumping JSON.
+      const noTools = body1.tools &&
+        /enable-auto-tool-choice|tool-call-parser|tool choice/i.test(err);
+      if (!noTools) throw new Error(err.slice(0, 400));
+      delete body1.tools; delete body1.tool_choice;
+      bot.notice = "This model is not served with tool support " +
+        "(needs --enable-auto-tool-choice and --tool-call-parser). Answered without tools.";
+      r = await post(body1);
     }
     phase = "stream";
     const reader = r.body.getReader();
@@ -532,6 +646,12 @@
       try { JSON.parse(c.args || "{}"); okCalls.push(c); }
       catch (err) { brokenCalls.push(c); }
     }
+    // The engine counted this prompt; that count calibrates the next
+    // estimate (see estimatePrompt).
+    if (usage && usage.prompt_tokens > 0) {
+      state.calib = { model: bot.model || state.model, tokens: usage.prompt_tokens,
+                      chars: JSON.stringify({ m: msgs, t: body0.tools || null }).length };
+    }
     return { calls: okCalls, brokenCalls, usage, finishReason, chunks,
              ttft: tFirst ? (tFirst - t0) / 1000 : null,
              span: (tFirst && tLast && tLast > tFirst) ? (tLast - tFirst) / 1000 : null };
@@ -543,25 +663,16 @@
     }
   }
 
-  async function send(text) {
-    if (!text || !text.trim() || state.streaming || !state.model) return;
-    const user = { role: "user", content: text.trim() };
-    // model + effort stamped now: the transcript renders provenance, not
-    // whatever the controls happen to say later
-    const bot = { role: "bot", content: "", reasoning: "", meta: "",
-                  model: state.model, effort: P.effort,
-                  thinkOpen: true };   // watch it stream; collapsed on completion
-    state.messages.push(user, bot);
-    state.streaming = true;
-    $("send-btn").classList.add("stop");
-    renderMessages();
-
-    const caps = capsFor(state.model);
-
+  // The transcript, rendered the way the upstream wants it: system prompt
+  // first, prior thinking stripped or carried per the manifest, broken tool
+  // calls scrubbed. One builder, because compression sends history too.
+  function buildMsgs(list, caps, sys) {
     const msgs = [];
-    if (P.sys.trim()) msgs.push({ role: "system", content: P.sys.trim() });
-    for (const m of state.messages.slice(0, -1)) {
+    const system = sys !== undefined ? sys : P.sys.trim();
+    if (system) msgs.push({ role: "system", content: system });
+    for (const m of list) {
       if (m.role === "bot") {
+        if (m.kind === "compress") continue;   // a summary in flight, or one that failed
         // Most reasoning models want prior thinking dropped. DeepSeek-V4 is the
         // exception once tools are in play: it 400s when reasoning_content is
         // missing from a tool exchange. Without tool calls its docs allow
@@ -590,6 +701,52 @@
         msgs.push({ role: "user", content: m.content });
       }
     }
+    return msgs;
+  }
+
+  function toolDefs(caps) {
+    return (caps.tools && state.toolsOn && state.tools.length)
+      ? state.tools.map((t) => t.def) : null;
+  }
+
+  // Where the prompt has to stay for the chat to keep going: room under the
+  // window for the Max tokens dial, and never past 80% of it regardless.
+  function compressLimit(win) {
+    return Math.max(Math.floor(win * 0.3),
+                    Math.min(Math.floor(win * 0.8), win - P.maxTok - 4096));
+  }
+
+  async function send(text) {
+    if (!text || !text.trim() || state.streaming || !state.model) return;
+    text = text.trim();
+    if (/^\/compress\b/i.test(text)) { await compress("manual"); return; }
+    if (P.autoCompress) {
+      // Fold older turns away BEFORE this one joins the transcript, so what
+      // goes out fits with room to answer. A loop, because one round only
+      // summarizes as much as fits in the summarizer's own window.
+      for (let round = 0; round < 3; round++) {
+        const c0 = capsFor(state.model);
+        const probe = buildMsgs(state.messages.concat([{ role: "user", content: text }]), c0);
+        const est = estimatePrompt(probe, toolDefs(c0), state.model);
+        if (est.tokens <= compressLimit(c0.ctx || 131072)) break;
+        const did = await compress("auto", est.tokens);
+        if (did === "aborted") { $("input").value = text; return; }
+        if (!did) break;
+      }
+    }
+    const user = { role: "user", content: text };
+    // model + effort stamped now: the transcript renders provenance, not
+    // whatever the controls happen to say later
+    const bot = { role: "bot", content: "", reasoning: "", meta: "",
+                  model: state.model, effort: P.effort,
+                  thinkOpen: true };   // watch it stream; collapsed on completion
+    state.messages.push(user, bot);
+    state.streaming = true;
+    $("send-btn").classList.add("stop");
+    renderMessages();
+
+    const caps = capsFor(state.model);
+    const msgs = buildMsgs(state.messages.slice(0, -1), caps);
 
     const body = {
       model: state.model,
@@ -606,10 +763,8 @@
     // Thinking is off by default on vLLM's DeepSeek-V4 path and must be asked
     // for; other models ignore an empty object.
     if (caps.ctk && Object.keys(caps.ctk).length) body.chat_template_kwargs = caps.ctk;
-    if (caps.tools && state.toolsOn && state.tools.length) {
-      body.tools = state.tools.map((t) => t.def);
-      body.tool_choice = "auto";
-    }
+    const tools = toolDefs(caps);
+    if (tools) { body.tools = tools; body.tool_choice = "auto"; }
 
     let usage = null, finishReason = null, ttft = null, span = null, chunks = 0;
     let totToks = 0, totRToks = 0;   // summed across hops — last-hop usage alone lies
@@ -715,6 +870,127 @@
     }).catch(() => {});
   }
 
+  /* ---------------- compression ---------------- */
+  // The model writes a dense summary of the older part of the conversation,
+  // the originals go to a file on the server (data/archive/), and the
+  // summary takes their place in the window. The newest exchanges stay
+  // verbatim. Typed as /compress, or run by send() when the prompt nears
+  // the limit — which is what lets a chat go on for as long as you want.
+  const KEEP_RECENT = 2;        // user turns kept verbatim
+  const SUMMARY_TOKENS = 8192;  // output budget for the summary itself
+  const COMPRESS_SYS =
+    "You are compressing a conversation so that it can continue in a smaller context window. " +
+    "Write a dense, factual summary a colleague could continue from without the original. " +
+    "Keep: the user's goals and constraints; decisions made and why; facts, numbers, file paths, " +
+    "commands, identifiers, URLs and error messages, quoted exactly when they will be needed again; " +
+    "results of tool calls that still matter; what was tried and failed; open questions and next " +
+    "steps; standing instructions about tone or format. Drop pleasantries and superseded drafts. " +
+    "Plain text with short headed sections. No preamble, no commentary, no offer to help.";
+  const COMPRESS_ASK =
+    "Compress everything above into that summary now. Detail over brevity — up to about 3,000 words.";
+
+  // the message boundary at or before `j` that starts a user turn, so the
+  // kept tail begins with the user speaking
+  function cutAtUser(list, j) {
+    for (let i = Math.min(j, list.length - 1); i > 0; i--) if (list[i].role === "user") return i;
+    return j;
+  }
+
+  async function compress(why, estTokens) {
+    if (state.streaming || !state.model) return false;
+    const caps = capsFor(state.model);
+    const win = caps.ctx || 131072;
+    const list = state.messages.filter((m) => m.kind !== "compress");
+    // keep the last KEEP_RECENT user turns; everything before them is "old"
+    let cut = list.length, seen = 0;
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === "user" && ++seen === KEEP_RECENT) { cut = i; break; }
+    }
+    let old = list.slice(0, cut);
+    if (!old.length) {
+      const last = state.messages[state.messages.length - 1];
+      if (last) { last.notice = "Nothing older than the last " + KEEP_RECENT + " turns to compress."; renderMessages(); }
+      return false;
+    }
+    // the summarizer's own request must fit: shrink the slice until it does
+    let convo;
+    for (;;) {
+      convo = buildMsgs(old, caps, COMPRESS_SYS);
+      const e = estimatePrompt(convo, null, state.model);
+      if (e.tokens + e.margin + SUMMARY_TOKENS <= win) break;
+      if (old.length <= 1) {
+        const last = state.messages[state.messages.length - 1];
+        if (last) { last.error = "cannot compress: even one message is too big for the summarizer's window"; renderMessages(); }
+        return false;
+      }
+      old = list.slice(0, cutAtUser(list, Math.ceil(old.length / 2)));
+    }
+    // the instruction is a user turn; merge if the slice already ends on one
+    const lastC = convo[convo.length - 1];
+    if (lastC && lastC.role === "user") convo[convo.length - 1] = { role: "user", content: lastC.content + "\n\n" + COMPRESS_ASK };
+    else convo.push({ role: "user", content: COMPRESS_ASK });
+
+    const tmp = { role: "bot", kind: "compress", content: "", reasoning: "", meta: "",
+                  model: state.model, effort: P.effort, thinkOpen: false,
+                  notice: (why === "auto" && estTokens
+                            ? "Context is at ~" + estTokens.toLocaleString() + " of " + win.toLocaleString() + " tokens: "
+                            : "") + "compressing " + old.length + " older messages into a summary…" };
+    state.messages.push(tmp);
+    state.streaming = true;
+    $("send-btn").classList.add("stop");
+    renderMessages();
+
+    const body = { model: state.model, temperature: 0.2, top_p: 0.9, max_tokens: SUMMARY_TOKENS };
+    if (caps.ctk && Object.keys(caps.ctk).length) body.chat_template_kwargs = caps.ctk;
+    // transcription, not reasoning: the lowest effort the model offers
+    for (const e of ["low", "minimal", "none"]) {
+      if ((caps.effort || []).includes(e)) { body.reasoning_effort = e; break; }
+    }
+    let result = false;
+    try {
+      await streamTurn(convo, tmp, body);
+      const summary = stripThink(tmp.content).trim();
+      if (!summary) throw new Error("the model returned an empty summary");
+      // file the originals away first, then swap the summary in
+      if (!state.session) state.session = "s-" + Date.now().toString(36);
+      let filed = {};
+      try {
+        filed = await (await fetch("/api/archive", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: state.session, model: state.model, summary,
+                                 messages: old.map(serializeMsg) }),
+        })).json();
+      } catch (e) { filed = {}; }
+      const marker = {
+        role: "user", kind: "summary", count: old.length, archive: filed.file || "",
+        content: "[Earlier conversation compressed. What follows is a summary of " + old.length +
+                 " messages" + (filed.file ? ", archived as " + filed.file : "") + ".]\n\n" + summary,
+      };
+      const ack = { role: "bot", kind: "summary-ack", model: state.model,
+                    content: "Understood. I have the summary of the earlier conversation and will continue from it." };
+      state.messages = [marker, ack].concat(list.slice(old.length));
+      state.ctxUsed = null;   // the meter's last reading described the old prompt
+      result = true;
+    } catch (e) {
+      if (e.name === "AbortError") {
+        state.messages = state.messages.filter((m) => m !== tmp);
+        result = "aborted";
+      } else {
+        tmp.notice = null;
+        tmp.error = "compression failed: " + e.message;
+      }
+    } finally {
+      tmp.status = null;
+      state.streaming = false;
+      state.abort = null;
+      $("send-btn").classList.remove("stop");
+    }
+    servingLine();
+    renderMessages();
+    saveSession();
+    return result;
+  }
+
   $("send-btn").onclick = () => {
     if (state.streaming) { state.abort && state.abort.abort(); return; }
     const el = $("input"); const v = el.value; el.value = ""; send(v);
@@ -736,6 +1012,7 @@
     state.messages = [];
     state.session = null;
     state.ctxUsed = null;
+    state.calib = null;
     go("playground");
     servingLine();
     renderMessages();
@@ -757,14 +1034,18 @@
         turns: state.messages.length,
         chars: toks,
         updated: Date.now(),
-        messages: state.messages.map((m) => ({
-          role: m.role, content: m.content, reasoning: m.reasoning || "",
-          meta: m.meta || "", model: m.model || "", effort: m.effort,
-          error: m.error || "", toolUse: m.toolUse || [],
-          tool_calls: m.tool_calls || null, toolResults: m.toolResults || [],
-        })),
+        messages: state.messages.map(serializeMsg),
       }),
     }).catch(() => {});
+  }
+
+  function serializeMsg(m) {
+    const o = { role: m.role, content: m.content, reasoning: m.reasoning || "",
+                meta: m.meta || "", model: m.model || "", effort: m.effort,
+                error: m.error || "", toolUse: m.toolUse || [],
+                tool_calls: m.tool_calls || null, toolResults: m.toolResults || [] };
+    if (m.kind) { o.kind = m.kind; o.archive = m.archive || ""; o.count = m.count || 0; }
+    return o;
   }
 
   function relTime(ms) {
@@ -810,6 +1091,8 @@
       r.onclick = () => {
         state.session = s.id;
         state.messages = (s.messages || []).map((m) => ({ ...m }));
+        state.ctxUsed = null;
+        state.calib = null;
         if (s.model && state.models.includes(s.model)) {
           state.model = s.model;
           $("model-select").value = s.model;
