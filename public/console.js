@@ -1551,7 +1551,34 @@
     let d = { ok: false };
     try { d = await (await fetch("/api/agents/slaves")).json(); } catch (e) {}
     box.textContent = "";
-    if (!d.ok || !(d.slaves || []).length) {
+    // Running right now: each live slave streams its events to the worker,
+    // and this is them, as they happen — the LLM steps, every tool call,
+    // verdicts — so a working agent is never a black box.
+    for (const l of (d.live || [])) {
+      const card = document.createElement("div");
+      card.className = "card live-card"; card.style.gap = "6px";
+      const head = document.createElement("div");
+      head.className = "skill-head";
+      head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono live-dot'>\u25cf running</span>";
+      head.querySelector("b").textContent = l.name || "slave";
+      head.querySelector(".src").textContent = (l.events || []).length + " recent events";
+      card.appendChild(head);
+      const ev = document.createElement("div");
+      ev.className = "skill-tags mono"; ev.style.whiteSpace = "pre-wrap"; ev.style.lineHeight = "1.55";
+      ev.textContent = (l.events || []).slice(-8).map((e) => {
+        const t = e.ts ? new Date(e.ts * 1000).toLocaleTimeString([], { hour12: false }) : "";
+        let what = e.kind || "";
+        if (e.kind === "llm_call") what = "step " + e.step + " \u2192 model (" + Math.round((e.prompt_chars || 0) / 1000) + "k chars)";
+        else if (e.kind === "llm_reply") what = "model \u2192 " + ((e.tool_calls || []).length ? "calls " + e.tool_calls.join(", ") : (e.text || "").slice(0, 80));
+        else if (e.kind === "tool") what = (e.ok ? "\u2713 " : "\u2717 ") + e.name + " " + (e.args || "").slice(0, 90);
+        else if (e.kind === "verdict") what = "verifier: " + (e.passed ? "passed" : "failed " + (e.failures || []).join("; ").slice(0, 80));
+        else if (e.kind === "transcript_trim") what = "trimmed " + e.chars + " chars of old tool output";
+        return t + "  " + what;
+      }).join("\n");
+      card.appendChild(ev);
+      box.appendChild(card);
+    }
+    if (!d.ok || (!(d.slaves || []).length && !(d.live || []).length)) {
       box.innerHTML = "<div class='empty-state'><b>No agent activity yet</b><span>" +
         (d.error ? "Could not read the worker's trajectory (" + d.error + ")." :
          "Each slave the master spawns appears here — its role, whether it had network, whether it succeeded, and what it found.") + "</span></div>";
@@ -1608,6 +1635,7 @@
     const ctl = new AbortController();
     state.agentAbort = ctl;
     const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
+    const liveTimer = setInterval(() => { if (state.screen === "agents") renderAgentSlaves(); }, 5000);
     try {
       const r = await fetch("/api/agents", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1637,6 +1665,7 @@
     } catch (e) {
       if (e.name !== "AbortError") append("error: " + e.message);
     } finally {
+      clearInterval(liveTimer);
       state.streaming = false;
       state.agentAbort = null;
       $("agent-run").disabled = false;

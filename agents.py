@@ -74,7 +74,10 @@ def build_command(CFG, goal):
 
     # The master's persona travels as env so the harness picks it up without
     # editing the worker's yaml. Only set when non-empty.
-    envs = {}
+    # Python block-buffers stdout when it is a pipe, so the master's narration
+    # arrived in one lump at exit (or never, if the run was stopped). Unbuffered
+    # makes it stream line by line, which is the point of watching a run.
+    envs = {"PYTHONUNBUFFERED": "1"}
     if (a.get("master_name") or "").strip():
         envs["BYTEBUNKER_MASTER_NAME"] = a["master_name"].strip()
     if (a.get("master_instructions") or "").strip():
@@ -91,9 +94,32 @@ def build_command(CFG, goal):
             qdir = "~/" + shlex.quote(directory[2:])
         else:
             qdir = shlex.quote(directory)
-        env_prefix = "".join("%s=%s " % (k, shlex.quote(v)) for k, v in envs.items())
-        remote = "cd %s && %s%s %s --goal %s" % (
-            qdir, env_prefix, launcher, shlex.quote(script), shlex.quote(goal))
+        # setsid execs a COMMAND, so env assignments must go through `env`
+        # rather than as a shell prefix (setsid would try to run "VAR=x").
+        env_prefix = ("env " + "".join("%s=%s " % (k, shlex.quote(v)) for k, v in envs.items())) if envs else ""
+        launch = "%s%s %s --goal %s" % (env_prefix, launcher, shlex.quote(script), shlex.quote(goal))
+        # Killing the local ssh does NOT stop the remote harness — without a
+        # tty the remote command just keeps running, and its slaves with it
+        # (measured: two masters and their researchers still alive an hour
+        # after their streams were closed). So the harness runs in its own
+        # process group under setsid, and a sidecar watches our stdin: when
+        # the console closes it (Stop, or a client that went away) the whole
+        # group gets TERM, then KILL. podman forwards TERM into the container.
+        # bash (the worker's login shell) gives a backgrounded command stdin
+        # from /dev/null when job control is off, so a backgrounded `cat`
+        # would see EOF at once and kill the run a second in (measured). The
+        # real stdin is saved on fd 3 first and handed to the sidecar
+        # explicitly; the harness itself correctly gets /dev/null.
+        remote = ("cd %s && exec 3<&0; if command -v setsid >/dev/null 2>&1; then setsid %s & "
+                  "else %s & fi; CPID=$!; "
+                  "( cat <&3 >/dev/null; kill -TERM -- -$CPID 2>/dev/null; kill -TERM $CPID 2>/dev/null; "
+                  "sleep 8; kill -KILL -- -$CPID 2>/dev/null; kill -KILL $CPID 2>/dev/null; "
+                  # belt and braces: any slave container the dead harness left behind
+                  "for rt in podman docker; do command -v $rt >/dev/null 2>&1 && "
+                  "$rt ps -q --filter label=bytebunker.pgid=$CPID 2>/dev/null | xargs -r $rt kill >/dev/null 2>&1; done"
+                  " ) >/dev/null 2>&1 & "
+                  "SIDE=$!; wait $CPID; RC=$?; pkill -P $SIDE 2>/dev/null; kill $SIDE 2>/dev/null; exit $RC"
+                  ) % (qdir, launch, launch)
         return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", ssh, remote]
 
     # local: no shell, goal is a discrete argv element; env via a leading `env`
@@ -112,6 +138,11 @@ def recent_slaves(CFG, limit=40):
         return {"ok": False, "error": "agents.dir not set"}
     ssh = (a.get("ssh") or "").strip()
     rel = "trajectories/spawns.jsonl"
+    # Running slaves stream events to their host-mounted task dir
+    # (/tmp/bb-<role>-<id>-*/events.jsonl); files touched in the last 30 min
+    # are read too, so a slave shows up WHILE it works, not only after.
+    live_cmd = ("echo ===LIVE===; for f in $(find /tmp/ -maxdepth 2 -name events.jsonl -mmin -30 "
+                "-path '*/bb-*' 2>/dev/null | head -8); do echo \"### $f\"; tail -n 10 \"$f\"; done")
     if ssh:
         d = directory
         if d == "~":
@@ -120,7 +151,7 @@ def recent_slaves(CFG, limit=40):
             qd = "~/" + shlex.quote(d[2:])
         else:
             qd = shlex.quote(d)
-        remote = "tail -n %d %s/%s 2>/dev/null" % (int(limit), qd, rel)
+        remote = "tail -n %d %s/%s 2>/dev/null; %s" % (int(limit), qd, rel, live_cmd)
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", ssh, remote]
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
@@ -134,8 +165,30 @@ def recent_slaves(CFG, limit=40):
                 out = "".join(f.readlines()[-limit:])
         except OSError as e:
             return {"ok": False, "error": str(e)[:150]}
+        try:
+            out += subprocess.run(["sh", "-c", live_cmd], capture_output=True, text=True, timeout=10).stdout
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    spawn_part, _, live_part = out.partition("===LIVE===")
+    live = []
+    cur = None
+    for line in live_part.splitlines():
+        if line.startswith("### "):
+            path = line[4:].strip()
+            base = path.split("/")[-2] if "/" in path else path      # bb-<role>-<id>-<rand>
+            parts = base.split("-")
+            cur = {"name": "-".join(parts[1:3]) if len(parts) >= 3 else base, "path": path, "events": []}
+            live.append(cur)
+            continue
+        if cur is None:
+            continue
+        try:
+            e = _json.loads(line)
+        except ValueError:
+            continue
+        cur["events"].append({k: (v if not isinstance(v, str) else v[:160]) for k, v in e.items()})
     slaves = []
-    for line in out.splitlines():
+    for line in spawn_part.splitlines():
         try:
             r = _json.loads(line)
         except ValueError:
@@ -149,16 +202,18 @@ def recent_slaves(CFG, limit=40):
             "answer": (ans or "")[:400], "error": (r.get("error") or "")[:200],
             "ts": r.get("timestamp"),
         })
-    return {"ok": True, "slaves": slaves[::-1]}
+    return {"ok": True, "slaves": slaves[::-1], "live": live}
 
 
 def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
     """Run cmd, calling on_line(text) for each stdout line. Returns
     (exit_code, killed). Merges stderr into stdout so a crash is visible.
     A watchdog thread enforces the timeout and honours stop_event."""
+    # stdin stays open for the life of the run: over ssh the remote sidecar
+    # reads it, and closing it is how a stop reaches the remote process group
     proc = subprocess.Popen(
         cmd, cwd=cwd or None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, stdin=subprocess.DEVNULL,
+        text=True, bufsize=1, stdin=subprocess.PIPE,
     )
     killed = {"v": False}
 
@@ -168,11 +223,18 @@ def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
         else:
             killed["v"] = "timeout"
         try:
-            proc.terminate()
             try:
-                proc.wait(5)
+                proc.stdin.close()          # remote: sidecar kills the group
+            except Exception:
+                pass
+            try:
+                proc.wait(6)                # the remote sidecar TERMs the group on EOF within ~1 s
             except subprocess.TimeoutExpired:
-                proc.kill()
+                proc.terminate()
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         except Exception:
             pass
 
@@ -182,6 +244,12 @@ def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
         for line in proc.stdout:
             on_line(line.rstrip("\n"))
     finally:
+        # Output has ended: close stdin FIRST so a remote sidecar still
+        # reading it gets EOF and cannot hold the ssh session open, then wait.
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
         code = proc.wait()
         stop_event.set()      # release the watchdog if the process ended on its own
     return code, killed["v"]

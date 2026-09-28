@@ -1010,15 +1010,31 @@ class Handler(BaseHTTPRequestHandler):
         stop = threading.Event()
         lines = [0]
         captured = []   # full master output, stored so a past run can be reopened
+        wlock = threading.Lock()   # emitter and heartbeat share one socket
 
         def emit(obj):
             try:
-                self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
-                self.wfile.flush()
+                with wlock:
+                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+                    self.wfile.flush()
             except OSError:
                 stop.set()   # client went away — stop the run
 
         emit({"phase": "start", "id": rid, "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
+
+        # A run that prints nothing for minutes would never notice its client
+        # left (a dropped connection only shows up on the next write). An SSE
+        # comment every 10 s is invisible to the client's parser and makes the
+        # write fail promptly, which sets `stop` and kills the remote run.
+        def heartbeat():
+            while not stop.wait(5):
+                try:
+                    with wlock:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                except OSError:
+                    stop.set()
+        threading.Thread(target=heartbeat, daemon=True).start()
 
         def on_line(text):
             lines[0] += 1
