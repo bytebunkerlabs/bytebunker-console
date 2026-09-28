@@ -1501,30 +1501,100 @@
       topo.appendChild(warn);
     }
 
+    // master persona (only overwrite when not focused/editing)
+    if (document.activeElement !== $("master-name")) $("master-name").value = d.master_name || "";
+    if (document.activeElement !== $("master-instructions")) $("master-instructions").value = d.master_instructions || "";
+
     $("agent-run").disabled = !d.enabled || state.streaming;
     $("agent-launch-note").textContent = d.enabled ? "" : "enable agents in config.json first";
+
+    renderAgentSlaves();
 
     const runs = $("agents-runs");
     runs.textContent = "";
     if (!(d.recent || []).length) {
-      runs.innerHTML = "<div class='empty-state'><b>No runs yet</b><span>Launched goals show here, and each run is written to the trace log for the training export.</span></div>";
+      runs.innerHTML = "<div class='empty-state'><b>No runs yet</b><span>Launched goals show here. Click a run to read its full log. Each run is also written to the trace log for the training export.</span></div>";
     } else {
       for (const r of d.recent) {
         const card = document.createElement("div");
-        card.className = "card";
-        card.style.gap = "6px";
+        card.className = "card run-card";
+        card.style.gap = "6px"; card.style.cursor = "pointer";
         const top = document.createElement("div");
         top.className = "skill-head";
         top.innerHTML = "<b style='font-size:13px;font-weight:500'></b><span class='src mono'></span>";
-        top.children[0].textContent = (r.goal || "").slice(0, 120);
+        top.children[0].textContent = (r.goal || "").slice(0, 120) || "(no goal)";
         top.children[1].textContent = (r.killed ? r.killed : ("exit " + r.exit)) + " · " + (r.lines || 0) + " lines";
         const when = document.createElement("div");
         when.className = "skill-tags mono";
-        when.textContent = (r.host || "") + " · " + relTime((r.ts || 0) * 1000);
+        when.textContent = (r.host || "") + " · " + relTime((r.ts || 0) * 1000) + (r.id ? "  ·  click to read" : "");
         card.appendChild(top); card.appendChild(when);
+        if (r.id) card.onclick = () => openRunLog(r.id);
         runs.appendChild(card);
       }
     }
+  }
+
+  async function openRunLog(id) {
+    const pre = $("agent-rundetail");
+    pre.hidden = false; pre.textContent = "loading…"; pre.scrollIntoView({ block: "nearest" });
+    try {
+      const d = await (await fetch("/api/agents/log?id=" + encodeURIComponent(id))).json();
+      if (d.error) { pre.textContent = "error: " + d.error; return; }
+      const head = "goal: " + (d.goal || "") + "\nhost: " + (d.host || "") +
+        "  ·  " + (d.killed ? d.killed : "exit " + d.exit) + "\n" + "─".repeat(40) + "\n";
+      pre.textContent = head + (d.output || []).join("\n");
+    } catch (e) { pre.textContent = "error: " + e.message; }
+  }
+
+  async function renderAgentSlaves() {
+    const box = $("agents-slaves");
+    let d = { ok: false };
+    try { d = await (await fetch("/api/agents/slaves")).json(); } catch (e) {}
+    box.textContent = "";
+    if (!d.ok || !(d.slaves || []).length) {
+      box.innerHTML = "<div class='empty-state'><b>No agent activity yet</b><span>" +
+        (d.error ? "Could not read the worker's trajectory (" + d.error + ")." :
+         "Each slave the master spawns appears here — its role, whether it had network, whether it succeeded, and what it found.") + "</span></div>";
+      return;
+    }
+    for (const sl of d.slaves) {
+      const card = document.createElement("div");
+      card.className = "card"; card.style.gap = "6px";
+      const head = document.createElement("div");
+      head.className = "skill-head";
+      const ok = sl.success ? "✓ done" : (sl.error ? "✗ failed" : "…");
+      head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono'></span>";
+      head.querySelector("b").textContent = sl.role || "slave";
+      head.querySelectorAll(".src")[0].textContent =
+        (sl.network ? "network" : "no-network") + " · " + (sl.depth || "");
+      head.querySelectorAll(".src")[1].textContent = ok + " · " + (sl.tokens || 0) + " tok";
+      const brief = document.createElement("div");
+      brief.className = "skill-desc";
+      brief.textContent = sl.brief || "";
+      card.appendChild(head); card.appendChild(brief);
+      const detail = sl.success ? sl.answer : sl.error;
+      if (detail) {
+        const dv = document.createElement("div");
+        dv.className = "skill-tags mono"; dv.style.whiteSpace = "pre-wrap";
+        dv.textContent = detail;
+        card.appendChild(dv);
+      }
+      box.appendChild(card);
+    }
+  }
+
+  async function saveMaster() {
+    const btn = $("master-save"); btn.disabled = true;
+    try {
+      await fetch("/api/agents", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "config",
+          master_name: $("master-name").value.trim(),
+          master_instructions: $("master-instructions").value.trim() }),
+      });
+      $("master-note").textContent = "Saved. The master uses this on the next run.";
+    } catch (e) { $("master-note").textContent = "save failed: " + e.message; }
+    btn.disabled = false;
   }
 
   async function runAgent() {
@@ -1784,6 +1854,7 @@
   $("export-all").onclick = () => window.open("/api/export", "_blank");
   $("agent-run").onclick = runAgent;
   $("agent-stop").onclick = () => { if (state.agentAbort) state.agentAbort.abort(); };
+  $("master-save").onclick = saveMaster;
   $("export-good").onclick = () => window.open("/api/export?rated=up", "_blank");
   $("new-chat").onclick = newChat;
   $("new-chat-2").onclick = newChat;

@@ -24,6 +24,8 @@
     "ssh": "leagueofash",
     "dir": "~/bytebunker-harness",
     "python": "uv run",
-    "script": "scripts/run_master.py"
+    "script": "scripts/run_master.py",
+    "master_name": "",
+    "master_instructions": ""
   }
 }

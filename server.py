@@ -819,15 +819,33 @@ class Handler(BaseHTTPRequestHandler):
             self._archive_get(path[len("/api/archive/"):])
         elif path == "/api/agents":
             st = agentmod.status(CFG)
+            a = CFG.get("agents") or {}
+            st["master_name"] = a.get("master_name") or ""
+            st["master_instructions"] = a.get("master_instructions") or ""
             runs = []
             for e in TRACE.events(time.strftime("%Y-%m-%d",
                                   time.localtime(time.time() - 14 * 86400))):
                 if e.get("kind") == "agent_run":
-                    runs.append({"ts": e.get("ts"), "goal": e.get("goal"),
+                    runs.append({"id": e.get("id"), "ts": e.get("ts"), "goal": e.get("goal"),
                                  "exit": e.get("exit"), "killed": e.get("killed"),
                                  "lines": e.get("lines"), "host": e.get("host")})
-            st["recent"] = runs[-30:][::-1]
+            st["recent"] = runs[-40:][::-1]
             self._json(st)
+        elif path == "/api/agents/log":
+            rid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
+            found = None
+            for e in TRACE.events(time.strftime("%Y-%m-%d",
+                                  time.localtime(time.time() - 30 * 86400))):
+                if e.get("kind") == "agent_run" and e.get("id") == rid:
+                    found = e
+            if not found:
+                self._json({"error": "run not found"}, 404)
+            else:
+                self._json({"id": rid, "goal": found.get("goal"), "output": found.get("output") or [],
+                            "exit": found.get("exit"), "killed": found.get("killed"),
+                            "host": found.get("host"), "ts": found.get("ts")})
+        elif path == "/api/agents/slaves":
+            self._json(agentmod.recent_slaves(CFG))
         elif path == "/api/skills":
             cat = skill_catalog()
             self._json({"skills": cat.summaries(), "warnings": cat.warnings})
@@ -964,6 +982,15 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)
             return
+        if body.get("action") == "config":
+            # Save the master's name + instructions into the agents block.
+            a = CFG.setdefault("agents", {})
+            a["master_name"] = str(body.get("master_name") or "")[:120]
+            a["master_instructions"] = str(body.get("master_instructions") or "")[:8000]
+            save_config()
+            self._json({"ok": True, "master_name": a["master_name"],
+                        "master_instructions": a["master_instructions"]})
+            return
         goal = body.get("goal") or ""
         try:
             cmd = agentmod.build_command(CFG, goal)
@@ -973,6 +1000,7 @@ class Handler(BaseHTTPRequestHandler):
         st = agentmod.status(CFG)
         cwd = None if st["mode"] == "ssh" else os.path.expanduser((CFG.get("agents") or {}).get("dir") or ".")
         started = time.time()
+        rid = TRACE.new_id()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -981,6 +1009,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         stop = threading.Event()
         lines = [0]
+        captured = []   # full master output, stored so a past run can be reopened
 
         def emit(obj):
             try:
@@ -989,10 +1018,12 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 stop.set()   # client went away — stop the run
 
-        emit({"phase": "start", "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
+        emit({"phase": "start", "id": rid, "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
 
         def on_line(text):
             lines[0] += 1
+            if len(captured) < 4000:
+                captured.append(text)
             emit({"line": text})
 
         try:
@@ -1004,9 +1035,9 @@ class Handler(BaseHTTPRequestHandler):
             emit({"error": str(e)[:300]})
             code, killed = -1, "error"
         emit({"phase": "done", "exit": code, "killed": killed})
-        TRACE.log("agent_run", goal=goal[:8000], host=st["host"], mode=st["mode"],
+        TRACE.log("agent_run", id=rid, goal=goal[:8000], host=st["host"], mode=st["mode"],
                   isolated=st["isolated"], exit=code, killed=killed or False,
-                  lines=lines[0], ms=int((time.time() - started) * 1000))
+                  lines=lines[0], output=captured, ms=int((time.time() - started) * 1000))
 
     def _plugin_admin(self, body):
         if not isinstance(body, dict):

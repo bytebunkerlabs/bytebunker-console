@@ -107,6 +107,21 @@
       <header><h1>Agents</h1><span class="sub">Launch the harness on a separate host · the console only watches · <span id="agents-sub">—</span></span></header>
       <div class="scroll" style="display:flex;flex-direction:column;gap:16px;max-width:900px">
         <div id="agents-topology" class="card"></div>
+        <div class="card" id="agents-master">
+          <div class="glabel">Your master agent</div>
+          <div class="prow" style="flex-direction:row;align-items:center;gap:10px">
+            <b style="font-size:13px;font-weight:500;white-space:nowrap">Name</b>
+            <input class="text-input" id="master-name" placeholder="e.g. Hermes" style="flex:1">
+          </div>
+          <div class="prow">
+            <b style="font-size:13px;font-weight:500">Standing instructions</b>
+            <textarea class="sys-input" id="master-instructions" rows="4" placeholder="e.g. Give every agent you spawn a short human name and refer to it by that name in all your updates."></textarea>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="solid-btn" id="master-save">Save</button>
+            <span class="hint" id="master-note">The master reads these on the next run. Slaves are isolated; only the master sees this.</span>
+          </div>
+        </div>
         <div class="card" id="agents-launch">
           <div class="glabel">Run a goal</div>
           <textarea id="agent-goal" class="sys-input" rows="3" placeholder="Describe the goal for the Master agent…"></textarea>
@@ -118,8 +133,13 @@
           <pre id="agent-stream" class="skill-body" hidden style="max-height:420px"></pre>
         </div>
         <div>
-          <div class="glabel" style="margin-bottom:8px">Recent runs</div>
+          <div class="glabel" style="margin-bottom:8px">What your agents are doing</div>
+          <div id="agents-slaves" class="cards-col"></div>
+        </div>
+        <div>
+          <div class="glabel" style="margin-bottom:8px">Recent runs · click one to read its log</div>
           <div id="agents-runs" class="cards-col"></div>
+          <pre id="agent-rundetail" class="skill-body" hidden style="max-height:420px;margin-top:10px"></pre>
         </div>
       </div>
     </section>
