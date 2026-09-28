@@ -132,6 +132,21 @@ it empty runs the harness locally on hermes with **no isolation** (dev only,
 and the screen says so). Each run is written to the trace log, so agent goals
 feed the same training export as chats.
 
+**Watching a run.** The Agents screen streams the master's narration live
+(launched unbuffered), and *What your agents are doing* shows every running
+slave's steps, tool calls and verifier verdicts as they happen — slaves write
+their events to their task dir on the worker and the console tails them.
+Every finished run is stored; click one under *Recent runs* to reopen its log.
+
+**Stopping a run.** Stop (or closing the tab) reaches the worker: the harness
+runs in its own process group and is terminated when the console drops the
+connection, and any slave container it leaves behind is swept. A run that is
+silent for minutes still notices a gone client thanks to SSE keepalives.
+
+**After changing slave code** in the harness (anything under `src/` or
+`docker/`), rebuild the image on the worker — slaves run from the image, not
+the checkout: `podman build -f docker/Dockerfile.slave -t bytebunker-slave:latest .`
+
 > **Why a separate host.** An agent that is compromised or goes wrong should
 > not sit next to the model weights, the GPUs, or the LiteLLM key (the Sparks),
 > nor next to the console that watches it. A dedicated worker box keeps the
