@@ -19,6 +19,8 @@ API:
   POST /api/archive          file away compressed turns  |  GET /api/archive/<name>
   POST /api/rate             thumbs up/down on a turn, into the trace log
   GET  /api/traces           trace log stats  |  GET /api/export?...  training JSONL
+  GET  /api/skills           skill catalog  |  GET /api/skills/<name>  full body
+  GET  /api/plugins          installed plugins  |  POST enable/disable/rescan
   POST /api/usage-event      client-reported completion stats -> usage.jsonl
   GET  /api/usage            14-day aggregates for the Usage screen
   POST /api/video            multipart passthrough -> H3 /v1/videos (job id)
@@ -37,6 +39,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from traces import TraceLog, StreamCapture, export_lines
+import skills as skillmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -160,6 +163,55 @@ def load_config():
 CFG = load_config()
 _LOCK = threading.Lock()
 
+# Skills live in the repo's skills/, in any dir listed in config's skills_dirs
+# (point one at the harness's skills/ to share them), and inside enabled
+# plugins. Plugins live in the repo's plugins/ and in config's plugins_dirs.
+BUILTIN_SKILLS = os.path.join(ROOT, "skills")
+BUILTIN_PLUGINS = os.path.join(ROOT, "plugins")
+
+
+def _plugin_state():
+    return CFG.setdefault("plugins", {})
+
+
+def discover_plugins():
+    dirs = [BUILTIN_PLUGINS] + list(CFG.get("plugins_dirs") or [])
+    found, warnings = skillmod.discover_plugins(dirs)
+    return found, warnings
+
+
+def enabled_plugins():
+    found, _ = discover_plugins()
+    st = _plugin_state()
+    return {n: p for n, p in found.items() if st.get(n, {}).get("enabled")}
+
+
+def skill_roots():
+    """Ranked (dir, source) list; earlier wins duplicate names. Enabled
+    plugins first, then configured dirs, then the repo's own skills/."""
+    roots = []
+    for name, p in sorted(enabled_plugins().items()):
+        if p.skills_dir:
+            roots.append((p.skills_dir, "plugin:" + name))
+    for d in (CFG.get("skills_dirs") or []):
+        roots.append((d, d))
+    roots.append((BUILTIN_SKILLS, "built-in"))
+    return roots
+
+
+def skill_catalog():
+    return skillmod.load_catalog(skill_roots())
+
+
+def effective_mcp_servers():
+    """config.json servers plus every enabled plugin's servers. A plugin
+    server whose name collides with a configured one does not override it."""
+    servers = dict(CFG.get("mcp_servers") or {})
+    for name, p in sorted(enabled_plugins().items()):
+        for sname, spec in (p.mcp_servers or {}).items():
+            servers.setdefault(sname, dict(spec, _plugin=name))
+    return servers
+
 # MCP servers start lazily on first use: a console that never opens a tool
 # should not spawn subprocesses, and a broken server config must not stop the
 # console from booting.
@@ -172,7 +224,7 @@ def mcp_host():
     with _MCP_LOCK:
         if _MCP is None:
             from mcp import MCPHost
-            _MCP = MCPHost(CFG.get("mcp_servers") or {})
+            _MCP = MCPHost(effective_mcp_servers())
         return _MCP
 
 
@@ -184,7 +236,7 @@ def mcp_reload():
         if _MCP is not None:
             _MCP.stop_all()
         from mcp import MCPHost
-        _MCP = MCPHost(CFG.get("mcp_servers") or {})
+        _MCP = MCPHost(effective_mcp_servers())
         return _MCP
 
 
@@ -759,6 +811,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json(read_sessions())
         elif path.startswith("/api/archive/"):
             self._archive_get(path[len("/api/archive/"):])
+        elif path == "/api/skills":
+            cat = skill_catalog()
+            self._json({"skills": cat.summaries(), "warnings": cat.warnings})
+        elif path.startswith("/api/skills/"):
+            name = path[len("/api/skills/"):]
+            sk = skill_catalog().get(name)
+            if not sk:
+                self._json({"error": "no such skill"}, 404)
+            else:
+                self._json({"name": sk.name, "body": sk.body(), **sk.summary()})
+        elif path == "/api/plugins":
+            found, warnings = discover_plugins()
+            st = _plugin_state()
+            self._json({"plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
+                                    for n in sorted(found)], "warnings": warnings})
         elif path == "/api/traces":
             self._json(TRACE.stats())
         elif path == "/api/export":
@@ -808,7 +875,8 @@ class Handler(BaseHTTPRequestHandler):
             self._video_post()
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
-                        "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate"):
+                        "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
+                        "/api/plugins"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -830,6 +898,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"content": text, "isError": is_err})
         elif path == "/api/mcp":
             self._mcp_admin(body)
+        elif path == "/api/plugins":
+            self._plugin_admin(body)
         elif path == "/api/rate":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
@@ -871,6 +941,29 @@ class Handler(BaseHTTPRequestHandler):
     # add / remove / toggle / restart, persisted to config.json and applied
     # live. Command strings are never shell-parsed — they go straight to
     # Popen as argv, so there is no shell-injection surface here.
+    def _plugin_admin(self, body):
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action")
+        name = (body.get("name") or "").strip()
+        found, warnings = discover_plugins()
+        if action in ("enable", "disable"):
+            if name not in found:
+                self._json({"error": "no such plugin"}, 404)
+                return
+            _plugin_state().setdefault(name, {})["enabled"] = (action == "enable")
+            save_config()
+            TRACE.log("plugin", action=action, name=name,
+                      contributes=found[name].info(action == "enable"))
+            mcp_reload()   # a plugin's MCP servers come or go with it
+        elif action != "rescan":
+            self._json({"error": "unknown action"}, 400)
+            return
+        st = _plugin_state()
+        self._json({"ok": True, "plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
+                                            for n in sorted(found)], "warnings": warnings})
+
     def _mcp_admin(self, body):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)

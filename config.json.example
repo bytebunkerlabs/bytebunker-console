@@ -14,5 +14,8 @@
 
   "identity": { "user": "mo@bunker", "host": "tailnet" },
 
-  "frontier_rates_per_mtok": { "input": 3.0, "output": 15.0 }
+  "frontier_rates_per_mtok": { "input": 3.0, "output": 15.0 },
+
+  "skills_dirs": [],
+  "plugins_dirs": []
 }

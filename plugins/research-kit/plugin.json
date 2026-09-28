@@ -1,0 +1,10 @@
+{
+  "name": "research-kit",
+  "description": "Evidence-first web research: a fetch MCP server plus a skill that forces exact-quote citations.",
+  "version": "0.1.0",
+  "author": "ByteBunker Labs",
+  "skills": "skills",
+  "mcp_servers": {
+    "fetch": { "command": "uvx", "args": ["mcp-server-fetch"], "enabled": true }
+  }
+}

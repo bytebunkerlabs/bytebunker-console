@@ -89,6 +89,28 @@ metric that doesn't resolve renders as an em-dash rather than a guess. Leave
 
 ---
 
+## Skills and plugins
+
+A **skill** is a markdown instruction pack — `<name>/SKILL.md` (or `<name>.md`)
+with frontmatter (`name`, `description`, optional `whenToUse`, `tools`,
+`network`, `model`) and a body. It is the same format the agent harness uses,
+so one directory feeds both: point `skills_dirs` at the harness's `skills/`.
+The console ships a `skills/` folder and reads any dir in `skills_dirs` plus the
+skills inside enabled plugins.
+
+On the **Skills** screen you see the catalog and can read each pack's
+instructions. Attach one and its body is prepended to the system prompt for
+your chats, shown as a chip above the composer; the trace log captures the full
+prompt, so a skilled turn is recorded exactly as the model saw it. Editing a
+skill file takes effect on the next send — bodies are reread from disk, never
+cached.
+
+A **plugin** is a folder under `plugins/` (or a dir in `plugins_dirs`) that
+bundles skills and MCP servers behind one switch. Enable it on the **Plugins**
+screen: its skills join the catalog and its MCP servers join the tool host.
+Manifest and layout are in `plugins/README.md`; the Claude Code plugin shape
+(`.claude-plugin/plugin.json` + `.mcp.json`) is understood too.
+
 ## MCP tools
 
 Give the model the ability to read files, search a repo, fetch a URL — anything
@@ -203,6 +225,8 @@ WireGuard) works the same way.
 | `nodes` | two examples | `name`, `instance` (Prometheus label prefix), `spec` |
 | `mcp_servers` | *(empty)* | `command`, `args`, `env`, `enabled` |
 | `frontier_rates_per_mtok` | 3 / 15 | used for the "not spent" figure on Usage |
+| `skills_dirs` | *(empty)* | extra directories of skill packs; point one at the agent harness's `skills/` to share them |
+| `plugins_dirs` | *(empty)* | extra directories of plugins (beyond the repo's `plugins/`) |
 | `model_capabilities` | *(built-in table)* | per-model overrides keyed by a substring of the model id: `ctx` (the window the engine *serves*, `--max-model-len`), `tools`, `effort`, `ctk`, `strip_reasoning` |
 
 State lives in `data/` — `sessions.json`, `usage.jsonl` and `archive/`, plain

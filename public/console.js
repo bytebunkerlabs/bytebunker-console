@@ -29,6 +29,10 @@
     calib: null,            // {model, chars, tokens}: the last prompt the engine counted for us
     tools: [],              // MCP tools discovered via /api/tools
     toolsOn: true,          // send them to the model?
+    skills: [],             // skill catalog summaries from /api/skills
+    activeSkills: [],       // skills attached to the current chat (names)
+    skillBodies: {},        // name -> body, fetched lazily and cached
+    plugins: [],            // plugin list from /api/plugins
     hist: {},               // node name -> util history for sparklines
   };
 
@@ -44,7 +48,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "models", "tuning", "batch", "cluster", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "models", "tuning", "batch", "cluster", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -53,6 +57,8 @@
     });
     $("panel").classList.toggle("on", s === "playground" && panelWanted);
     if (s === "sessions") renderSessions();
+    if (s === "skills") renderSkills();
+    if (s === "plugins") renderPlugins();
     if (s === "usage") renderUsage();
     if (s === "video") vidRefresh();
   }
@@ -696,9 +702,22 @@
   // The transcript, rendered the way the upstream wants it: system prompt
   // first, prior thinking stripped or carried per the manifest, broken tool
   // calls scrubbed. One builder, because compression sends history too.
+  // Attached skills become part of the system prompt, ahead of the user's own
+  // system text. The trace log captures the whole prompt, so a skilled turn is
+  // recorded exactly as the model saw it.
+  function effectiveSystem() {
+    const parts = [];
+    for (const name of state.activeSkills) {
+      const body = state.skillBodies[name];
+      if (body) parts.push("# Skill: " + name + "\n\n" + body);
+    }
+    if (P.sys.trim()) parts.push(P.sys.trim());
+    return parts.join("\n\n---\n\n");
+  }
+
   function buildMsgs(list, caps, sys) {
     const msgs = [];
-    const system = sys !== undefined ? sys : P.sys.trim();
+    const system = sys !== undefined ? sys : effectiveSystem();
     if (system) msgs.push({ role: "system", content: system });
     for (const m of list) {
       if (m.role === "bot") {
@@ -790,6 +809,7 @@
     // whatever the controls happen to say later
     const bot = { role: "bot", content: "", reasoning: "", meta: "",
                   model: state.model, effort: P.effort, turn: newTurnId(),
+                  skills: state.activeSkills.slice(),
                   thinkOpen: true };   // watch it stream; collapsed on completion
     state.messages.push(user, bot);
     state.streaming = true;
@@ -916,6 +936,7 @@
       decode ? approx + decode.toFixed(1) + " tok/s" : null,
       ttft !== null ? "ttft " + Math.round(ttft * 1000) + " ms" : null,
       (bot.toolUse || []).length ? bot.toolUse.length + " tool call" + (bot.toolUse.length > 1 ? "s" : "") : null,
+      (bot.skills || []).length ? bot.skills.length + " skill" + (bot.skills.length > 1 ? "s" : "") + ": " + bot.skills.join(", ") : null,
       finishReason === "length"
         ? "\u26a0 stopped at Max tokens \u2014 thinking shares the budget; raise it in the panel"
         : null,
@@ -1089,6 +1110,8 @@
     state.ctxUsed = null;
     state.calib = null;
     go("playground");
+    // a new chat keeps whatever skills are attached — they are a working set,
+    // not a per-conversation choice, and clearing them surprises people
     servingLine();
     renderMessages();
     const el = $("input");
@@ -1108,6 +1131,7 @@
         model: state.model,
         turns: state.messages.length,
         chars: toks,
+        activeSkills: state.activeSkills,
         updated: Date.now(),
         messages: state.messages.map(serializeMsg),
       }),
@@ -1128,6 +1152,7 @@
     if (m.turn) o.turn = m.turn;
     if (m.traces) o.traces = m.traces;
     if (m.rating) o.rating = m.rating;
+    if (m.skills && m.skills.length) o.skills = m.skills;
     return o;
   }
 
@@ -1184,6 +1209,7 @@
         state.messages = (s.messages || []).map((m) => ({ ...m }));
         state.ctxUsed = null;
         state.calib = null;
+        setActiveSkills(s.activeSkills || []);
         if (s.model && state.models.includes(s.model)) {
           state.model = s.model;
           $("model-select").value = s.model;
@@ -1263,6 +1289,174 @@
     $("tools-count").textContent = state.tools.length
       ? state.tools.length + " tools available" : "no tools";
     $("tools-switch").classList.toggle("on", state.toolsOn);
+  }
+
+  /* ---------------- skills ---------------- */
+  async function loadSkills() {
+    let d = { skills: [], warnings: [] };
+    try { d = await (await fetch("/api/skills")).json(); } catch (e) {}
+    state.skills = d.skills || [];
+    // drop any attached skill that no longer exists (a plugin was disabled)
+    const names = new Set(state.skills.map((s) => s.name));
+    state.activeSkills = state.activeSkills.filter((n) => names.has(n));
+    renderActiveSkills();
+  }
+
+  async function skillBody(name) {
+    if (state.skillBodies[name] != null) return state.skillBodies[name];
+    try {
+      const d = await (await fetch("/api/skills/" + encodeURIComponent(name))).json();
+      state.skillBodies[name] = d.body || "";
+    } catch (e) { state.skillBodies[name] = ""; }
+    return state.skillBodies[name];
+  }
+
+  async function toggleSkill(name, on) {
+    const set = new Set(state.activeSkills);
+    if (on) { set.add(name); await skillBody(name); } else { set.delete(name); }
+    state.activeSkills = state.skills.map((s) => s.name).filter((n) => set.has(n));
+    renderActiveSkills();
+    if (state.screen === "skills") renderSkills();
+    saveSession();
+  }
+
+  async function setActiveSkills(names) {
+    const have = new Set((state.skills || []).map((s) => s.name));
+    state.activeSkills = (names || []).filter((n) => have.has(n));
+    await Promise.all(state.activeSkills.map(skillBody));
+    renderActiveSkills();
+  }
+
+  function renderActiveSkills() {
+    const box = $("active-skills");
+    if (!box) return;
+    box.textContent = "";
+    if (!state.activeSkills.length) { box.hidden = true; return; }
+    box.hidden = false;
+    const lab = document.createElement("span");
+    lab.className = "as-label";
+    lab.textContent = "skills";
+    box.appendChild(lab);
+    for (const name of state.activeSkills) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "as-chip";
+      chip.innerHTML = '<span></span><span class="x">\u2715</span>';
+      chip.querySelector("span").textContent = name;
+      chip.title = "Detach " + name;
+      chip.onclick = () => toggleSkill(name, false);
+      box.appendChild(chip);
+    }
+  }
+
+  async function renderSkills() {
+    await loadSkills();
+    const box = $("skills-box");
+    $("skills-sub").textContent = state.skills.length
+      ? state.skills.length + " available · " + state.activeSkills.length + " attached"
+      : "none installed";
+    box.textContent = "";
+    if (!state.skills.length) {
+      box.innerHTML = '<div class="empty-state"><b>No skills installed</b><span>' +
+        'Drop a <span class="mono">&lt;name&gt;/SKILL.md</span> into the skills folder, point ' +
+        '<span class="mono">skills_dirs</span> at the agent harness to share its packs, or enable a plugin that ships skills.</span></div>';
+      return;
+    }
+    for (const sk of state.skills) {
+      const on = state.activeSkills.includes(sk.name);
+      const card = document.createElement("div");
+      card.className = "card skill-card" + (on ? " on" : "");
+      const head = document.createElement("div");
+      head.className = "skill-head";
+      head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>' +
+        '<button class="switch' + (on ? " on" : "") + '"><span></span></button>';
+      head.querySelector("b").textContent = sk.name;
+      head.querySelector(".src").textContent = sk.source || "";
+      head.querySelector(".switch").onclick = () => toggleSkill(sk.name, !state.activeSkills.includes(sk.name));
+      const desc = document.createElement("div");
+      desc.className = "skill-desc";
+      desc.textContent = sk.description;
+      card.appendChild(head); card.appendChild(desc);
+      if (sk.whenToUse) {
+        const w = document.createElement("div");
+        w.className = "skill-when";
+        w.textContent = "When to use: " + sk.whenToUse;
+        card.appendChild(w);
+      }
+      const tags = [];
+      if (sk.network) tags.push("needs network");
+      if ((sk.tools || []).length) tags.push("tools: " + sk.tools.join(", "));
+      if (sk.model) tags.push("model: " + sk.model);
+      if (tags.length) {
+        const t = document.createElement("div");
+        t.className = "skill-tags mono";
+        t.textContent = tags.join("  ·  ");
+        card.appendChild(t);
+      }
+      const view = document.createElement("button");
+      view.type = "button"; view.className = "linky"; view.textContent = "view instructions";
+      const pre = document.createElement("pre");
+      pre.className = "skill-body"; pre.hidden = true;
+      view.onclick = async () => {
+        if (pre.hidden) { pre.textContent = await skillBody(sk.name); pre.hidden = false; view.textContent = "hide instructions"; }
+        else { pre.hidden = true; view.textContent = "view instructions"; }
+      };
+      card.appendChild(view); card.appendChild(pre);
+      box.appendChild(card);
+    }
+  }
+
+  /* ---------------- plugins ---------------- */
+  async function renderPlugins() {
+    let d = { plugins: [], warnings: [] };
+    try { d = await (await fetch("/api/plugins")).json(); } catch (e) {}
+    state.plugins = d.plugins || [];
+    const box = $("plugins-box");
+    const on = state.plugins.filter((p) => p.enabled).length;
+    $("plugins-sub").textContent = state.plugins.length
+      ? state.plugins.length + " found · " + on + " enabled" : "none found";
+    box.textContent = "";
+    if (!state.plugins.length) {
+      box.innerHTML = '<div class="empty-state"><b>No plugins found</b><span>' +
+        'A plugin is a folder under <span class="mono">plugins/</span> with a ' +
+        '<span class="mono">plugin.json</span> that contributes skills and MCP servers. See plugins/README.md.</span></div>';
+      return;
+    }
+    for (const p of state.plugins) {
+      const card = document.createElement("div");
+      card.className = "card plugin-card" + (p.enabled ? " on" : "");
+      const head = document.createElement("div");
+      head.className = "skill-head";
+      head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>' +
+        '<button class="switch' + (p.enabled ? " on" : "") + '"><span></span></button>';
+      head.querySelector("b").textContent = p.name;
+      head.querySelector(".src").textContent = p.version ? "v" + p.version : "";
+      head.querySelector(".switch").onclick = () => togglePlugin(p.name, !p.enabled);
+      const desc = document.createElement("div");
+      desc.className = "skill-desc";
+      desc.textContent = p.description || "(no description)";
+      card.appendChild(head); card.appendChild(desc);
+      const bits = [];
+      if (p.skills && p.skills.length) bits.push("skills: " + p.skills.join(", "));
+      if (p.mcp_servers && p.mcp_servers.length) bits.push("MCP: " + p.mcp_servers.join(", "));
+      const t = document.createElement("div");
+      t.className = "skill-tags mono";
+      t.textContent = bits.length ? bits.join("  ·  ") : "contributes nothing loadable";
+      card.appendChild(t);
+      box.appendChild(card);
+    }
+  }
+
+  async function togglePlugin(name, on) {
+    try {
+      await fetch("/api/plugins", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: on ? "enable" : "disable", name }),
+      });
+    } catch (e) {}
+    await renderPlugins();
+    await loadSkills();              // a plugin's skills came or went
+    if (state.cfg.mcp || on) loadTools();   // and its MCP servers
   }
 
   function renderServers(status, cfg) {
@@ -1817,6 +2011,7 @@
     if (state.cfg.netcheck) $("netcheck-card").hidden = false;
     await loadModels();
     if (state.cfg.mcp) loadTools();
+    loadSkills();
     pollTelemetry();
     setInterval(pollTelemetry, 5000);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);
