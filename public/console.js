@@ -377,11 +377,37 @@
     if (m.meta) {
       const mt = document.createElement("div");
       mt.className = "msg-meta mono";
-      mt.textContent = m.meta;
+      const txt = document.createElement("span");
+      txt.textContent = m.meta;
+      mt.appendChild(txt);
+      // Good / bad: written to the trace log next to the exact request, so
+      // the export can hand back only the turns you'd train on.
+      if (m.turn) {
+        for (const [val, label] of [[1, "good"], [-1, "bad"]]) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "rate-btn" + (val < 0 ? " bad" : "") + (m.rating === val ? " did" : "");
+          b.textContent = label;
+          b.title = val > 0 ? "Mark this answer as good" : "Mark this answer as bad";
+          b.onclick = () => rate(m, m.rating === val ? 0 : val);
+          mt.appendChild(b);
+        }
+      }
       bot.appendChild(mt);
     }
     wrap.appendChild(bot);
     return wrap;
+  }
+
+  function rate(m, val) {
+    m.rating = val;
+    fetch("/api/rate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: state.session, turn: m.turn, traces: m.traces || [],
+                             model: m.model, rating: val }),
+    }).catch(() => {});
+    renderMessages();
+    saveSession();
   }
 
   function atBottom(el) {
@@ -525,9 +551,10 @@
         "the prompt already uses ~" + est.tokens.toLocaleString() + " of " +
         ctxWin.toLocaleString() + " context tokens.";
     }
+    // Session, turn and purpose ride as headers so the server's trace log
+    // can file this request without anything extra travelling upstream.
     const post = (b) => fetch("/api/chat", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(b), signal: ctl.signal,
+      method: "POST", headers: traceHeaders(bot), body: JSON.stringify(b), signal: ctl.signal,
     });
     let r = await post(body1);
     for (let attempt = 0; !r.ok; attempt++) {
@@ -585,6 +612,8 @@
       r = await post(body1);
     }
     phase = "stream";
+    const tid = r.headers.get("X-BB-Trace");
+    if (tid) bot.traces = (bot.traces || []).concat([tid]);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -717,6 +746,14 @@
     return msgs;
   }
 
+  function traceHeaders(bot) {
+    const h = { "Content-Type": "application/json" };
+    if (state.session) h["X-BB-Session"] = state.session;
+    if (bot && bot.turn) h["X-BB-Turn"] = bot.turn;
+    if (bot && bot.kind === "compress") h["X-BB-Purpose"] = "compress";
+    return h;
+  }
+
   function toolDefs(caps) {
     return (caps.tools && state.toolsOn && state.tools.length)
       ? state.tools.map((t) => t.def) : null;
@@ -747,11 +784,12 @@
         if (!did) break;
       }
     }
+    if (!state.session) state.session = "s-" + Date.now().toString(36);
     const user = { role: "user", content: text };
     // model + effort stamped now: the transcript renders provenance, not
     // whatever the controls happen to say later
     const bot = { role: "bot", content: "", reasoning: "", meta: "",
-                  model: state.model, effort: P.effort,
+                  model: state.model, effort: P.effort, turn: newTurnId(),
                   thinkOpen: true };   // watch it stream; collapsed on completion
     state.messages.push(user, bot);
     state.streaming = true;
@@ -840,7 +878,7 @@
           let out = { content: "tool call failed", isError: true };
           try {
             out = await (await fetch("/api/tool-call", {
-              method: "POST", headers: { "Content-Type": "application/json" },
+              method: "POST", headers: traceHeaders(bot),
               body: JSON.stringify({ name: c.name, arguments: args }),
             })).json();
           } catch (e) { out = { content: "console could not reach the tool: " + e.message, isError: true }; }
@@ -966,8 +1004,9 @@
     if (lastC && lastC.role === "user") convo[convo.length - 1] = { role: "user", content: lastC.content + "\n\n" + COMPRESS_ASK };
     else convo.push({ role: "user", content: COMPRESS_ASK });
 
+    if (!state.session) state.session = "s-" + Date.now().toString(36);
     const tmp = { role: "bot", kind: "compress", content: "", reasoning: "", meta: "",
-                  model: state.model, effort: P.effort, thinkOpen: false,
+                  model: state.model, effort: P.effort, thinkOpen: false, turn: newTurnId(),
                   notice: (why === "auto" && estTokens
                             ? "Context is at ~" + estTokens.toLocaleString() + " of " + win.toLocaleString() + " tokens: "
                             : "") + "compressing " + old.length + " older messages into a summary…" };
@@ -1075,6 +1114,10 @@
     }).catch(() => {});
   }
 
+  function newTurnId() {
+    return "t-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
   function serializeMsg(m) {
     const o = { role: m.role, content: m.content, reasoning: m.reasoning || "",
                 meta: m.meta || "", model: m.model || "", effort: m.effort,
@@ -1082,6 +1125,9 @@
                 tool_calls: m.tool_calls || null, toolResults: m.toolResults || [],
                 hops: m.hops || null };
     if (m.kind) { o.kind = m.kind; o.archive = m.archive || ""; o.count = m.count || 0; }
+    if (m.turn) o.turn = m.turn;
+    if (m.traces) o.traces = m.traces;
+    if (m.rating) o.rating = m.rating;
     return o;
   }
 
@@ -1099,6 +1145,14 @@
     const box = $("sessions-box");
     let list = [];
     try { list = await (await fetch("/api/sessions")).json(); } catch (e) {}
+    fetch("/api/traces").then((r) => r.json()).then((t) => {
+      const mb = (t.bytes || 0) / 1e6;
+      $("traces-sub").textContent = t.days
+        ? "trace log: " + t.days + " day" + (t.days > 1 ? "s" : "") + " · " +
+          (mb >= 1 ? mb.toFixed(1) + " MB" : Math.round(mb * 1000) + " kB") +
+          " · " + (t.today_events || 0) + " events today"
+        : "trace log: empty";
+    }).catch(() => {});
     if (!list.length) {
       box.innerHTML = '<div class="empty-state"><b>No sessions yet</b><span>Conversations save here automatically, on this host only. Start one from the Playground.</span></div>';
       return;
@@ -1417,6 +1471,8 @@
     }
   }
 
+  $("export-all").onclick = () => window.open("/api/export", "_blank");
+  $("export-good").onclick = () => window.open("/api/export?rated=up", "_blank");
   $("new-chat").onclick = newChat;
   $("new-chat-2").onclick = newChat;
   document.addEventListener("keydown", (e) => {

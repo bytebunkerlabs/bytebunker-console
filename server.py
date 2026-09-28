@@ -17,6 +17,8 @@ API:
   GET  /api/telemetry        Prometheus-backed node cards (or {"nodes": []})
   GET  /api/sessions         list sessions  |  POST save  |  DELETE ?id=
   POST /api/archive          file away compressed turns  |  GET /api/archive/<name>
+  POST /api/rate             thumbs up/down on a turn, into the trace log
+  GET  /api/traces           trace log stats  |  GET /api/export?...  training JSONL
   POST /api/usage-event      client-reported completion stats -> usage.jsonl
   GET  /api/usage            14-day aggregates for the Usage screen
   POST /api/video            multipart passthrough -> H3 /v1/videos (job id)
@@ -34,10 +36,15 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from traces import TraceLog, StreamCapture, export_lines
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
 DATA = os.path.join(ROOT, "data")
 os.makedirs(DATA, exist_ok=True)
+# Every model request, tool run, rating and archive, append-only, forever:
+# data/traces/<day>.jsonl (gzipped after the day ends). See traces.py.
+TRACE = TraceLog(DATA)
 
 DEFAULT_CONFIG = {
     "bind": "127.0.0.1",
@@ -219,7 +226,24 @@ def write_archive(body):
         json.dump(rec, f, indent=1)
     with open(os.path.join(ARCHIVE, name + ".md"), "w") as f:
         f.write(archive_markdown(rec))
+    TRACE.log("archive", session=session, file=name, count=len(msgs), model=rec["model"])
     return name
+
+
+def read_archives():
+    out = []
+    if not os.path.isdir(ARCHIVE):
+        return out
+    for name in sorted(os.listdir(ARCHIVE)):
+        if name.endswith(".json"):
+            try:
+                with open(os.path.join(ARCHIVE, name)) as f:
+                    rec = json.load(f)
+                rec["id"] = name[:-5]
+                out.append(rec)
+            except (OSError, ValueError):
+                continue
+    return out
 
 
 def archive_markdown(rec):
@@ -559,6 +583,35 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _export(self, q):
+        """Training data as JSONL: ?from=YYYY-MM-DD&to=...&model=substr
+        &rated=up|any&errors=1&redact=0&source=all|traces|sessions
+        &purpose=chat|compress. Streams; there is no telling the size first."""
+        one = lambda k, d=None: (q.get(k) or [d])[0]
+        with _LOCK:
+            sessions = read_sessions()
+        gen = export_lines(
+            TRACE, sessions, read_archives(),
+            day_from=one("from"), day_to=one("to"), model=one("model"),
+            rated=one("rated"), include_errors=one("errors") == "1",
+            do_redact=one("redact") != "0", source=one("source", "all"), purpose=one("purpose"))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/jsonl; charset=utf-8")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="bytebunker-train-%s.jsonl"' % time.strftime("%Y%m%d-%H%M"))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        n = 0
+        try:
+            for line in gen:
+                self.wfile.write(line.encode("utf-8"))
+                n += 1
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        TRACE.log("export", examples=n, query={k: v[0] for k, v in q.items()})
+
     def _archive_get(self, name):
         if not _ARCHIVE_NAME.match(name):
             self._json({"error": "not found"}, 404)
@@ -706,6 +759,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(read_sessions())
         elif path.startswith("/api/archive/"):
             self._archive_get(path[len("/api/archive/"):])
+        elif path == "/api/traces":
+            self._json(TRACE.stats())
+        elif path == "/api/export":
+            self._export(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         elif path == "/api/usage":
             self._json(usage_summary())
         elif path == "/api/video" or path.startswith("/api/video/"):
@@ -721,7 +778,11 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/sessions":
             sid = urllib.parse.parse_qs(u.query).get("id", [None])[0]
             with _LOCK:
-                write_sessions([s for s in read_sessions() if s.get("id") != sid])
+                cur = read_sessions()
+                for gone in cur:
+                    if gone.get("id") == sid:
+                        TRACE.log("session_deleted", session=sid, record=gone)
+                write_sessions([s for s in cur if s.get("id") != sid])
             self._json({"ok": True})
         elif u.path.startswith("/api/video/"):
             base = (CFG.get("h3_url") or "").rstrip("/")
@@ -747,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
             self._video_post()
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
-                        "/api/tool-call", "/api/mcp", "/api/archive"):
+                        "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -760,10 +821,27 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
                 return
+            t0 = time.time()
             text, is_err = mcp_host().call(body.get("name") or "", body.get("arguments") or {})
+            TRACE.log("tool", session=self.headers.get("X-BB-Session"),
+                      turn=self.headers.get("X-BB-Turn"), name=body.get("name") or "",
+                      arguments=body.get("arguments") or {}, result=str(text)[:200000],
+                      is_error=bool(is_err), ms=int((time.time() - t0) * 1000))
             self._json({"content": text, "isError": is_err})
         elif path == "/api/mcp":
             self._mcp_admin(body)
+        elif path == "/api/rate":
+            if not isinstance(body, dict):
+                self._json({"error": "expected object"}, 400)
+                return
+            try:
+                rating = max(-1, min(1, int(body.get("rating") or 0)))
+            except (TypeError, ValueError):
+                rating = 0
+            TRACE.log("rating", session=body.get("session"), turn=body.get("turn"),
+                      traces=[str(t)[:32] for t in (body.get("traces") or [])][:64],
+                      model=body.get("model"), rating=rating)
+            self._json({"ok": True})
         elif path == "/api/archive":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
@@ -779,6 +857,8 @@ class Handler(BaseHTTPRequestHandler):
             with _LOCK:
                 cur = [x for x in read_sessions() if x.get("id") != body.get("id")]
                 cur.insert(0, body)
+                for old in cur[200:]:   # aged out of the UI, not out of the record
+                    TRACE.log("session_evicted", session=old.get("id"), record=old)
                 write_sessions(cur[:200])
             self._json({"ok": True})
         elif path == "/api/usage-event":
@@ -846,6 +926,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         payload["stream"] = True
         payload.setdefault("stream_options", {"include_usage": True})
+        # who this request belongs to, for the trace — headers, so nothing
+        # extra travels upstream
+        tid = TRACE.new_id()
+        who = {"id": tid, "session": self.headers.get("X-BB-Session"),
+               "turn": self.headers.get("X-BB-Turn"),
+               "purpose": self.headers.get("X-BB-Purpose") or "chat"}
+        started = time.time()
 
         def attempt(p):
             req = upstream_request("/chat/completions", p, "POST")
@@ -862,9 +949,14 @@ class Handler(BaseHTTPRequestHandler):
                         payload.pop(k, None)
                     resp = attempt(payload)
                 else:
-                    self._json({"error": upstream_message(detail)[:1000]}, e.code)
+                    msg = upstream_message(detail)[:1000]
+                    TRACE.log("chat", status=e.code, request=payload, response=None, error=msg,
+                              ms=int((time.time() - started) * 1000), **who)
+                    self._json({"error": msg}, e.code)
                     return
         except Exception as e:
+            TRACE.log("chat", status=502, request=payload, response=None, error=str(e)[:500],
+                      ms=int((time.time() - started) * 1000), **who)
             self._json({"error": str(e)}, 502)
             return
 
@@ -872,8 +964,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
+        self.send_header("X-BB-Trace", tid)
         self.close_connection = True
         self.end_headers()
+        cap = StreamCapture()
         # Forward raw bytes as they arrive — the client parses SSE framing.
         # (A readline-per-event loop holds each event's terminating blank line
         # hostage until the NEXT event arrives: the stream renders one token
@@ -884,21 +978,25 @@ class Handler(BaseHTTPRequestHandler):
                     chunk = resp.read1(65536)
                     if not chunk:
                         break
+                    cap.feed(chunk)
                     self.wfile.write(chunk)
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                pass  # client went away — nothing to tell it
+                cap.error = cap.error or "client disconnected"  # user hit Stop, or left
             except Exception as e:
                 # upstream died mid-stream: without this, the client sees a
                 # clean EOF and silently renders a truncated reply as complete
+                cap.error = "upstream stream failed: " + str(e)[:200]
                 try:
-                    msg = json.dumps({"error": "upstream stream failed: " + str(e)[:200]})
+                    msg = json.dumps({"error": cap.error})
                     self.wfile.write(("data: " + msg + "\n\n").encode())
                     self.wfile.flush()
                 except OSError:
                     pass
         finally:
             resp.close()
+            TRACE.log("chat", status=200, request=payload, response=cap.result(started),
+                      ms=int((time.time() - started) * 1000), **who)
 
 
 def main():

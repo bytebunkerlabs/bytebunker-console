@@ -152,8 +152,8 @@ cat > ~/Library/LaunchAgents/ai.bytebunker.console.plist <<PLIST
   </array>
   <key>WorkingDirectory</key><string>$PWD</string>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/bb-console.log</string>
-  <key>StandardErrorPath</key><string>/tmp/bb-console.log</string>
+  <key>StandardOutPath</key><string>$PWD/data/console.log</string>
+  <key>StandardErrorPath</key><string>$PWD/data/console.log</string>
 </dict></plist>
 PLIST
 launchctl load ~/Library/LaunchAgents/ai.bytebunker.console.plist
@@ -232,6 +232,38 @@ Nothing is thrown away. Every compression files the original messages —
 reasoning, tool calls and results included — under `data/archive/` as JSON
 plus a readable `.md` transcript, and the marker in the transcript links to
 it. If the served window ever changes, set `ctx` in `model_capabilities`.
+
+---
+
+## The trace log, and training data
+
+Everything the console does is written down, append-only, under
+`data/traces/` — one JSONL file per day, yesterday's gzipped, never pruned by
+the console:
+
+- every model request, with the exact payload the engine saw (system prompt,
+  tools, sampling) and the response assembled from the stream: text,
+  reasoning, tool calls, finish reason, token usage, time to first token, or
+  the error;
+- every tool run — arguments, result, exit status, duration — which for the
+  terminal server means every command the model typed;
+- every rating (**good** / **bad** under an answer), every compression
+  archive, and the full record of any session deleted or aged out of the
+  Sessions screen, so pruning the UI never loses the conversation.
+
+**Export** (Sessions → *Export all* / *Export good turns*, or
+`GET /api/export`) turns all of that — plus sessions and archives from before
+the log existed — into one JSONL example per turn in the chat format most
+fine-tuning stacks accept: `{"messages": [...], "tools": [...], "model",
+"meta"}`, with `reasoning_content` on assistant turns and OpenAI-shape
+`tool_calls`. Multi-hop tool turns come out as one trajectory. Query
+parameters: `from`/`to` (dates), `model` (substring), `rated=up|any`,
+`purpose=chat|compress`, `errors=1` to include failed turns, `redact=0` to
+skip the heuristic pass that blanks things shaped like keys and passwords
+(terminal output ends up in here — leave it on unless you have checked).
+
+The server's own log lives at `data/console.log` when started with the
+launchd recipe above, so it survives a reboot.
 
 ---
 

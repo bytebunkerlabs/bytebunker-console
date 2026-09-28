@@ -122,6 +122,11 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .part-code .head{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid var(--border);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:500}
 .part-code pre{margin:0;padding:13px 14px;overflow-x:auto;font-size:12.5px;line-height:1.65;white-space:pre;font-family:'Geist Mono',ui-monospace,Menlo,monospace}
 .msg-meta{display:flex;align-items:center;gap:14px;font-size:11.5px;color:var(--faint)}
+.rate-btn{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:1px 7px;line-height:1.5;background:transparent}
+.rate-btn:hover{color:var(--muted);border-color:var(--muted)}
+.rate-btn.did{color:var(--ok);border-color:var(--ok)}
+.rate-btn.bad.did{color:var(--err);border-color:var(--err)}
+.rate-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .msg-status{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--faint);padding:2px 0}
 .msg-status .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none;animation:pulse 1.2s ease-in-out infinite}
 .msg-status.slow{color:var(--warn,#b7791f)}
