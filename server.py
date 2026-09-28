@@ -21,6 +21,7 @@ API:
   GET  /api/traces           trace log stats  |  GET /api/export?...  training JSONL
   GET  /api/skills           skill catalog  |  GET /api/skills/<name>  full body
   GET  /api/plugins          installed plugins  |  POST enable/disable/rescan
+  GET  /api/agents           harness status + recent runs  |  POST run a goal (SSE)
   POST /api/usage-event      client-reported completion stats -> usage.jsonl
   GET  /api/usage            14-day aggregates for the Usage screen
   POST /api/video            multipart passthrough -> H3 /v1/videos (job id)
@@ -40,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from traces import TraceLog, StreamCapture, export_lines
 import skills as skillmod
+import agents as agentmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -63,6 +65,10 @@ DEFAULT_CONFIG = {
     ],
     "identity": {"user": "mo@bunker", "host": "local"},
     "frontier_rates_per_mtok": {"input": 3.0, "output": 15.0},
+    # Safe by default: the harness launcher is inert until you enable it and
+    # point dir/ssh at a dedicated worker host (see agents.py).
+    "agents": {"enabled": False, "ssh": "", "dir": "", "python": "uv run",
+               "script": "scripts/run_master.py"},
 }
 
 
@@ -811,6 +817,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(read_sessions())
         elif path.startswith("/api/archive/"):
             self._archive_get(path[len("/api/archive/"):])
+        elif path == "/api/agents":
+            st = agentmod.status(CFG)
+            runs = []
+            for e in TRACE.events(time.strftime("%Y-%m-%d",
+                                  time.localtime(time.time() - 14 * 86400))):
+                if e.get("kind") == "agent_run":
+                    runs.append({"ts": e.get("ts"), "goal": e.get("goal"),
+                                 "exit": e.get("exit"), "killed": e.get("killed"),
+                                 "lines": e.get("lines"), "host": e.get("host")})
+            st["recent"] = runs[-30:][::-1]
+            self._json(st)
         elif path == "/api/skills":
             cat = skill_catalog()
             self._json({"skills": cat.summaries(), "warnings": cat.warnings})
@@ -876,7 +893,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins"):
+                        "/api/plugins", "/api/agents"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -900,6 +917,8 @@ class Handler(BaseHTTPRequestHandler):
             self._mcp_admin(body)
         elif path == "/api/plugins":
             self._plugin_admin(body)
+        elif path == "/api/agents":
+            self._agents_run(body)
         elif path == "/api/rate":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
@@ -941,6 +960,54 @@ class Handler(BaseHTTPRequestHandler):
     # add / remove / toggle / restart, persisted to config.json and applied
     # live. Command strings are never shell-parsed — they go straight to
     # Popen as argv, so there is no shell-injection surface here.
+    def _agents_run(self, body):
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        goal = body.get("goal") or ""
+        try:
+            cmd = agentmod.build_command(CFG, goal)
+        except agentmod.AgentConfigError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        st = agentmod.status(CFG)
+        cwd = None if st["mode"] == "ssh" else os.path.expanduser((CFG.get("agents") or {}).get("dir") or ".")
+        started = time.time()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        stop = threading.Event()
+        lines = [0]
+
+        def emit(obj):
+            try:
+                self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+                self.wfile.flush()
+            except OSError:
+                stop.set()   # client went away — stop the run
+
+        emit({"phase": "start", "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
+
+        def on_line(text):
+            lines[0] += 1
+            emit({"line": text})
+
+        try:
+            code, killed = agentmod.run_streaming(cmd, cwd, on_line, stop)
+        except FileNotFoundError as e:
+            emit({"error": "could not launch the harness: %s" % e})
+            code, killed = -1, "error"
+        except Exception as e:   # noqa: BLE001 - report anything to the client
+            emit({"error": str(e)[:300]})
+            code, killed = -1, "error"
+        emit({"phase": "done", "exit": code, "killed": killed})
+        TRACE.log("agent_run", goal=goal[:8000], host=st["host"], mode=st["mode"],
+                  isolated=st["isolated"], exit=code, killed=killed or False,
+                  lines=lines[0], ms=int((time.time() - started) * 1000))
+
     def _plugin_admin(self, body):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)

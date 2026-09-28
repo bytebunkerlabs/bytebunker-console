@@ -177,6 +177,10 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .as-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid var(--accent);color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent);font-size:12px}
 .as-chip .x{font-size:9px;opacity:.7}
 .as-chip:hover{background:color-mix(in srgb,var(--accent) 18%,transparent)}
+.plane-row{display:grid;grid-template-columns:120px 160px 1fr;gap:12px;align-items:baseline;padding:6px 0;border-top:1px solid var(--border);font-size:12.5px}
+.plane-row:first-of-type{border-top:none}
+.plane-row b{font-weight:600}
+.plane-row .note{color:var(--muted)}
 .pill{display:flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;background:var(--chip);font-size:11px;font-weight:500;color:var(--muted)}
 .pill .d{width:5px;height:5px;border-radius:50%;background:var(--ok)}
 .kv-label{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}

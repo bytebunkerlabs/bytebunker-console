@@ -17,5 +17,13 @@
   "frontier_rates_per_mtok": { "input": 3.0, "output": 15.0 },
 
   "skills_dirs": [],
-  "plugins_dirs": []
+  "plugins_dirs": [],
+
+  "agents": {
+    "enabled": false,
+    "ssh": "leagueofash",
+    "dir": "~/bytebunker-harness",
+    "python": "uv run",
+    "script": "scripts/run_master.py"
+  }
 }

@@ -111,6 +111,33 @@ screen: its skills join the catalog and its MCP servers join the tool host.
 Manifest and layout are in `plugins/README.md`; the Claude Code plugin shape
 (`.claude-plugin/plugin.json` + `.mcp.json`) is understood too.
 
+## Agents (the harness)
+
+The **Agents** screen launches your agent harness (`bytebunker-agents`) on a
+goal and streams the Master's progress, while the console itself runs no agent
+code. This follows the separation NVIDIA's agentic-safety guidance calls for —
+three planes, each on its own host:
+
+- **Model plane** — the Sparks. Serve the LLM only.
+- **Control plane** — this console, on hermes. Launches goals, watches, holds
+  the kill switch.
+- **Agent plane** — a *dedicated worker host* (not a Spark, not the console).
+  Runs the harness and Docker, so a slave gets `--network none` and reaches the
+  model only through the harness's unix-socket proxy.
+
+Point the console at that host with the `agents` config block. It is **disabled
+by default and inert until you set it** — the launcher refuses to run without
+`agents.enabled` and `agents.dir`. Set `agents.ssh` to the worker host; leaving
+it empty runs the harness locally on hermes with **no isolation** (dev only,
+and the screen says so). Each run is written to the trace log, so agent goals
+feed the same training export as chats.
+
+> **Why a separate host.** An agent that is compromised or goes wrong should
+> not sit next to the model weights, the GPUs, or the LiteLLM key (the Sparks),
+> nor next to the console that watches it. A dedicated worker box keeps the
+> blast radius contained and keeps monitoring independent of the host running
+> the agents.
+
 ## MCP tools
 
 Give the model the ability to read files, search a repo, fetch a URL — anything
@@ -227,6 +254,7 @@ WireGuard) works the same way.
 | `frontier_rates_per_mtok` | 3 / 15 | used for the "not spent" figure on Usage |
 | `skills_dirs` | *(empty)* | extra directories of skill packs; point one at the agent harness's `skills/` to share them |
 | `plugins_dirs` | *(empty)* | extra directories of plugins (beyond the repo's `plugins/`) |
+| `agents` | *(disabled)* | harness launcher: `enabled`, `ssh` (worker host; `""` = local, not isolated), `dir` (harness checkout), `python`, `script` |
 | `model_capabilities` | *(built-in table)* | per-model overrides keyed by a substring of the model id: `ctx` (the window the engine *serves*, `--max-model-len`), `tools`, `effort`, `ctk`, `strip_reasoning` |
 
 State lives in `data/` — `sessions.json`, `usage.jsonl` and `archive/`, plain

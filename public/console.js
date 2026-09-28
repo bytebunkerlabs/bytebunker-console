@@ -33,6 +33,7 @@
     activeSkills: [],       // skills attached to the current chat (names)
     skillBodies: {},        // name -> body, fetched lazily and cached
     plugins: [],            // plugin list from /api/plugins
+    agentAbort: null,       // AbortController for a live agent run
     hist: {},               // node name -> util history for sparklines
   };
 
@@ -48,7 +49,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "models", "tuning", "batch", "cluster", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "agents", "models", "tuning", "batch", "cluster", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -59,6 +60,7 @@
     if (s === "sessions") renderSessions();
     if (s === "skills") renderSkills();
     if (s === "plugins") renderPlugins();
+    if (s === "agents") renderAgents();
     if (s === "usage") renderUsage();
     if (s === "video") vidRefresh();
   }
@@ -1459,6 +1461,120 @@
     if (state.cfg.mcp || on) loadTools();   // and its MCP servers
   }
 
+  /* ---------------- agents (harness) ---------------- */
+  async function renderAgents() {
+    let d = {};
+    try { d = await (await fetch("/api/agents")).json(); } catch (e) {}
+    $("agents-sub").textContent = d.enabled
+      ? (d.mode === "ssh" ? "on " + d.host : "local (not isolated)")
+      : "disabled";
+
+    const topo = $("agents-topology");
+    const planes = [
+      ["Model plane", "the Sparks", "serve the LLM only — no agent code runs here"],
+      ["Control plane", "this console", "launches goals and watches; runs no agent code"],
+      ["Agent plane", d.host || "unset", d.isolated
+        ? "a separate host with Docker isolation" : "NOT a separate host — no isolation"],
+    ];
+    topo.innerHTML = "<div class='glabel'>Topology</div>";
+    for (const [name, host, note] of planes) {
+      const row = document.createElement("div");
+      row.className = "plane-row";
+      row.innerHTML = "<b></b><span class='mono'></span><span class='note'></span>";
+      row.children[0].textContent = name;
+      row.children[1].textContent = host;
+      row.children[2].textContent = note;
+      topo.appendChild(row);
+    }
+    if (!d.enabled) {
+      const warn = document.createElement("div");
+      warn.className = "msg-note";
+      warn.textContent = "Agents are disabled. Enable them in config.json (agents.enabled) and set " +
+        "agents.dir on a dedicated worker host reached by agents.ssh — not a Spark, not this console. " +
+        "Until then the launcher is inert.";
+      topo.appendChild(warn);
+    } else if (!d.isolated) {
+      const warn = document.createElement("div");
+      warn.className = "msg-note";
+      warn.textContent = "Running locally on the console host: slaves are NOT sandboxed. " +
+        "Set agents.ssh to a dedicated worker host for real isolation.";
+      topo.appendChild(warn);
+    }
+
+    $("agent-run").disabled = !d.enabled || state.streaming;
+    $("agent-launch-note").textContent = d.enabled ? "" : "enable agents in config.json first";
+
+    const runs = $("agents-runs");
+    runs.textContent = "";
+    if (!(d.recent || []).length) {
+      runs.innerHTML = "<div class='empty-state'><b>No runs yet</b><span>Launched goals show here, and each run is written to the trace log for the training export.</span></div>";
+    } else {
+      for (const r of d.recent) {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.style.gap = "6px";
+        const top = document.createElement("div");
+        top.className = "skill-head";
+        top.innerHTML = "<b style='font-size:13px;font-weight:500'></b><span class='src mono'></span>";
+        top.children[0].textContent = (r.goal || "").slice(0, 120);
+        top.children[1].textContent = (r.killed ? r.killed : ("exit " + r.exit)) + " · " + (r.lines || 0) + " lines";
+        const when = document.createElement("div");
+        when.className = "skill-tags mono";
+        when.textContent = (r.host || "") + " · " + relTime((r.ts || 0) * 1000);
+        card.appendChild(top); card.appendChild(when);
+        runs.appendChild(card);
+      }
+    }
+  }
+
+  async function runAgent() {
+    const goal = $("agent-goal").value.trim();
+    if (!goal || state.streaming) return;
+    const out = $("agent-stream");
+    out.hidden = false; out.textContent = "";
+    state.streaming = true;
+    $("agent-run").disabled = true;
+    $("agent-stop").hidden = false;
+    const ctl = new AbortController();
+    state.agentAbort = ctl;
+    const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
+    try {
+      const r = await fetch("/api/agents", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal }), signal: ctl.signal,
+      });
+      if (!r.ok) { append("error: " + upstreamText(await r.text())); }
+      else {
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const parts = buf.split("\n");
+          buf = parts.pop();
+          for (const ln of parts) {
+            if (!ln.startsWith("data:")) continue;
+            let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+            if (o.phase === "start") append("— launching on " + o.host + " (" + o.mode + (o.isolated ? ", isolated" : ", NOT isolated") + ") —");
+            else if (o.phase === "done") append("— finished: " + (o.killed ? o.killed : "exit " + o.exit) + " —");
+            else if (o.error) append("error: " + o.error);
+            else if (o.line != null) append(o.line);
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") append("error: " + e.message);
+    } finally {
+      state.streaming = false;
+      state.agentAbort = null;
+      $("agent-run").disabled = false;
+      $("agent-stop").hidden = true;
+      renderAgents();
+    }
+  }
+
   function renderServers(status, cfg) {
     const box = $("tools-box");
     if (!box) return;
@@ -1666,6 +1782,8 @@
   }
 
   $("export-all").onclick = () => window.open("/api/export", "_blank");
+  $("agent-run").onclick = runAgent;
+  $("agent-stop").onclick = () => { if (state.agentAbort) state.agentAbort.abort(); };
   $("export-good").onclick = () => window.open("/api/export?rated=up", "_blank");
   $("new-chat").onclick = newChat;
   $("new-chat-2").onclick = newChat;
