@@ -141,8 +141,9 @@ def recent_slaves(CFG, limit=40):
     # Running slaves stream events to their host-mounted task dir
     # (/tmp/bb-<role>-<id>-*/events.jsonl); files touched in the last 30 min
     # are read too, so a slave shows up WHILE it works, not only after.
-    live_cmd = ("echo ===LIVE===; for f in $(find /tmp/ -maxdepth 2 -name events.jsonl -mmin -30 "
-                "-path '*/bb-*' 2>/dev/null | head -8); do echo \"### $f\"; tail -n 10 \"$f\"; done")
+    live_cmd = ("echo ===LIVE===; RUNNING=\" $(podman ps --format '{{.Names}}' 2>/dev/null | tr '\\n' ' ') \"; "
+                "for f in $(find /tmp/ -maxdepth 2 -name events.jsonl -mmin -60 -path '*/bb-*' 2>/dev/null | head -12); do "
+                "n=$(basename $(dirname $f) | cut -d- -f2,3); case \"$RUNNING\" in *\" $n \"*) echo \"### $f\"; tail -n 10 \"$f\";; esac; done")
     if ssh:
         d = directory
         if d == "~":
@@ -300,16 +301,11 @@ try:
     out["masters"] = int(ps or 0)
 except Exception:
     out["masters"] = None
-live = []
+# a slave is live iff its container is running (containers are named after
+# the slave); a recently touched events file is NOT enough — a killed run
+# leaves fresh files behind
 now = time.time()
-for f in glob.glob("/tmp/bb-*/events.jsonl"):
-    try:
-        if now - os.path.getmtime(f) < 600:
-            base = f.split("/")[-2].split("-")
-            live.append("-".join(base[1:3]))
-    except OSError:
-        pass
-out["live"] = sorted(set(live))
+out["live"] = sorted(set(names))
 agg = {"n": 0, "ok": 0, "failed": 0, "tokens": 0, "roles": {}, "last_ts": 0}
 try:
     since = now - 86400
