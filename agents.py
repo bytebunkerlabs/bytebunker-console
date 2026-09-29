@@ -141,7 +141,9 @@ def recent_slaves(CFG, limit=40):
     # Running slaves stream events to their host-mounted task dir
     # (/tmp/bb-<role>-<id>-*/events.jsonl); files touched in the last 30 min
     # are read too, so a slave shows up WHILE it works, not only after.
-    live_cmd = ("echo ===LIVE===; RUNNING=\" $(podman ps --format '{{.Names}}' 2>/dev/null | tr '\\n' ' ') \"; "
+    live_cmd = ("echo ===MASTER===; G=$(ls -td %s/trajectories/goal-*/ 2>/dev/null | head -1); "
+                "[ -n \"$G\" ] && tail -n 14 \"$G/master.jsonl\" 2>/dev/null; "
+                "echo ===LIVE===; RUNNING=\" $(podman ps --format '{{.Names}}' 2>/dev/null | tr '\\n' ' ') \"; "
                 "for f in $(find /tmp/ -maxdepth 2 -name events.jsonl -mmin -60 -path '*/bb-*' 2>/dev/null | head -12); do "
                 "n=$(basename $(dirname $f) | cut -d- -f2,3); case \"$RUNNING\" in *\" $n \"*) echo \"### $f\"; tail -n 10 \"$f\";; esac; done")
     if ssh:
@@ -152,7 +154,7 @@ def recent_slaves(CFG, limit=40):
             qd = "~/" + shlex.quote(d[2:])
         else:
             qd = shlex.quote(d)
-        remote = "tail -n %d %s/%s 2>/dev/null; %s" % (int(limit), qd, rel, live_cmd)
+        remote = "tail -n %d %s/%s 2>/dev/null; %s" % (int(limit), qd, rel, live_cmd % qd)
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", ssh, remote]
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
@@ -167,10 +169,19 @@ def recent_slaves(CFG, limit=40):
         except OSError as e:
             return {"ok": False, "error": str(e)[:150]}
         try:
-            out += subprocess.run(["sh", "-c", live_cmd], capture_output=True, text=True, timeout=10).stdout
+            out += subprocess.run(["sh", "-c", live_cmd % shlex.quote(os.path.expanduser(directory))], capture_output=True, text=True, timeout=10).stdout
         except (subprocess.TimeoutExpired, OSError):
             pass
-    spawn_part, _, live_part = out.partition("===LIVE===")
+    spawn_part, _, rest = out.partition("===MASTER===")
+    master_part, _, live_part = rest.partition("===LIVE===")
+    master = []
+    for line in master_part.splitlines():
+        try:
+            e = _json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            master.append({k: (v[:200] if isinstance(v, str) else v) for k, v in e.items() if k != "brief"})
     live = []
     cur = None
     for line in live_part.splitlines():
@@ -204,7 +215,7 @@ def recent_slaves(CFG, limit=40):
             "answer": (ans or "")[:400], "error": (r.get("error") or "")[:200],
             "ts": r.get("timestamp"),
         })
-    return {"ok": True, "slaves": slaves[::-1], "live": live}
+    return {"ok": True, "slaves": slaves[::-1], "live": live, "master": master}
 
 
 _SLAVE_ID = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -366,6 +377,22 @@ def stats(CFG, max_age=8):
         val = {"ok": False, "enabled": True, "host": st["host"], "error": str(e)[:120]}
     _stats_cache.update(at=now, val=val)
     return val
+
+
+def kill_slave(CFG, slave_id):
+    """Stop one running slave: its container is named after it. The master
+    sees the slave end with an error and decides what to do next."""
+    if not _SLAVE_ID.match(slave_id or ""):
+        return {"ok": False, "error": "bad slave id"}
+    a = agent_cfg(CFG)
+    ssh = (a.get("ssh") or "").strip()
+    inner = "podman kill %s >/dev/null 2>&1 && echo killed || echo not-running" % shlex.quote(slave_id)
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh, inner] if ssh else ["sh", "-c", inner]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"ok": False, "error": str(e)[:120]}
+    return {"ok": out == "killed", "id": slave_id, "result": out}
 
 
 def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):

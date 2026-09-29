@@ -1598,6 +1598,11 @@
     };
     const head = box.querySelector(".skill-head");
     head.querySelector("b").textContent = (r.role || id) + " \u00b7 " + id;
+    if (d.running) {
+      const sb = document.createElement("button"); sb.type = "button"; sb.className = "rate-btn bad"; sb.textContent = "stop";
+      sb.style.marginRight = "8px"; sb.onclick = () => stopSlave(id);
+      head.insertBefore(sb, head.querySelector("button"));
+    }
     head.querySelector(".src").textContent = [
       d.running ? "running" : (r.success === true ? "\u2713 success" : (r.success === false ? "\u2717 failed" : "")),
       r.depth, r.network ? "network" : (r.network === false ? "no-network" : null),
@@ -1618,6 +1623,26 @@
     let d = { ok: false };
     try { d = await (await fetch("/api/agents/slaves")).json(); } catch (e) {}
     box.textContent = "";
+    // The master's own decisions, live: spawns, waits, results collected,
+    // synthesis. This is the Sultan working, not just its minions.
+    if ((d.master || []).length) {
+      const mc = document.createElement("div");
+      mc.className = "card live-card"; mc.style.gap = "6px";
+      const mh = document.createElement("div"); mh.className = "skill-head";
+      mh.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono live-dot'>\u25c6 deciding</span>";
+      mh.querySelector("b").textContent = (d.master_name || "Sultan") + " \u00b7 master";
+      mh.querySelector(".src").textContent = d.master.length + " recent decisions";
+      mc.appendChild(mh);
+      const ev = document.createElement("div");
+      ev.className = "skill-tags mono"; ev.style.whiteSpace = "pre-wrap"; ev.style.lineHeight = "1.55";
+      ev.textContent = d.master.slice(-10).map((e) => {
+        const t = e.ts ? new Date(e.ts * 1000).toLocaleTimeString([], { hour12: false }) : "";
+        if (e.kind === "tool") return t + "  " + (e.name || "tool") + (e.args ? " " + String(e.args).slice(0, 110) : "") + (e.result ? " \u2192 " + String(e.result).slice(0, 90) : "");
+        return fmtEvent(e);
+      }).join("\n");
+      mc.appendChild(ev);
+      box.appendChild(mc);
+    }
     // Running right now: each live slave streams its events to the worker,
     // and this is them, as they happen — the LLM steps, every tool call,
     // verdicts — so a working agent is never a black box.
@@ -1626,9 +1651,10 @@
       card.className = "card live-card"; card.style.gap = "6px";
       const head = document.createElement("div");
       head.className = "skill-head";
-      head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono live-dot'>\u25cf running</span>";
+      head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span style='display:flex;gap:8px;align-items:center'><span class='src mono live-dot'>\u25cf running</span><button class='rate-btn bad' type='button' title='Stop this agent now'>stop</button></span>";
       head.querySelector("b").textContent = l.name || "slave";
       head.querySelector(".src").textContent = (l.events || []).length + " recent events";
+      head.querySelector("button").onclick = (ev) => { ev.stopPropagation(); stopSlave(l.name); };
       card.appendChild(head);
       const ev = document.createElement("div");
       ev.className = "skill-tags mono"; ev.style.whiteSpace = "pre-wrap"; ev.style.lineHeight = "1.55";
@@ -1672,6 +1698,17 @@
       }
       box.appendChild(card);
     }
+  }
+
+  async function stopSlave(id) {
+    if (!confirm("Stop agent " + id + " now? The Sultan will see it end and decide what to do.")) return;
+    try {
+      const r = await (await fetch("/api/agents/slave", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "kill", id }) })).json();
+      if (!r.ok) alert("could not stop " + id + ": " + (r.error || r.result || "unknown"));
+    } catch (e) { alert("could not stop " + id + ": " + e.message); }
+    renderAgentSlaves();
+    if (state.agentDetail && state.agentDetail.id === id) openSlaveDetail(id, true);
   }
 
   async function saveMaster() {

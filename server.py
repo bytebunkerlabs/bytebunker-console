@@ -916,7 +916,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/agents"):
+                        "/api/plugins", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -942,6 +942,13 @@ class Handler(BaseHTTPRequestHandler):
             self._plugin_admin(body)
         elif path == "/api/agents":
             self._agents_run(body)
+        elif path == "/api/agents/slave":
+            if not isinstance(body, dict) or body.get("action") != "kill":
+                self._json({"error": "expected {action: kill, id}"}, 400)
+                return
+            res = agentmod.kill_slave(CFG, str(body.get("id") or ""))
+            TRACE.log("slave_kill", id=body.get("id"), result=res.get("result"), ok=res.get("ok"))
+            self._json(res)
         elif path == "/api/rate":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
