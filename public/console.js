@@ -34,6 +34,7 @@
     skillBodies: {},        // name -> body, fetched lazily and cached
     plugins: [],            // plugin list from /api/plugins
     agentAbort: null,       // AbortController for a live agent run
+    agentDetail: null,      // {kind:"run"|"slave", id} shown in the right-hand pane
     hist: {},               // node name -> util history for sparklines
   };
 
@@ -1534,16 +1535,34 @@
     }
   }
 
+  function detailPane(title, sub) {
+    const box = $("agents-detail");
+    box.textContent = "";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><button class='linky' type='button'>close</button>";
+    head.querySelector("b").textContent = title;
+    head.querySelector(".src").textContent = sub || "";
+    head.querySelector("button").onclick = () => {
+      state.agentDetail = null;
+      box.innerHTML = "<div class='empty-state'><b>Nothing open</b><span>Click a run or an agent on the left to read it here.</span></div>";
+    };
+    box.appendChild(head);
+    return box;
+  }
+
   async function openRunLog(id) {
-    const pre = $("agent-rundetail");
-    pre.hidden = false; pre.textContent = "loading…"; pre.scrollIntoView({ block: "nearest" });
+    state.agentDetail = { kind: "run", id };
+    const box = detailPane("run " + id, "loading\u2026");
     try {
       const d = await (await fetch("/api/agents/log?id=" + encodeURIComponent(id))).json();
-      if (d.error) { pre.textContent = "error: " + d.error; return; }
-      const head = "goal: " + (d.goal || "") + "\nhost: " + (d.host || "") +
-        "  ·  " + (d.killed ? d.killed : "exit " + d.exit) + "\n" + "─".repeat(40) + "\n";
-      pre.textContent = head + (d.output || []).join("\n");
-    } catch (e) { pre.textContent = "error: " + e.message; }
+      if (d.error) { box.appendChild(document.createTextNode("error: " + d.error)); return; }
+      box.querySelector(".src").textContent = (d.host || "") + "  \u00b7  " + (d.killed ? d.killed : "exit " + d.exit) +
+        "  \u00b7  " + (d.output || []).length + " lines";
+      const g = document.createElement("div"); g.className = "skill-desc"; g.textContent = d.goal || ""; box.appendChild(g);
+      const pre = document.createElement("pre"); pre.className = "skill-body";
+      pre.textContent = (d.output || []).join("\n") || "(no output recorded)";
+      box.appendChild(pre);
+    } catch (e) { box.appendChild(document.createTextNode("error: " + e.message)); }
   }
 
   function fmtEvent(e) {
@@ -1561,25 +1580,23 @@
     return t + "  " + what;
   }
 
-  async function openSlaveDetail(id) {
-    const box = $("agent-slavedetail");
-    box.hidden = false; box.textContent = "loading\u2026"; box.scrollIntoView({ block: "nearest" });
+  async function openSlaveDetail(id, quiet) {
+    state.agentDetail = { kind: "slave", id };
     let d = {};
     try { d = await (await fetch("/api/agents/slave?id=" + encodeURIComponent(id))).json(); } catch (e) { d = { error: e.message }; }
-    box.textContent = "";
-    if (!d.ok || !d.found) { box.textContent = d.error || "nothing recorded for " + id; return; }
+    if (!state.agentDetail || state.agentDetail.id !== id) return;   // user opened something else meanwhile
+    const box = detailPane(id, "");
+    if (!d.ok || !d.found) { box.appendChild(document.createTextNode(d.error || "nothing recorded for " + id)); return; }
     const r = d.record || {};
     const add = (label, text, mono) => {
       if (text == null || text === "" || (Array.isArray(text) && !text.length)) return;
       const h = document.createElement("div"); h.className = "glabel"; h.textContent = label; box.appendChild(h);
       const b = document.createElement(mono ? "pre" : "div");
       b.className = mono ? "skill-body" : "skill-desc"; b.style.whiteSpace = "pre-wrap";
-      if (mono) b.style.maxHeight = "480px";
       b.textContent = Array.isArray(text) ? text.join("\n") : String(text);
       box.appendChild(b);
     };
-    const head = document.createElement("div"); head.className = "skill-head";
-    head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><button class='linky' type='button'>close</button>";
+    const head = box.querySelector(".skill-head");
     head.querySelector("b").textContent = (r.role || id) + " \u00b7 " + id;
     head.querySelector(".src").textContent = [
       d.running ? "running" : (r.success === true ? "\u2713 success" : (r.success === false ? "\u2717 failed" : "")),
@@ -1588,8 +1605,6 @@
       r.confidence != null ? "confidence " + r.confidence : null,
       (r.skills || []).length ? "skills: " + r.skills.join(", ") : null,
     ].filter(Boolean).join("  \u00b7  ");
-    head.querySelector("button").onclick = () => { box.hidden = true; };
-    box.appendChild(head);
     add("Brief", d.brief || r.brief, true);
     add("Answer", r.answer, true);
     if ((r.evidence || []).length) add("Evidence", r.evidence.map((e, i) => (i + 1) + ". " + (e.claim || "") + "\n   \u2190 " + (e.source || "")), true);
@@ -1684,7 +1699,11 @@
     const ctl = new AbortController();
     state.agentAbort = ctl;
     const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
-    const liveTimer = setInterval(() => { if (state.screen === "agents") renderAgentSlaves(); }, 5000);
+    const liveTimer = setInterval(() => {
+      if (state.screen !== "agents") return;
+      renderAgentSlaves();
+      if (state.agentDetail && state.agentDetail.kind === "slave") openSlaveDetail(state.agentDetail.id, true);
+    }, 5000);
     try {
       const r = await fetch("/api/agents", {
         method: "POST", headers: { "Content-Type": "application/json" },
