@@ -1576,6 +1576,11 @@
     else if (e.kind === "transcript_trim") what = "trimmed " + e.chars + " chars of old tool output";
     else if (e.kind === "bad_submission") what = "submission rejected: " + (e.error || "");
     else if (e.kind === "spawn") what = "spawned " + (e.slave_id || "") + " (" + (e.role || "") + ", " + (e.depth || "") + ")";
+    else if (e.kind === "llm") what = "round " + (e.step != null ? e.step : "?") + " \u00b7 " + (e.elapsed_s != null ? e.elapsed_s + " s" : "") + " \u00b7 " + (e.completion_tokens || 0) + " tok out \u00b7 " + ((e.tools || []).length ? "called " + e.tools.join(", ") : "wrote prose: " + (e.text || "").slice(0, 200));
+    else if (e.kind === "final_answer") what = "final answer" + (e.source ? " (" + e.source + ")" : "") + ": " + (e.text || "").slice(0, 300);
+    else if (e.kind === "bail") what = "gave up: " + (e.reason || "");
+    else if (e.kind === "panel") what = "skeptic panel on " + (e.slave_id || "") + ": " + (e.passed ? "passed" : (e.unverifiable ? "unverifiable" : "failed")) + ((e.failures || []).length ? " \u2014 " + e.failures.join("; ").slice(0, 200) : "");
+    else if (e.kind === "llm_timeout_retry") what = "model call timed out; retry " + (e.attempt || "");
     else if (e.kind === "spawn_result") what = "finished: " + (e.success ? "success" : (/unverified|partial result recovered/.test(e.error || "") ? "answered, unverified" : "failed")) + " \u00b7 " + (e.tokens || 0) + " tok" + (e.error ? " \u00b7 " + e.error : "");
     else { const rest = Object.assign({}, e); delete rest.ts; delete rest.kind; delete rest.actor; what = e.kind + " " + JSON.stringify(rest).slice(0, 160); }
     return t + "  " + what;
