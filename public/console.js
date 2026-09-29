@@ -1505,6 +1505,7 @@
     // master persona (only overwrite when not focused/editing)
     if (document.activeElement !== $("master-name")) $("master-name").value = d.master_name || "";
     if (document.activeElement !== $("master-instructions")) $("master-instructions").value = d.master_instructions || "";
+    if (document.activeElement !== $("run-timeout") && d.run_timeout_s) $("run-timeout").value = Math.round(d.run_timeout_s / 60);
 
     $("agent-run").disabled = !d.enabled || state.streaming;
     $("agent-launch-note").textContent = d.enabled ? "" : "enable agents in config.json first";
@@ -1718,7 +1719,8 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "config",
           master_name: $("master-name").value.trim(),
-          master_instructions: $("master-instructions").value.trim() }),
+          master_instructions: $("master-instructions").value.trim(),
+          run_timeout_s: Math.max(5, parseInt($("run-timeout").value, 10) || 180) * 60 }),
       });
       $("master-note").textContent = "Saved. The master uses this on the next run.";
     } catch (e) { $("master-note").textContent = "save failed: " + e.message; }

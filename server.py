@@ -68,8 +68,18 @@ DEFAULT_CONFIG = {
     # Safe by default: the harness launcher is inert until you enable it and
     # point dir/ssh at a dedicated worker host (see agents.py).
     "agents": {"enabled": False, "ssh": "", "dir": "", "python": "uv run",
-               "script": "scripts/run_master.py"},
+               "script": "scripts/run_master.py", "run_timeout_s": 10800},
 }
+
+
+def agent_run_timeout(cfg):
+    """Wall-clock cap on one delegated goal. A multi-step goal on a single
+    Spark is a 1-2 hour affair; the old fixed 3600 s killed the master while
+    it was writing its synthesis after every agent had delivered."""
+    try:
+        return max(300, min(86400, int((cfg.get("agents") or {}).get("run_timeout_s") or 10800)))
+    except (TypeError, ValueError):
+        return 10800
 
 
 # What each model can actually do. An OpenAI-compatible gateway normalises the
@@ -822,6 +832,7 @@ class Handler(BaseHTTPRequestHandler):
             a = CFG.get("agents") or {}
             st["master_name"] = a.get("master_name") or ""
             st["master_instructions"] = a.get("master_instructions") or ""
+            st["run_timeout_s"] = agent_run_timeout(CFG)
             runs = []
             for e in TRACE.events(time.strftime("%Y-%m-%d",
                                   time.localtime(time.time() - 14 * 86400))):
@@ -999,9 +1010,16 @@ class Handler(BaseHTTPRequestHandler):
             a = CFG.setdefault("agents", {})
             a["master_name"] = str(body.get("master_name") or "")[:120]
             a["master_instructions"] = str(body.get("master_instructions") or "")[:8000]
+            if body.get("run_timeout_s") is not None:
+                try:
+                    # 5 min .. 24 h; a multi-step goal on one Spark is a 1-2 h affair
+                    a["run_timeout_s"] = max(300, min(86400, int(body.get("run_timeout_s"))))
+                except (TypeError, ValueError):
+                    pass
             save_config()
             self._json({"ok": True, "master_name": a["master_name"],
-                        "master_instructions": a["master_instructions"]})
+                        "master_instructions": a["master_instructions"],
+                        "run_timeout_s": agent_run_timeout(CFG)})
             return
         goal = body.get("goal") or ""
         try:
@@ -1055,7 +1073,8 @@ class Handler(BaseHTTPRequestHandler):
             emit({"line": text})
 
         try:
-            code, killed = agentmod.run_streaming(cmd, cwd, on_line, stop)
+            code, killed = agentmod.run_streaming(cmd, cwd, on_line, stop,
+                                                  timeout_s=agent_run_timeout(CFG))
         except FileNotFoundError as e:
             emit({"error": "could not launch the harness: %s" % e})
             code, killed = -1, "error"
