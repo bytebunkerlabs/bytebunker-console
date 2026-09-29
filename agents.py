@@ -287,6 +287,91 @@ def slave_detail(CFG, slave_id):
     }
 
 
+_STATS_PY = r"""
+import json, os, glob, time, subprocess
+out = {"ts": time.time()}
+try:
+    names = subprocess.run(["podman", "ps", "--format", "{{.Names}}"], capture_output=True, text=True, timeout=8).stdout.split()
+except Exception:
+    names = []
+out["containers"] = names
+try:
+    ps = subprocess.run(["pgrep", "-fc", r"python scripts/run_maste[r].py"], capture_output=True, text=True, timeout=5).stdout.strip()
+    out["masters"] = int(ps or 0)
+except Exception:
+    out["masters"] = None
+live = []
+now = time.time()
+for f in glob.glob("/tmp/bb-*/events.jsonl"):
+    try:
+        if now - os.path.getmtime(f) < 600:
+            base = f.split("/")[-2].split("-")
+            live.append("-".join(base[1:3]))
+    except OSError:
+        pass
+out["live"] = sorted(set(live))
+agg = {"n": 0, "ok": 0, "failed": 0, "tokens": 0, "roles": {}, "last_ts": 0}
+try:
+    since = now - 86400
+    with open(os.path.expanduser("~/bytebunker-harness/trajectories/spawns.jsonl")) as fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if (r.get("timestamp") or 0) < since:
+                continue
+            agg["n"] += 1
+            agg["ok" if r.get("success") else "failed"] += 1
+            agg["tokens"] += int(r.get("tokens") or 0)
+            role = r.get("role") or "?"
+            agg["roles"][role] = agg["roles"].get(role, 0) + 1
+            agg["last_ts"] = max(agg["last_ts"], r.get("timestamp") or 0)
+except OSError:
+    pass
+out["day"] = agg
+try:
+    la = os.getloadavg(); out["load1"] = round(la[0], 2)
+    mem = {}
+    for ln in open("/proc/meminfo"):
+        k, v = ln.split(":", 1); mem[k] = int(v.split()[0])
+    out["mem_used_gb"] = round((mem["MemTotal"] - mem["MemAvailable"]) / 2**20, 1)
+    out["mem_total_gb"] = round(mem["MemTotal"] / 2**20, 1)
+except Exception:
+    pass
+print(json.dumps(out))
+"""
+_stats_cache = {"at": 0, "val": None}
+
+
+def stats(CFG, max_age=8):
+    """Live view of the agent plane for the Cluster screen: containers,
+    masters, live slaves, last-24h spawn outcomes, worker load. One ssh per
+    call, cached briefly so several browsers do not multiply it."""
+    import json as _json, time as _time
+    now = _time.time()
+    st = status(CFG)
+    if not st["enabled"]:                      # cheap, and never served from cache
+        return {"ok": False, "enabled": False, "host": st["host"]}
+    if _stats_cache["val"] is not None and now - _stats_cache["at"] < max_age:
+        return _stats_cache["val"]
+    a = agent_cfg(CFG)
+    ssh = (a.get("ssh") or "").strip()
+    py = _STATS_PY.replace("~/bytebunker-harness", (a.get("dir") or "~/bytebunker-harness"))
+    if ssh:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
+    else:
+        cmd = ["python3", "-c", py]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip().splitlines()
+        val = _json.loads(out[-1]) if out else {}
+        val.update(ok=True, enabled=True, host=st["host"], isolated=st["isolated"])
+    except Exception as e:   # noqa: BLE001
+        val = {"ok": False, "enabled": True, "host": st["host"], "error": str(e)[:120]}
+    _stats_cache.update(at=now, val=val)
+    return val
+
+
 def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
     """Run cmd, calling on_line(text) for each stdout line. Returns
     (exit_code, killed). Merges stderr into stdout so a crash is visible.

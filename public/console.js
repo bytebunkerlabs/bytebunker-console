@@ -1807,7 +1807,51 @@
       (25 - Math.max(0, Math.min(1, v / 100)) * 23).toFixed(2)).join(" ");
   }
 
+  let agentsObsTick = 0;
+  async function pollAgentsObs() {
+    const box = $("agents-obs");
+    if (!box) return;
+    let d = {};
+    try { d = await (await fetch("/api/agents/stats")).json(); } catch (e) { d = { ok: false, error: e.message }; }
+    box.textContent = "";
+    const card = document.createElement("div");
+    card.className = "card";
+    const title = document.createElement("div");
+    title.style.cssText = "display:flex;align-items:baseline;gap:10px";
+    title.innerHTML = "<span class='mono' style='font-size:15px;font-weight:600'>agents</span><span class='spec' style='font-size:11.5px;color:var(--faint)'></span><div style='flex:1'></div><span class='pill'><span class='d'></span><span class='pt'></span></span>";
+    title.querySelector(".spec").textContent = d.host ? (d.host + (d.isolated ? " \u00b7 isolated worker" : " \u00b7 NOT isolated")) : "";
+    title.querySelector(".pt").textContent = !d.enabled ? "disabled" : (d.ok ? ((d.containers || []).length ? "working" : "idle") : "unreachable");
+    if (!d.ok) title.querySelector(".pill").style.opacity = ".6";
+    card.appendChild(title);
+    if (!d.enabled) {
+      const n = document.createElement("div"); n.className = "hint"; n.textContent = "Agents are disabled in config.json."; card.appendChild(n);
+      box.appendChild(card); return;
+    }
+    if (!d.ok) {
+      const n = document.createElement("div"); n.className = "hint"; n.textContent = "Worker not reachable: " + (d.error || ""); card.appendChild(n);
+      box.appendChild(card); return;
+    }
+    const day = d.day || {};
+    const stat = (label, value, sub) => {
+      const w = document.createElement("div");
+      w.innerHTML = "<div style='font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)'></div><div class='mono' style='font-size:20px;font-weight:600;line-height:1.2'></div><div style='font-size:11.5px;color:var(--muted)'></div>";
+      w.children[0].textContent = label; w.children[1].textContent = value; w.children[2].textContent = sub || "";
+      return w;
+    };
+    const grid = document.createElement("div");
+    grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px";
+    grid.appendChild(stat("containers", String((d.containers || []).length), (d.containers || []).slice(0, 4).join(", ") || "none running"));
+    grid.appendChild(stat("masters", d.masters == null ? "\u2014" : String(d.masters), d.masters ? "goal in progress" : "no goal running"));
+    grid.appendChild(stat("live agents", String((d.live || []).length), (d.live || []).slice(0, 3).join(", ") || "\u2014"));
+    grid.appendChild(stat("spawns \u00b7 24h", String(day.n || 0), (day.ok || 0) + " ok \u00b7 " + (day.failed || 0) + " failed"));
+    grid.appendChild(stat("tokens \u00b7 24h", (day.tokens || 0) >= 1000 ? Math.round((day.tokens || 0) / 1000) + "k" : String(day.tokens || 0), Object.keys(day.roles || {}).length ? Object.entries(day.roles).map(([r, n]) => n + " " + r).join(", ").slice(0, 60) : ""));
+    if (d.mem_total_gb) grid.appendChild(stat("worker", d.mem_used_gb + " / " + d.mem_total_gb + " GB", "load " + (d.load1 != null ? d.load1 : "\u2014")));
+    card.appendChild(grid);
+    box.appendChild(card);
+  }
+
   async function pollTelemetry() {
+    if ((agentsObsTick++ % 2) === 0) pollAgentsObs();   // every 10 s alongside telemetry
     if (!state.cfg.telemetry) {
       $("side-health").innerHTML = '<span class="dot" style="background:var(--faint);animation:none"></span>no telemetry';
       $("cluster-poll").textContent = "prometheus not configured";

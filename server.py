@@ -846,6 +846,8 @@ class Handler(BaseHTTPRequestHandler):
                             "host": found.get("host"), "ts": found.get("ts")})
         elif path == "/api/agents/slaves":
             self._json(agentmod.recent_slaves(CFG))
+        elif path == "/api/agents/stats":
+            self._json(agentmod.stats(CFG))
         elif path == "/api/agents/slave":
             sid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
             self._json(agentmod.slave_detail(CFG, sid))
