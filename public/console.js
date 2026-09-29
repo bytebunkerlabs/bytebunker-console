@@ -1575,7 +1575,7 @@
     else if (e.kind === "transcript_trim") what = "trimmed " + e.chars + " chars of old tool output";
     else if (e.kind === "bad_submission") what = "submission rejected: " + (e.error || "");
     else if (e.kind === "spawn") what = "spawned " + (e.slave_id || "") + " (" + (e.role || "") + ", " + (e.depth || "") + ")";
-    else if (e.kind === "spawn_result") what = "finished: " + (e.success ? "success" : "failed") + " \u00b7 " + (e.tokens || 0) + " tok" + (e.error ? " \u00b7 " + e.error : "");
+    else if (e.kind === "spawn_result") what = "finished: " + (e.success ? "success" : (/unverified|partial result recovered/.test(e.error || "") ? "answered, unverified" : "failed")) + " \u00b7 " + (e.tokens || 0) + " tok" + (e.error ? " \u00b7 " + e.error : "");
     else { const rest = Object.assign({}, e); delete rest.ts; delete rest.kind; delete rest.actor; what = e.kind + " " + JSON.stringify(rest).slice(0, 160); }
     return t + "  " + what;
   }
@@ -1604,7 +1604,7 @@
       head.insertBefore(sb, head.querySelector("button"));
     }
     head.querySelector(".src").textContent = [
-      d.running ? "running" : (r.success === true ? "\u2713 success" : (r.success === false ? "\u2717 failed" : "")),
+      d.running ? "running" : (r.success === true ? "\u2713 success" : (r.success === false ? (r.answer ? "\u25b3 answered, unverified" : "\u2717 failed") : "")),
       r.depth, r.network ? "network" : (r.network === false ? "no-network" : null),
       r.tokens != null ? r.tokens + " tok" : null,
       r.confidence != null ? "confidence " + r.confidence : null,
@@ -1675,7 +1675,7 @@
       card.className = "card"; card.style.gap = "6px";
       const head = document.createElement("div");
       head.className = "skill-head";
-      const ok = sl.success ? "✓ done" : (sl.error ? "✗ failed" : "…");
+      const ok = sl.success ? "✓ done" : (sl.answer ? "△ answered, unverified" : (sl.error ? "✗ failed" : "…"));
       head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono'></span>";
       head.querySelector("b").textContent = sl.role || "slave";
       head.querySelectorAll(".src")[0].textContent =
@@ -1685,7 +1685,7 @@
       brief.className = "skill-desc";
       brief.textContent = sl.brief || "";
       card.appendChild(head); card.appendChild(brief);
-      const detail = sl.success ? sl.answer : sl.error;
+      const detail = sl.success ? sl.answer : (sl.answer ? sl.answer + (sl.error ? "\n[unverified: " + sl.error + "]" : "") : sl.error);
       if (detail) {
         const dv = document.createElement("div");
         dv.className = "skill-tags mono"; dv.style.whiteSpace = "pre-wrap";
@@ -1880,7 +1880,7 @@
     grid.appendChild(stat("containers", String((d.containers || []).length), (d.containers || []).slice(0, 4).join(", ") || "none running"));
     grid.appendChild(stat("masters", d.masters == null ? "\u2014" : String(d.masters), d.masters ? "goal in progress" : "no goal running"));
     grid.appendChild(stat("live agents", String((d.live || []).length), (d.live || []).slice(0, 3).join(", ") || "\u2014"));
-    grid.appendChild(stat("spawns \u00b7 24h", String(day.n || 0), (day.ok || 0) + " ok \u00b7 " + (day.failed || 0) + " failed"));
+    grid.appendChild(stat("spawns \u00b7 24h", String(day.n || 0), (day.ok || 0) + " ok \u00b7 " + (day.unverified || 0) + " unverified \u00b7 " + (day.failed || 0) + " failed"));
     grid.appendChild(stat("tokens \u00b7 24h", (day.tokens || 0) >= 1000 ? Math.round((day.tokens || 0) / 1000) + "k" : String(day.tokens || 0), Object.keys(day.roles || {}).length ? Object.entries(day.roles).map(([r, n]) => n + " " + r).join(", ").slice(0, 60) : ""));
     if (d.mem_total_gb) grid.appendChild(stat("worker", d.mem_used_gb + " / " + d.mem_total_gb + " GB", "load " + (d.load1 != null ? d.load1 : "\u2014")));
     card.appendChild(grid);

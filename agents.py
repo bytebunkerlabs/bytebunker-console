@@ -317,7 +317,7 @@ except Exception:
 # leaves fresh files behind
 now = time.time()
 out["live"] = sorted(set(names))
-agg = {"n": 0, "ok": 0, "failed": 0, "tokens": 0, "roles": {}, "last_ts": 0}
+agg = {"n": 0, "ok": 0, "unverified": 0, "failed": 0, "tokens": 0, "roles": {}, "last_ts": 0}
 try:
     since = now - 86400
     with open(os.path.expanduser("~/bytebunker-harness/trajectories/spawns.jsonl")) as fh:
@@ -329,7 +329,9 @@ try:
             if (r.get("timestamp") or 0) < since:
                 continue
             agg["n"] += 1
-            agg["ok" if r.get("success") else "failed"] += 1
+            fr = r.get("final_result")
+            answered = isinstance(fr, dict) and bool(fr.get("answer"))
+            agg["ok" if r.get("success") else ("unverified" if answered else "failed")] += 1
             agg["tokens"] += int(r.get("tokens") or 0)
             role = r.get("role") or "?"
             agg["roles"][role] = agg["roles"].get(role, 0) + 1
