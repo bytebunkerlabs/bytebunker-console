@@ -1546,6 +1546,58 @@
     } catch (e) { pre.textContent = "error: " + e.message; }
   }
 
+  function fmtEvent(e) {
+    const t = e.ts ? new Date(e.ts * 1000).toLocaleTimeString([], { hour12: false }) : "";
+    let what = e.kind || "";
+    if (e.kind === "llm_call") what = "step " + e.step + " \u2192 model (" + Math.round((e.prompt_chars || 0) / 1000) + "k chars)";
+    else if (e.kind === "llm_reply") what = "model \u2192 " + ((e.tool_calls || []).length ? "calls " + e.tool_calls.join(", ") : (e.text || "").slice(0, 120));
+    else if (e.kind === "tool") what = (e.ok ? "\u2713 " : "\u2717 ") + e.name + " " + (e.args || "").slice(0, 160);
+    else if (e.kind === "verdict") what = "verifier: " + (e.passed ? "passed" : "failed \u2014 " + (e.failures || []).join("; ").slice(0, 200));
+    else if (e.kind === "transcript_trim") what = "trimmed " + e.chars + " chars of old tool output";
+    else if (e.kind === "bad_submission") what = "submission rejected: " + (e.error || "");
+    else if (e.kind === "spawn") what = "spawned " + (e.slave_id || "") + " (" + (e.role || "") + ", " + (e.depth || "") + ")";
+    else if (e.kind === "spawn_result") what = "finished: " + (e.success ? "success" : "failed") + " \u00b7 " + (e.tokens || 0) + " tok" + (e.error ? " \u00b7 " + e.error : "");
+    else { const rest = Object.assign({}, e); delete rest.ts; delete rest.kind; delete rest.actor; what = e.kind + " " + JSON.stringify(rest).slice(0, 160); }
+    return t + "  " + what;
+  }
+
+  async function openSlaveDetail(id) {
+    const box = $("agent-slavedetail");
+    box.hidden = false; box.textContent = "loading\u2026"; box.scrollIntoView({ block: "nearest" });
+    let d = {};
+    try { d = await (await fetch("/api/agents/slave?id=" + encodeURIComponent(id))).json(); } catch (e) { d = { error: e.message }; }
+    box.textContent = "";
+    if (!d.ok || !d.found) { box.textContent = d.error || "nothing recorded for " + id; return; }
+    const r = d.record || {};
+    const add = (label, text, mono) => {
+      if (text == null || text === "" || (Array.isArray(text) && !text.length)) return;
+      const h = document.createElement("div"); h.className = "glabel"; h.textContent = label; box.appendChild(h);
+      const b = document.createElement(mono ? "pre" : "div");
+      b.className = mono ? "skill-body" : "skill-desc"; b.style.whiteSpace = "pre-wrap";
+      if (mono) b.style.maxHeight = "480px";
+      b.textContent = Array.isArray(text) ? text.join("\n") : String(text);
+      box.appendChild(b);
+    };
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><button class='linky' type='button'>close</button>";
+    head.querySelector("b").textContent = (r.role || id) + " \u00b7 " + id;
+    head.querySelector(".src").textContent = [
+      d.running ? "running" : (r.success === true ? "\u2713 success" : (r.success === false ? "\u2717 failed" : "")),
+      r.depth, r.network ? "network" : (r.network === false ? "no-network" : null),
+      r.tokens != null ? r.tokens + " tok" : null,
+      r.confidence != null ? "confidence " + r.confidence : null,
+      (r.skills || []).length ? "skills: " + r.skills.join(", ") : null,
+    ].filter(Boolean).join("  \u00b7  ");
+    head.querySelector("button").onclick = () => { box.hidden = true; };
+    box.appendChild(head);
+    add("Brief", d.brief || r.brief, true);
+    add("Answer", r.answer, true);
+    if ((r.evidence || []).length) add("Evidence", r.evidence.map((e, i) => (i + 1) + ". " + (e.claim || "") + "\n   \u2190 " + (e.source || "")), true);
+    add("Unknowns", r.unknowns, true);
+    add("Error", r.error, true);
+    add("What it did \u00b7 " + (d.events || []).length + " events", (d.events || []).map(fmtEvent), true);
+  }
+
   async function renderAgentSlaves() {
     const box = $("agents-slaves");
     let d = { ok: false };
@@ -1565,17 +1617,10 @@
       card.appendChild(head);
       const ev = document.createElement("div");
       ev.className = "skill-tags mono"; ev.style.whiteSpace = "pre-wrap"; ev.style.lineHeight = "1.55";
-      ev.textContent = (l.events || []).slice(-8).map((e) => {
-        const t = e.ts ? new Date(e.ts * 1000).toLocaleTimeString([], { hour12: false }) : "";
-        let what = e.kind || "";
-        if (e.kind === "llm_call") what = "step " + e.step + " \u2192 model (" + Math.round((e.prompt_chars || 0) / 1000) + "k chars)";
-        else if (e.kind === "llm_reply") what = "model \u2192 " + ((e.tool_calls || []).length ? "calls " + e.tool_calls.join(", ") : (e.text || "").slice(0, 80));
-        else if (e.kind === "tool") what = (e.ok ? "\u2713 " : "\u2717 ") + e.name + " " + (e.args || "").slice(0, 90);
-        else if (e.kind === "verdict") what = "verifier: " + (e.passed ? "passed" : "failed " + (e.failures || []).join("; ").slice(0, 80));
-        else if (e.kind === "transcript_trim") what = "trimmed " + e.chars + " chars of old tool output";
-        return t + "  " + what;
-      }).join("\n");
+      ev.textContent = (l.events || []).slice(-8).map(fmtEvent).join("\n");
       card.appendChild(ev);
+      card.style.cursor = "pointer"; card.title = "Click to read everything this agent has done";
+      card.onclick = () => openSlaveDetail(l.name);
       box.appendChild(card);
     }
     if (!d.ok || (!(d.slaves || []).length && !(d.live || []).length)) {
@@ -1605,6 +1650,10 @@
         dv.className = "skill-tags mono"; dv.style.whiteSpace = "pre-wrap";
         dv.textContent = detail;
         card.appendChild(dv);
+      }
+      if (sl.id) {
+        card.style.cursor = "pointer"; card.title = "Click to read the full answer, evidence and every step";
+        card.onclick = () => openSlaveDetail(sl.id);
       }
       box.appendChild(card);
     }

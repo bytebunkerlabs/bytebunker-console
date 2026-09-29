@@ -196,6 +196,7 @@ def recent_slaves(CFG, limit=40):
         fr = r.get("final_result") or {}
         ans = fr.get("answer") if isinstance(fr, dict) else ""
         slaves.append({
+            "id": r.get("slave_id"), "goal": r.get("goal_id"),
             "role": r.get("role"), "depth": r.get("depth"),
             "brief": (r.get("brief") or "")[:200], "success": r.get("success"),
             "tokens": r.get("tokens"), "network": r.get("network_granted"),
@@ -203,6 +204,87 @@ def recent_slaves(CFG, limit=40):
             "ts": r.get("timestamp"),
         })
     return {"ok": True, "slaves": slaves[::-1], "live": live}
+
+
+_SLAVE_ID = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def slave_detail(CFG, slave_id):
+    """Everything the harness has about one slave: its spawn record (brief,
+    answer, evidence, unknowns, confidence, tokens, error) and its full
+    event timeline — the tracer file for a finished slave, the live
+    events.jsonl in its task dir for a running one. The console shows this
+    when you click an agent."""
+    import json as _json, os
+    if not _SLAVE_ID.match(slave_id or ""):
+        return {"ok": False, "error": "bad slave id"}
+    a = agent_cfg(CFG)
+    directory = (a.get("dir") or "").strip()
+    if not directory:
+        return {"ok": False, "error": "agents.dir not set"}
+    sid = slave_id
+    script = (
+        "cd %s 2>/dev/null; grep -F '\"slave_id\": \"%s\"' trajectories/spawns.jsonl 2>/dev/null | tail -n 1; "
+        "echo ===TRACE===; cat trajectories/*/%s.jsonl 2>/dev/null | tail -n 300; "
+        "echo ===LIVE===; tail -n 300 /tmp/bb-%s-*/events.jsonl 2>/dev/null; "
+        "echo ===INPUT===; head -c 30000 /tmp/bb-%s-*/input.json 2>/dev/null"
+    )
+    ssh = (a.get("ssh") or "").strip()
+    if ssh:
+        d = directory
+        qd = "~" if d == "~" else ("~/" + shlex.quote(d[2:]) if d.startswith("~/") else shlex.quote(d))
+        remote = script % (qd, sid, sid, sid, sid)
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", ssh, remote]
+    else:
+        cmd = ["sh", "-c", script % (shlex.quote(os.path.expanduser(directory)), sid, sid, sid, sid)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=25).stdout
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"ok": False, "error": str(e)[:150]}
+    rec_part, _, rest = out.partition("===TRACE===")
+    trace_part, _, rest = rest.partition("===LIVE===")
+    live_part, _, input_part = rest.partition("===INPUT===")
+    record = None
+    for line in rec_part.strip().splitlines():
+        try:
+            record = _json.loads(line)
+        except ValueError:
+            pass
+    events = []
+    for part in (trace_part, live_part):
+        for line in part.splitlines():
+            try:
+                e = _json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict):
+                events.append(e)
+    events.sort(key=lambda e: e.get("ts") or 0)
+    brief = None
+    try:
+        inp = _json.loads(input_part.strip()) if input_part.strip() else None
+        if inp:
+            brief = (inp.get("spec") or {}).get("brief")
+    except ValueError:
+        pass
+    fr = (record or {}).get("final_result") or {}
+    return {
+        "ok": True, "id": sid, "found": bool(record) or bool(events) or bool(brief),
+        "record": record and {
+            "role": record.get("role"), "depth": record.get("depth"), "goal": record.get("goal_id"),
+            "skills": record.get("skills"), "network": record.get("network_granted"),
+            "success": record.get("success"), "tokens": record.get("tokens"),
+            "error": record.get("error"), "ts": record.get("timestamp"),
+            "brief": record.get("brief"),
+            "answer": fr.get("answer") if isinstance(fr, dict) else None,
+            "evidence": fr.get("evidence") if isinstance(fr, dict) else None,
+            "unknowns": fr.get("unknowns") if isinstance(fr, dict) else None,
+            "confidence": fr.get("confidence") if isinstance(fr, dict) else None,
+        },
+        "brief": (record or {}).get("brief") or brief,
+        "events": events[-400:],
+        "running": bool(live_part.strip()) and not record,
+    }
 
 
 def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
