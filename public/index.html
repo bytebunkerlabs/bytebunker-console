@@ -105,7 +105,8 @@
     <!-- Agents -->
     <section class="screen" id="screen-agents">
       <header><h1>Agents</h1><span class="sub">Launch the harness on a separate host · the console only watches · <span id="agents-sub">—</span></span></header>
-      <div class="scroll" style="display:flex;flex-direction:column;gap:16px;max-width:900px">
+      <div class="scroll agents-grid">
+        <div class="agents-left">
         <div id="agents-topology" class="card"></div>
         <div class="card" id="agents-master">
           <div class="glabel">Your master agent</div>
@@ -135,13 +136,15 @@
         <div>
           <div class="glabel" style="margin-bottom:8px">What your agents are doing</div>
           <div id="agents-slaves" class="cards-col"></div>
-          <div id="agent-slavedetail" class="card" hidden style="gap:10px;margin-top:10px"></div>
         </div>
         <div>
           <div class="glabel" style="margin-bottom:8px">Recent runs · click one to read its log</div>
           <div id="agents-runs" class="cards-col"></div>
-          <pre id="agent-rundetail" class="skill-body" hidden style="max-height:420px;margin-top:10px"></pre>
         </div>
+        </div>
+        <aside id="agents-detail" class="agents-detail card">
+          <div class="empty-state"><b>Nothing open</b><span>Click a run or an agent on the left to read it here — the full log, the answer, its evidence, and every step it took.</span></div>
+        </aside>
       </div>
     </section>
 
