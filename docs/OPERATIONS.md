@@ -1,7 +1,7 @@
 # ByteBunker operations handbook
 
 Everything that runs, where it runs, how it was deployed, how to change it, and how to
-debug it. Written for the operator, from the live deployment as of 30 September 2026.
+debug it. The command-by-command reproduction of every host is `RUNBOOK.md`. Written for the operator, from the live deployment as of 30 September 2026.
 
 ---
 

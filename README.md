@@ -26,8 +26,9 @@ curl -fsSL https://raw.githubusercontent.com/bytebunkerlabs/bytebunker-console/m
 ```
 
 Then open http://127.0.0.1:8765. See `docs/ARCHITECTURE.md` for how the console,
-the harness, the gateway and the engines fit, and the plan to make them one
-package.
+the harness, the gateway and the engines fit, `docs/RUNBOOK.md` to reproduce the
+whole deployment command by command, and `docs/OPERATIONS.md` for the operator's
+handbook (services, config, debugging, extension).
 
 ### From this checkout
 
