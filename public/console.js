@@ -1893,6 +1893,37 @@
     if (d.mem_total_gb) grid.appendChild(stat("worker", d.mem_used_gb + " / " + d.mem_total_gb + " GB", "load " + (d.load1 != null ? d.load1 : "\u2014")));
     card.appendChild(grid);
     box.appendChild(card);
+
+    // the worker's own model (a small, fast engine next to the agents)
+    const fm = d.fast_model;
+    if (fm && (fm.up || fm.gpu || fm.error)) {
+      const c2 = document.createElement("div");
+      c2.className = "card";
+      const t2 = document.createElement("div");
+      t2.style.cssText = "display:flex;align-items:baseline;gap:10px";
+      t2.innerHTML = "<span class='mono' style='font-size:15px;font-weight:600'></span><span class='spec' style='font-size:11.5px;color:var(--faint)'></span><div style='flex:1'></div><span class='pill'><span class='d'></span><span class='pt'></span></span>";
+      t2.querySelector(".mono").textContent = fm.model || "worker model";
+      t2.querySelector(".spec").textContent = (fm.label || "") + (fm.gpu ? " \u00b7 " + fm.gpu.name : "");
+      t2.querySelector(".pt").textContent = fm.up ? ((fm.running || 0) + (fm.waiting || 0) ? "serving" : "idle") : "down";
+      if (!fm.up) t2.querySelector(".pill").style.opacity = ".6";
+      c2.appendChild(t2);
+      const g2 = document.createElement("div");
+      g2.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px";
+      if (fm.gpu) {
+        g2.appendChild(stat("gpu", fm.gpu.util + " %", fm.gpu.temp + " \u00b0C"));
+        g2.appendChild(stat("vram", (fm.gpu.mem_used_mb / 1024).toFixed(1) + " / " + (fm.gpu.mem_total_mb / 1024).toFixed(1) + " GB", ""));
+      }
+      if (fm.up) {
+        g2.appendChild(stat("requests", (fm.running || 0) + " running", (fm.waiting || 0) + " waiting \u00b7 " + (fm.requests_total || 0) + " served"));
+        g2.appendChild(stat("kv cache", (fm.kv_pct != null ? fm.kv_pct : 0) + " %", fm.prefix_queries ? "prefix hits " + Math.round(100 * fm.prefix_hits / fm.prefix_queries) + " %" : ""));
+        g2.appendChild(stat("output", fm.gen_tps != null ? fm.gen_tps + " tok/s" : "\u2014", "prompt " + (fm.prompt_tps != null ? fm.prompt_tps + " tok/s" : "\u2014")));
+        g2.appendChild(stat("tokens total", (fm.gen_total || 0) >= 1000 ? Math.round(fm.gen_total / 1000) + "k out" : Math.round(fm.gen_total || 0) + " out", (fm.prompt_total || 0) >= 1000 ? Math.round(fm.prompt_total / 1000) + "k in" : Math.round(fm.prompt_total || 0) + " in"));
+      } else {
+        const n = document.createElement("div"); n.className = "hint"; n.textContent = "Model server not reachable from the worker: " + (fm.error || ""); c2.appendChild(n);
+      }
+      c2.appendChild(g2);
+      box.appendChild(c2);
+    }
   }
 
   async function pollTelemetry() {

@@ -339,6 +339,50 @@ try:
 except OSError:
     pass
 out["day"] = agg
+# A second engine on this worker — a small model on the local GPU — shown
+# live on the Cluster screen: vLLM's own /metrics plus nvidia-smi.
+fm = {"metrics_url": __FAST_METRICS__}
+try:
+    import urllib.request, re as _re
+    txt = urllib.request.urlopen(fm["metrics_url"], timeout=4).read().decode("utf-8", "replace")
+    vals = {}
+    for ln in txt.splitlines():
+        if not ln.startswith("vllm:") or " " not in ln:
+            continue
+        name, v = ln.rsplit(" ", 1)
+        base = name.split("{", 1)[0]
+        try:
+            vals[base] = vals.get(base, 0.0) + float(v)
+        except ValueError:
+            continue
+        if "model" not in fm:
+            m = _re.search(r'model_name="([^"]+)"', name)
+            if m:
+                fm["model"] = m.group(1)
+    kv = vals.get("vllm:kv_cache_usage_perc", vals.get("vllm:gpu_cache_usage_perc", 0.0))
+    fm.update(up=True,
+              running=int(vals.get("vllm:num_requests_running", 0)),
+              waiting=int(vals.get("vllm:num_requests_waiting", 0)),
+              kv_pct=round(100.0 * kv, 1),
+              gen_total=vals.get("vllm:generation_tokens_total", 0.0),
+              prompt_total=vals.get("vllm:prompt_tokens_total", 0.0),
+              requests_total=int(vals.get("vllm:request_success_total", 0)),
+              prefix_hits=vals.get("vllm:prefix_cache_hits_total", 0.0),
+              prefix_queries=vals.get("vllm:prefix_cache_queries_total", 0.0))
+except Exception as e:
+    fm.update(up=False, error=str(e)[:80])
+for smi in ("/usr/lib/wsl/lib/nvidia-smi", "nvidia-smi"):
+    try:
+        q = subprocess.run([smi, "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                            "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=6).stdout.strip().splitlines()
+        if q:
+            name, util, mu, mt, temp = [x.strip() for x in q[0].split(",")]
+            fm["gpu"] = {"name": name, "util": int(float(util)), "mem_used_mb": int(float(mu)),
+                         "mem_total_mb": int(float(mt)), "temp": int(float(temp))}
+            break
+    except Exception:
+        continue
+out["fast_model"] = fm
 try:
     la = os.getloadavg(); out["load1"] = round(la[0], 2)
     mem = {}
@@ -351,6 +395,7 @@ except Exception:
 print(json.dumps(out))
 """
 _stats_cache = {"at": 0, "val": None}
+_fm_last = {}          # previous token counters of the worker's own model, for tok/s
 
 
 def stats(CFG, max_age=8):
@@ -367,6 +412,7 @@ def stats(CFG, max_age=8):
     a = agent_cfg(CFG)
     ssh = (a.get("ssh") or "").strip()
     py = _STATS_PY.replace("~/bytebunker-harness", (a.get("dir") or "~/bytebunker-harness"))
+    py = py.replace("__FAST_METRICS__", _json.dumps(a.get("worker_model_metrics") or "http://127.0.0.1:8001/metrics"))
     if ssh:
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
     else:
@@ -375,6 +421,17 @@ def stats(CFG, max_age=8):
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip().splitlines()
         val = _json.loads(out[-1]) if out else {}
         val.update(ok=True, enabled=True, host=st["host"], isolated=st["isolated"])
+        fm = val.get("fast_model") or {}
+        fm["label"] = a.get("worker_model_label") or "worker model"
+        if fm.get("up"):
+            # tokens/s from the counter delta between two polls
+            last = _fm_last
+            dt = now - last.get("ts", 0)
+            if last and 0 < dt < 600 and fm.get("gen_total", 0) >= last.get("gen", 0):
+                fm["gen_tps"] = round((fm["gen_total"] - last["gen"]) / dt, 1)
+                fm["prompt_tps"] = round((fm["prompt_total"] - last["prompt"]) / dt, 1)
+            _fm_last.update(ts=now, gen=fm.get("gen_total", 0), prompt=fm.get("prompt_total", 0))
+        val["fast_model"] = fm
     except Exception as e:   # noqa: BLE001
         val = {"ok": False, "enabled": True, "host": st["host"], "error": str(e)[:120]}
     _stats_cache.update(at=now, val=val)
