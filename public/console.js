@@ -42,6 +42,15 @@
   function applyTheme(dark) {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
     try { localStorage.setItem("bb.theme", dark ? "dark" : "light"); } catch (e) {}
+    syncSparkdashTheme();
+  }
+  // the embedded sparkDash carries a ByteBunker palette in both modes; tell it
+  // which one the console is in, live, without reloading the frame
+  function sparkdashTheme() { return document.documentElement.getAttribute("data-theme") === "dark" ? "bytebunker-dark" : "bytebunker"; }
+  function syncSparkdashTheme() {
+    const f = document.getElementById("sparkdash-frame");
+    if (!f || !f.dataset.src || !f.contentWindow) return;
+    try { f.contentWindow.postMessage({ type: "sparkdash-theme", theme: sparkdashTheme() }, new URL(f.dataset.src).origin); } catch (e) {}
   }
   applyTheme((() => {
     try { return localStorage.getItem("bb.theme") === "dark"; } catch (e) { return false; }
@@ -1608,10 +1617,16 @@
       return;
     }
     open.href = url; open.hidden = false; note.hidden = true; frame.hidden = false;
-    if (frame.dataset.src !== url) { frame.dataset.src = url; frame.src = url; }
+    if (frame.dataset.src !== url) {
+      frame.dataset.src = url;
+      frame.src = url + (url.includes("?") ? "&" : "?") + "theme=" + sparkdashTheme();
+      frame.onload = syncSparkdashTheme;
+    } else {
+      syncSparkdashTheme();
+    }
     $("sparkdash-sub").textContent = url.replace(/^https?:\/\//, "") + " \u00b7 tailnet only \u00b7 your browser must be on the tailnet";
   }
-  $("sparkdash-reload").onclick = () => { const f = $("sparkdash-frame"); if (f.dataset.src) f.src = f.dataset.src; };
+  $("sparkdash-reload").onclick = () => { const f = $("sparkdash-frame"); if (f.dataset.src) f.src = f.dataset.src + (f.dataset.src.includes("?") ? "&" : "?") + "theme=" + sparkdashTheme(); };
 
   /* ---------------- recipes (model deployment) ---------------- */
   let recipesCat = null;
