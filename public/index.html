@@ -44,6 +44,7 @@
     <div class="nav-label">Observe</div>
     <nav class="nav">
       <button data-nav="cluster"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="2.6" width="12" height="4.4" rx="1.3"/><rect x="2" y="9" width="12" height="4.4" rx="1.3"/><circle cx="4.7" cy="4.8" r="0.75" fill="currentColor" stroke="none"/><circle cx="4.7" cy="11.2" r="0.75" fill="currentColor" stroke="none"/></svg><span>Cluster</span></button>
+      <button data-nav="sparkdash"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 1.8 3.6 9h4l-.8 5.2L12.4 7h-4z"/></svg><span>sparkDash</span></button>
       <button data-nav="usage"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3.2 13V8.4M8 13V3.4M12.8 13v-3.1"/></svg><span>Usage</span></button>
     </nav>
 
@@ -294,6 +295,19 @@
     </section>
 
     <!-- Usage -->
+    <!-- sparkDash, embedded -->
+    <section class="screen" id="screen-sparkdash">
+      <header>
+        <h1>sparkDash</h1><span class="sub" id="sparkdash-sub">MiaAI-Lab/sparkDash on the head Spark · tailnet only</span><div class="grow"></div>
+        <button class="ghost-btn" id="sparkdash-reload" type="button">reload</button>
+        <a class="ghost-btn" id="sparkdash-open" href="#" target="_blank" rel="noopener" style="text-decoration:none;margin-left:8px">open in a new tab</a>
+      </header>
+      <div id="sparkdash-wrap" style="flex:1;min-height:0;display:flex;flex-direction:column;height:calc(100vh - 110px)">
+        <div id="sparkdash-note" class="hint" style="padding:14px" hidden></div>
+        <iframe id="sparkdash-frame" title="sparkDash" style="flex:1;width:100%;height:100%;border:0;background:transparent" allow="clipboard-write" referrerpolicy="no-referrer"></iframe>
+      </div>
+    </section>
+
     <section class="screen" id="screen-usage">
       <header><h1>Usage</h1><span class="sub">Last 14 days · from this console's own log</span></header>
       <div class="scroll" style="display:flex;flex-direction:column;gap:14px" id="usage-box"></div>

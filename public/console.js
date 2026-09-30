@@ -50,7 +50,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "agents", "models", "tuning", "batch", "recipes", "cluster", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "agents", "models", "tuning", "batch", "recipes", "cluster", "sparkdash", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -63,6 +63,7 @@
     if (s === "plugins") renderPlugins();
     if (s === "agents") renderAgents();
     if (s === "recipes") renderRecipes();
+    if (s === "sparkdash") renderSparkdash();
     if (s === "usage") renderUsage();
     if (s === "video") vidRefresh();
   }
@@ -1592,6 +1593,25 @@
     await loadSkills();              // a plugin's skills came or went
     if (state.cfg.mcp || on) loadTools();   // and its MCP servers
   }
+
+  /* ---------------- sparkDash, embedded ---------------- */
+  // The dashboard is loaded only when the screen is opened, and only once:
+  // it streams metrics over a WebSocket, so it should not run behind every
+  // other screen. Reload re-creates the frame.
+  function renderSparkdash() {
+    const url = (state.cfg.sparkdash_open_url || "").trim();
+    const frame = $("sparkdash-frame"), note = $("sparkdash-note"), open = $("sparkdash-open");
+    if (!url) {
+      note.hidden = false;
+      note.textContent = "Set sparkdash_open_url in config.json (the dashboard's tailnet address, e.g. https://<node>.<tailnet>.ts.net) and restart the console.";
+      frame.hidden = true; open.hidden = true;
+      return;
+    }
+    open.href = url; open.hidden = false; note.hidden = true; frame.hidden = false;
+    if (frame.dataset.src !== url) { frame.dataset.src = url; frame.src = url; }
+    $("sparkdash-sub").textContent = url.replace(/^https?:\/\//, "") + " \u00b7 tailnet only \u00b7 your browser must be on the tailnet";
+  }
+  $("sparkdash-reload").onclick = () => { const f = $("sparkdash-frame"); if (f.dataset.src) f.src = f.dataset.src; };
 
   /* ---------------- recipes (model deployment) ---------------- */
   let recipesCat = null;
