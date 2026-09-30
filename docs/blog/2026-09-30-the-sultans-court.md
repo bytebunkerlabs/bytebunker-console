@@ -27,6 +27,43 @@ The harness has a master and a roster of archetypes. I named the master **the Su
 
 The doctrine lives in standing instructions I edit in the console: when to use quick depth, when to give research agents a longer timeout, which skill to attach for a CVE lookup. The Sultan reads them on every run and names its own agents (Tariq, Iris, Jack, Leo, Mina, Nico showed up in the logs).
 
+## How it works, in detail
+
+```mermaid
+flowchart LR
+  subgraph control [Control plane · hermes]
+    UI[Console UI] --> SRV[server.py]
+  end
+  subgraph agent [Agent plane · agents-worker, WSL2]
+    RM[run_master.py<br/>the Sultan] --> C1[(minion)]
+    RM --> C2[(minion)]
+    RM --> C3[(wazir / Malikah)]
+    C1 & C2 & C3 -. unix socket .-> PX[llm proxy]
+    FAST[vLLM · RTX 2070<br/>qwen3-4b-fast]
+  end
+  subgraph model [Model plane · spark-1 + spark-2]
+    GW[litellm :4000] --> ENG[vLLM TP=2<br/>DeepSeek-V4 262k]
+  end
+  SRV -- ssh, stdout as SSE --> RM
+  PX -- http, model name --> GW
+  GW -- http --> FAST
+  C1 & C2 -. bridge, only when granted .-> NET((internet))
+```
+
+**Launch.** The Agents screen posts a goal. `server.py` opens one ssh session to the worker and starts `run_master.py` inside `setsid`, with a sidecar that watches the session's stdin: if the console drops the connection or you press Stop, the sidecar kills the process group and sweeps every container labelled with it. Stdout streams back as server-sent events with a keepalive every five seconds, so a silent run notices a gone client.
+
+**Spawn.** For each agent the Sultan writes a task directory (brief, material, skill bodies, tool allowlist, model name, output cap, context budget, thinking switch) and runs `podman run --network none --userns=keep-id` from the `bytebunker-slave` image, bind-mounting the task directory and a unix socket. The socket is an LLM proxy on the worker that forwards to the gateway, so a container has exactly one way to reach a model and no way to reach anything else. Roles that need the web (`researcher`, `minion` with a research skill) get a bridge network for that spawn only; the worker's allowlist decides which roles may ask.
+
+**Route.** The gateway is litellm on spark-1. Every engine is a name there: `deepseek-v4-vision-uncensored` is the two-Spark tensor-parallel vLLM launched by our `rack` CLI from a recipe file (that recipe is also where the model's default thinking mode lives, `--default-chat-template-kwargs '{"thinking":true, ...}'`, which is why agents have to switch it off explicitly); `qwen3-4b-fast` is the RTX 2070 inside the worker's own WSL2, exposed through a Windows port forward. The harness picks the model per role: `master_model` for the Sultan, `thinking_model` for wazir, Malikah and skeptics, `default_slave_model` for everyone else.
+
+**Run.** Inside a container the runner loops gather → act → verify with a per-depth step budget (quick 6, standard 30, deep 60) and a time budget from the spawn. It trims old tool output past a character budget, checkpoints `result.json` every step, nudges at two steps left, offers only `submit_result` on the last step, salvages a truncated or prose submission, and skips its own verifier when out of time, handing the answer back marked unverified. Every step is an event line in `/tmp/bb-<agent>/events.jsonl` on the worker, which the console tails for the live cards.
+
+**Decide.** The Sultan sees results as labels: `ok`, `ANSWERED but UNVERIFIED`, or `failed`. It can `get_result`, `verify_result` (a parallel skeptic panel on the thinking model), `steer_slave`, `kill_slave`, or spawn more. A long report is written once as prose and referenced as `@draft`. Every round is traced to `trajectories/<goal>/master.jsonl`; every spawn's outcome to `trajectories/spawns.jsonl`.
+
+**Watch.** The console reads those files over ssh: the Sultan's decisions, live agents keyed to running containers, finished agents with brief, answer, evidence, unknowns and timeline, and a Cluster card with containers, masters, 24-hour outcomes and tokens. The worker also reports its own model server's `/metrics` and `nvidia-smi`, which is how the 2070 shows up next to the Sparks. The console's own trace log records every chat, tool call, rating, agent run and recipe action, and `/api/export` turns it into training data.
+
+**Configure.** Three surfaces: the console's `config.json` (gateway, model capabilities, skills dirs, agents host and doctrine, run cap, litellm and rack hosts), the harness's `config.yaml` on the worker (models per role, output caps, context budgets, thinking switches, concurrency, podman), and litellm's `model_list` on the gateway host.
+
 ## What actually happened
 
 The demo goal was deliberately multi-step: three Citrix NetScaler CVEs, a sourced fact sheet for each, exploitation status from CISA's catalog, then a prioritised patch plan for an administrator running both ADC and Gateway. It took four launches to finish. Each one found a different way to fail, and each failure was a real design lesson.
@@ -56,11 +93,7 @@ The second speed-up was the 2070. vLLM has no Windows build, but the GPU is visi
 
 Then it got the answer wrong. NVD and CVE.org serve bot-gated HTML; the small model read "checking your browser" as "CVE not found". I fixed the method, not the prompt: the research skill now goes to the JSON APIs, and two deterministic tools do the dangerous parts. `cve_record` returns one CVE's record from CVE.org and NVD flattened into quotable lines. `kev_lookup` reads CISA's whole catalog and matches the id exactly, because a clipped feed had shown the model its neighbours and it reported the wrong CVE as exploited. Give a small model sharp tools, not more prompt.
 
-| Single-CVE lookup | Before | After |
-|---|---|---|
-| Minion model | DeepSeek on the Sparks | Qwen3-4B on the RTX 2070 |
-| Wall clock | ~7 min, one minion | 6 min, two minions |
-| CISA KEV verdict | correct | correct, from the feed itself |
+The rerun was correct: two minions on the 2070, six minutes end to end, and the KEV verdict came from the feed itself.
 
 ## Seeing what the agents are doing
 
@@ -68,7 +101,7 @@ The complaint that started all of this was "I can't see what my agents are doing
 
 ## Deploying models from the console
 
-Last night's vLLM install was a sequence of ssh sessions, a missing C compiler, a systemd unit written by hand, a Windows port forward, and an edit to the gateway's config. That is the wrong shape for something anyone else should be able to do. The console now has a **Recipes** screen. A recipe is a parameter form that renders the exact files it would run, so you read the install script, the serve script, the unit and the gateway entry before anything executes. Deploy runs it over ssh with the log streamed into the page; Register appends the entry to litellm and restarts it. The 2070's model server now runs under a unit the recipe wrote, redeployed from the button.
+Last night's vLLM install was a sequence of ssh sessions, a missing C compiler, a systemd unit written by hand, a Windows port forward, and an edit to the gateway's config. That is the wrong shape for something anyone else should be able to do. The console now has a **Recipes** screen for the hosts that had nothing: a recipe is a parameter form that renders the exact files it would run, so you read the install script, the serve script, the unit and the gateway entry before anything executes. Deploy runs it over ssh with the log streamed into the page; Register appends the entry to litellm and restarts it. The 2070's model server now runs under a unit the recipe wrote, redeployed from the button. The Sparks are different: they already have `rack`, our serving CLI, whose recipe files decide solo versus tensor-parallel and register the model with the gateway. The console does not re-invent that; it lists rack's recipes, shows the file, and runs `rack up`, `rack down`, `status` and `logs` with the output streamed into the page.
 
 There is also a one-command installer for the console itself, and an architecture document with the plan to fold the console, the harness and the recipes into one package with one skills directory and one config. That merge needs a licence decision, because the harness is private today.
 

@@ -203,8 +203,12 @@ docker logs --tail 30 serve_node; exit 4
             "api_base": "http://<spark-lan-ip>:%d/v1" % port, "model_name": p["served_name"] or "model", "deploy_script": run}
 
 
-RECIPES = {r["id"]: r for r in (VLLM_CUDA, OLLAMA_WIN, VLLM_SPARK)}
-_RENDER = {"vllm-cuda": _render_vllm_cuda, "ollama-windows": _render_ollama_win, "vllm-dgx-spark": _render_vllm_spark}
+# The DGX Sparks are NOT a console recipe: they are driven by `rack`
+# (bytebunkerlabs/dgx-spark-serve), whose recipes/*.env already express solo
+# vs tensor-parallel launches and gateway registration. The console wraps
+# rack (see server.py /api/rack) instead of re-inventing it.
+RECIPES = {r["id"]: r for r in (VLLM_CUDA, OLLAMA_WIN)}
+_RENDER = {"vllm-cuda": _render_vllm_cuda, "ollama-windows": _render_ollama_win}
 
 
 def catalog():

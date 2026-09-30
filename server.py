@@ -241,6 +241,68 @@ def plugins_install_dir():
     return BUILTIN_PLUGINS
 
 
+# ------------------------------------------------------------------ rack --
+# The Sparks' serving layer is `rack` (dgx-spark-serve): recipes/*.env decide
+# solo vs tensor-parallel and the gateway name; `rack up` launches and
+# registers with litellm. The console drives it over ssh and shows its
+# output — it never composes a docker command for a Spark itself.
+def rack_cfg():
+    r = CFG.get("rack") or {}
+    return {"ssh": (r.get("ssh") or "").strip(), "dir": r.get("dir") or "~/dgx/dgx-spark-serve"}
+
+
+def rack_cmd(args):
+    r = rack_cfg()
+    inner = "export PATH=$HOME/.local/bin:$PATH; cd %s && ./rack %s" % (
+        agentmod._rq(r["dir"]), " ".join(shlex_quote(a) for a in args))
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", r["ssh"], inner]
+
+
+def shlex_quote(a):
+    import shlex
+    return shlex.quote(str(a))
+
+
+_rack_cache = {"at": 0, "val": None}
+
+
+def rack_overview(max_age=15):
+    """recipes + status, cached briefly: `rack status` sshes to both nodes."""
+    import subprocess
+    r = rack_cfg()
+    if not r["ssh"]:
+        return {"ok": False, "enabled": False, "error": "set rack.ssh (and rack.dir) in config.json"}
+    now = time.time()
+    if _rack_cache["val"] is not None and now - _rack_cache["at"] < max_age:
+        return _rack_cache["val"]
+    val = {"ok": True, "enabled": True, "host": r["ssh"], "dir": r["dir"]}
+    try:
+        out = subprocess.run(rack_cmd(["recipes"]), capture_output=True, text=True, timeout=25)
+        ansi = re.compile(r"\x1b\[[0-9;]*m")
+        val["recipes_raw"] = ansi.sub("", out.stdout + out.stderr).strip()
+        recipes = []
+        for ln in ansi.sub("", out.stdout).splitlines():
+            tok = ln.strip().split()
+            # "  dsv4-vision-ab   TP=2   orcarouter/DeepSeek-V4-Flash-Vision-Uncensored"
+            if len(tok) >= 2 and re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", tok[0]) and tok[0] != "TEMPLATE":
+                recipes.append({"name": tok[0].replace(".env", ""), "mode": tok[1],
+                                "model": tok[2] if len(tok) > 2 else ""})
+        val["recipes"] = recipes
+    except Exception as e:   # noqa: BLE001
+        val.update(ok=False, error=str(e)[:160])
+        _rack_cache.update(at=now, val=val)
+        return val
+    try:
+        out = subprocess.run(rack_cmd(["status"]), capture_output=True, text=True, timeout=45)
+        val["status_raw"] = ansi.sub("", out.stdout + out.stderr).strip()[-4000:]
+        m = re.search(r"serving:\s*(\S+)", val["status_raw"])
+        val["serving"] = m.group(1) if m else ""
+    except Exception as e:   # noqa: BLE001
+        val["status_raw"] = "rack status failed: %s" % str(e)[:120]
+    _rack_cache.update(at=now, val=val)
+    return val
+
+
 def render_skill_md(meta, body):
     """SKILL.md text from the UI form: the same flat frontmatter the harness
     parses, so one file serves both the console and the agents."""
@@ -915,6 +977,8 @@ class Handler(BaseHTTPRequestHandler):
             st = _plugin_state()
             self._json({"plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
                                     for n in sorted(found)], "warnings": warnings})
+        elif path == "/api/rack":
+            self._json(rack_overview())
         elif path == "/api/recipes":
             a = CFG.get("agents") or {}
             lt = CFG.get("litellm") or {}
@@ -972,7 +1036,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -1000,6 +1064,8 @@ class Handler(BaseHTTPRequestHandler):
             self._skill_admin(body)
         elif path == "/api/recipes":
             self._recipes(body)
+        elif path == "/api/rack":
+            self._rack(body)
         elif path == "/api/agents":
             self._agents_run(body)
         elif path == "/api/agents/slave":
@@ -1134,6 +1200,69 @@ class Handler(BaseHTTPRequestHandler):
         TRACE.log("agent_run", id=rid, goal=goal[:8000], host=st["host"], mode=st["mode"],
                   isolated=st["isolated"], exit=code, killed=killed or False,
                   lines=lines[0], output=captured, ms=int((time.time() - started) * 1000))
+
+    def _rack(self, body):
+        """show <recipe>: the recipe's .env; up/down/logs/bench: run rack and
+        stream its output (SSE). `up` and `down` change what the Sparks
+        serve — the UI confirms first; the trace log records who did what."""
+        import subprocess
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        r = rack_cfg()
+        if not r["ssh"]:
+            self._json({"error": "rack is not configured (rack.ssh in config.json)"}, 400)
+            return
+        action = str(body.get("action") or "")
+        recipe = str(body.get("recipe") or "").strip()
+        if recipe and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", recipe):
+            self._json({"error": "bad recipe name"}, 400)
+            return
+        if action == "show":
+            if not recipe:
+                self._json({"error": "recipe required"}, 400)
+                return
+            inner = "cd %s && cat %s" % (agentmod._rq(r["dir"]), shlex_quote("recipes/%s.env" % recipe))
+            out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", r["ssh"], inner],
+                                 capture_output=True, text=True, timeout=20)
+            self._json({"ok": out.returncode == 0, "recipe": recipe, "text": (out.stdout or out.stderr)[-20000:]})
+            return
+        if action not in ("up", "down", "logs", "status", "bench", "preflight", "gateway"):
+            self._json({"error": "unknown action"}, 400)
+            return
+        args = [action] + ([recipe] if recipe and action in ("up", "bench", "gateway") else [])
+        if action == "logs":
+            args = ["logs"]
+        _rack_cache["at"] = 0                      # status changes after this
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        wlock = threading.Lock()
+        stop = threading.Event()
+
+        def emit(obj):
+            try:
+                with wlock:
+                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+                    self.wfile.flush()
+            except OSError:
+                stop.set()
+        emit({"phase": "start", "host": r["ssh"], "cmd": "rack " + " ".join(args)})
+        captured = []
+
+        def on_line(text):
+            if len(captured) < 2000:
+                captured.append(text)
+            emit({"line": text})
+        try:
+            code, killed = agentmod.run_streaming(rack_cmd(args), ROOT, on_line, stop, timeout_s=3600)
+        except Exception as e:   # noqa: BLE001
+            emit({"error": str(e)})
+            code, killed = -1, "error"
+        emit({"phase": "done", "exit": code, "killed": killed})
+        TRACE.log("rack", action=action, recipe=recipe, host=r["ssh"], exit=code,
+                  killed=killed or False, output=captured[-200:])
 
     def _recipes(self, body):
         """render: the exact files a recipe would run; deploy: run its script

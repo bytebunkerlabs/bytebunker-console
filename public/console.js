@@ -1601,6 +1601,7 @@
     recipesCat = d;
     const left = $("recipes-left"); left.textContent = "";
     $("recipes-sub").textContent = d.recipes.length + " recipes \u00b7 litellm " + (d.litellm && d.litellm.configured ? "on " + d.litellm.ssh : "not configured");
+    left.appendChild(await rackCard());
     for (const r of d.recipes) {
       const card = document.createElement("div");
       card.className = "card"; card.style.gap = "8px";
@@ -1643,6 +1644,81 @@
       dep.onclick = () => (r.target === "ssh" ? deployRecipe(r, params(), note) : previewRecipe(r, params(), note));
       left.appendChild(card);
     }
+  }
+
+  async function rackCard() {
+    // the Sparks: driven by `rack` (dgx-spark-serve), never by a console-made docker command
+    let d = { ok: false };
+    try { d = await (await fetch("/api/rack")).json(); } catch (e) { d = { ok: false, error: e.message }; }
+    const card = document.createElement("div");
+    card.className = "card"; card.style.gap = "8px";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b>DGX Spark cluster \u00b7 rack</b><span class="src mono"></span></div>';
+    head.querySelector(".src").textContent = d.enabled ? (d.host + ":" + d.dir + (d.serving ? "  \u00b7  serving " + d.serving : "")) : "not configured";
+    card.appendChild(head);
+    const desc = document.createElement("div"); desc.className = "skill-desc";
+    desc.textContent = "The Sparks are served by rack: its recipes decide solo vs tensor-parallel and the gateway name, and `rack up` registers the model with litellm. Pick a recipe to read it, then Up. Down stops serving on both nodes.";
+    card.appendChild(desc);
+    if (!d.ok) {
+      const n = document.createElement("div"); n.className = "hint";
+      n.textContent = d.enabled === false ? "Set rack.ssh and rack.dir in config.json to drive the Sparks from here." : ("rack not reachable: " + (d.error || ""));
+      card.appendChild(n); return card;
+    }
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const sel = document.createElement("select"); sel.className = "text-input"; sel.style.minWidth = "220px";
+    for (const r of d.recipes || []) { const o = document.createElement("option"); o.value = r.name; o.textContent = r.name + "  \u00b7  " + r.mode + (r.model ? "  \u00b7  " + r.model : ""); if (d.serving && r.name === d.serving) { o.textContent += "  (serving now)"; o.selected = true; } sel.appendChild(o); }
+    const show = document.createElement("button"); show.type = "button"; show.className = "ghost-btn"; show.textContent = "Read recipe";
+    const up = document.createElement("button"); up.type = "button"; up.className = "solid-btn"; up.textContent = "rack up";
+    const down = document.createElement("button"); down.type = "button"; down.className = "rate-btn bad"; down.textContent = "rack down";
+    const st = document.createElement("button"); st.type = "button"; st.className = "ghost-btn"; st.textContent = "status";
+    const logs = document.createElement("button"); logs.type = "button"; logs.className = "ghost-btn"; logs.textContent = "logs";
+    const note = document.createElement("span"); note.className = "hint";
+    [sel, show, up, down, st, logs, note].forEach((e) => row.appendChild(e));
+    card.appendChild(row);
+    const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = d.status_raw || "";
+    const lab = document.createElement("div"); lab.className = "glabel"; lab.textContent = "rack status (cached 15 s)";
+    card.appendChild(lab); card.appendChild(pre);
+    show.onclick = async () => {
+      note.textContent = "reading\u2026";
+      try {
+        const x = await (await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "show", recipe: sel.value }) })).json();
+        note.textContent = "";
+        const pane = recipePane("recipes/" + sel.value + ".env");
+        preBlock(pane, "recipe", x.text || x.error || "");
+      } catch (e) { note.textContent = "failed: " + e.message; }
+    };
+    const stream = async (action, recipe, confirmText) => {
+      if (confirmText && !confirm(confirmText)) return;
+      const pane = recipePane("rack " + action + (recipe ? " " + recipe : ""));
+      const out = preBlock(pane, "output", "");
+      const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
+      note.textContent = "running\u2026";
+      try {
+        const resp = await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, recipe }) });
+        if (!resp.ok) { append("error: " + upstreamText(await resp.text())); note.textContent = ""; return; }
+        const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const parts = buf.split("\n"); buf = parts.pop();
+          for (const ln of parts) {
+            if (!ln.startsWith("data:")) continue;
+            let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+            if (o.phase === "start") append("\u2014 " + o.cmd + " on " + o.host + " \u2014");
+            else if (o.phase === "done") { append("\u2014 finished: " + (o.killed ? o.killed : "exit " + o.exit) + " \u2014"); note.textContent = o.exit === 0 ? "done" : "exit " + o.exit; if (state.screen === "recipes") setTimeout(renderRecipes, 1500); }
+            else if (o.error) append("error: " + o.error);
+            else if (o.line != null) append(o.line);
+          }
+        }
+      } catch (e) { append("error: " + e.message); note.textContent = ""; }
+    };
+    up.onclick = () => stream("up", sel.value, "rack up " + sel.value + " \u2014 this stops whatever the Sparks serve now and launches this recipe. Continue?");
+    down.onclick = () => stream("down", "", "rack down \u2014 stop serving on both Sparks?");
+    st.onclick = () => stream("status", "");
+    logs.onclick = () => stream("logs", "");
+    return card;
   }
 
   function recipePane(title) {
