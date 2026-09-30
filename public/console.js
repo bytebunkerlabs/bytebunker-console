@@ -2234,6 +2234,7 @@
     if (!cards) return;
     const old = cards.querySelector("[data-worker-gpu]");
     if (old) old.remove();
+    if (state.telemetryHasWorker) return;
     const c = workerGpuCard();
     if (c) { c.dataset.workerGpu = "1"; cards.appendChild(c); }
   }
@@ -2319,7 +2320,7 @@
     if (!state.cfg.telemetry) {
       $("side-health").innerHTML = '<span class="dot" style="background:var(--faint);animation:none"></span>no telemetry';
       $("cluster-poll").textContent = "prometheus not configured";
-      $("cluster-note").innerHTML = '<div class="empty-state" style="margin-top:14px"><b>Telemetry off</b><span>Set prometheus_url in config.json to light this screen up with real numbers from your existing exporter stack.</span></div>';
+      $("cluster-note").innerHTML = '<div class="empty-state" style="margin-top:14px"><b>Telemetry off</b><span>Set prometheus_url or sparkdash_url in config.json to light this screen up with real numbers.</span></div>';
       return;
     }
     let t = { nodes: [] };
@@ -2328,6 +2329,8 @@
     side.textContent = "";
     const cards = $("node-cards");
     cards.textContent = "";
+    // when sparkDash lists the agent worker as a unit, its card comes from there
+    state.telemetryHasWorker = (t.nodes || []).some((n) => n.kind === "host");
     let healthy = 0;
     for (const n of t.nodes) {
       if (n.util != null || n.mem_used_gb != null) healthy++;
@@ -2367,6 +2370,11 @@
         '<div><span class="kv-label">Uptime</span><span class="v"></span></div></div>';
       card.querySelector(".mono").textContent = n.name;
       if (spec) card.querySelector(".spec").textContent = spec;
+      else if (n.hardware || n.role) { const sp = document.createElement("span"); sp.className = "spec"; sp.style.cssText = "font-size:11.5px;color:var(--faint)"; sp.textContent = [n.hardware, n.role].filter(Boolean).join(" \u00b7 "); card.querySelector(".mono").parentNode.appendChild(sp); }
+      if (n.online === false) { const pill = card.querySelector(".pill"); pill.style.opacity = ".6"; pill.lastChild.textContent = "offline"; }
+      else if (n.throttle && n.throttle !== "ok") { card.querySelector(".pill").lastChild.textContent = "throttled: " + n.throttle; }
+      const memLabelEl = card.querySelector(".bar5").previousElementSibling.firstElementChild;
+      if (n.mem_label) memLabelEl.textContent = n.mem_label;
       card.querySelectorAll(".mono")[1].textContent = util != null ? util + "%" : "—";
       card.querySelector("polyline").setAttribute("points", sparkline(state.hist[n.name]));
       const memLine = card.querySelectorAll(".mono")[2];
@@ -2380,6 +2388,21 @@
       vs[1].textContent = n.power != null ? Math.round(n.power) + " W" : "—";
       vs[2].textContent = n.cpu != null ? Math.round(n.cpu) + "%" : "—";
       vs[3].textContent = fmtUp(n.uptime_s);
+      if (n.llm) {
+        const l = n.llm;
+        const line = document.createElement("div");
+        line.className = "mono";
+        line.style.cssText = "font-size:11.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;margin-top:6px";
+        const bits = ["serving " + (l.model || "?") + (l.backend ? " (" + l.backend + ")" : "")];
+        if (l.tps != null) bits.push(Math.round(l.tps) + " tok/s out");
+        if (l.kv != null) bits.push("KV " + Math.round(l.kv * (l.kv <= 1 ? 100 : 1)) + "%");
+        if (l.running != null) bits.push((l.running || 0) + " run \u00b7 " + (l.waiting || 0) + " wait");
+        if (l.ttft_p95 != null) bits.push("TTFT p95 " + l.ttft_p95.toFixed(1) + " s");
+        if (l.prefix_hit != null) bits.push("prefix hit " + Math.round(l.prefix_hit * 100) + "%");
+        if (l.context) bits.push((l.context / 1024).toFixed(0) + "k ctx");
+        for (const b of bits) { const sp = document.createElement("span"); sp.textContent = b; line.appendChild(sp); }
+        card.appendChild(line);
+      }
       cards.appendChild(card);
     }
     placeWorkerGpuCard();
@@ -2396,7 +2419,12 @@
     $("side-health").innerHTML = healthy === t.nodes.length && healthy > 0
       ? '<span class="dot"></span>healthy'
       : '<span class="dot err"></span>' + healthy + "/" + t.nodes.length;
-    $("cluster-poll").innerHTML = '<span class="dot"></span>polling 5s';
+    $("cluster-poll").innerHTML = '<span class="dot"></span>polling 5s' + (t.source === "sparkdash" ? " \u00b7 sparkDash" : "");
+    if (state.cfg.sparkdash_open_url && !$("sparkdash-link")) {
+      const a = document.createElement("a"); a.id = "sparkdash-link"; a.href = state.cfg.sparkdash_open_url; a.target = "_blank"; a.rel = "noopener";
+      a.className = "ghost-btn"; a.style.cssText = "margin-left:10px;text-decoration:none;font-size:12px"; a.textContent = "open sparkDash";
+      $("cluster-poll").parentNode.appendChild(a);
+    }
   }
 
   /* ---------------- usage ---------------- */

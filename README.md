@@ -79,6 +79,18 @@ ollama serve     # then set upstream_url to http://127.0.0.1:11434/v1
 
 ## Cluster telemetry (optional)
 
+Two sources feed the node cards. **Prometheus** (`prometheus_url` + `nodes`)
+reads node-exporter and the nvidia-smi exporter. **sparkDash**
+([MiaAI-Lab/sparkDash](https://github.com/MiaAI-Lab/sparkDash), `sparkdash_url`)
+reads its per-unit snapshot instead, which also carries each unit's LLM probe
+(model, tokens/s, KV cache, queue, TTFT p95, prefix-cache hit rate) and treats
+a non-Spark GPU box as a first-class unit. sparkDash binds to loopback on the
+head Spark, so point `sparkdash_url` at an ssh tunnel (the console's tunnel
+service forwards 127.0.0.1:15555 → spark-1:5555) and set
+`telemetry_source: "sparkdash"`. `sparkdash_open_url` adds an "open sparkDash"
+link on the Cluster screen (a Tailscale Serve URL works well).
+
+
 The Cluster screen and the sidebar bars read from a Prometheus you already run:
 
 ```json

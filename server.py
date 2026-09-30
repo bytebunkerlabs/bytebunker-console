@@ -58,6 +58,9 @@ DEFAULT_CONFIG = {
     "upstream_url": "http://127.0.0.1:8000/v1",
     "upstream_key": "bb-local",
     "prometheus_url": "",
+    "sparkdash_url": "",        # e.g. http://127.0.0.1:15555 (ssh tunnel to the head Spark's sparkDash)
+    "sparkdash_open_url": "",   # where a browser can open sparkDash itself (tailnet URL), for the Cluster link
+    "telemetry_source": "",     # "prometheus" | "sparkdash"; blank = sparkdash if only that is set
     "h3_url": "",
     "netcheck_ssh": "",
     "nodes": [
@@ -628,7 +631,94 @@ def netcheck(fresh=False):
         return res
 
 
+_sd_cache = {"at": 0, "val": None}
+
+
+def sparkdash_telemetry():
+    """Node cards from sparkDash (MiaAI-Lab/sparkDash) instead of Prometheus:
+    one GET for the unit list, one per unit for its snapshot. sparkDash is
+    loopback-only on the head Spark; the console reaches it through the same
+    ssh tunnel it uses for Prometheus (sparkdash_url, e.g. 127.0.0.1:15555).
+    Its snapshot also carries the unit's LLM probe — model, tok/s, KV cache,
+    queue, TTFT — which Prometheus never gave the cards."""
+    now = time.time()
+    if _sd_cache["val"] is not None and now - _sd_cache["at"] < 2:
+        return _sd_cache["val"]
+    base = CFG.get("sparkdash_url", "").rstrip("/")
+
+    def get(path):
+        with urllib.request.urlopen(urllib.request.Request(base + path), timeout=4) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    try:
+        units = get("/api/sparks")
+        units = units if isinstance(units, list) else (units.get("sparks") or [])
+    except Exception as e:   # noqa: BLE001
+        val = {"nodes": [], "source": "sparkdash", "error": "sparkDash unreachable: %s" % str(e)[:100]}
+        _sd_cache.update(at=now, val=val)
+        return val
+    out = []
+    for u in units:
+        uid = u.get("id")
+        if not uid:
+            continue
+        try:
+            d = get("/api/sparks/%s/metrics" % urllib.parse.quote(str(uid)))
+        except Exception:   # noqa: BLE001
+            d = dict(u, metrics={}, online=False)
+        m = d.get("metrics") or {}
+        gpu = m.get("gpu") or {}
+        vram = gpu.get("vram") or {}
+        cpu = m.get("cpu") or {}
+        power = gpu.get("power") or {}
+        kind = d.get("kind") or u.get("kind") or "spark"
+        online = bool(d.get("online", u.get("online", True)))
+        node = {
+            "name": d.get("name") or u.get("name") or uid,
+            "id": uid, "kind": kind, "role": d.get("role") or u.get("role"),
+            "online": online, "source": "sparkdash",
+            "util": gpu.get("usage") if online else None,
+            "mem_used_gb": round(vram["used"] / 1024, 1) if online and vram.get("used") is not None else None,
+            "mem_total_gb": round(vram["total"] / 1024) if vram.get("total") else None,
+            "mem_label": "VRAM" if kind == "host" else "Unified memory",
+            "temp": gpu.get("temperature") if online else None,
+            "power": power.get("draw") if online else None,
+            "cpu": cpu.get("usage") if online else None,
+            "uptime_s": d.get("uptime") if online else None,
+            "hardware": (d.get("hardware") or {}).get("device"),
+            "throttle": (gpu.get("throttle") or {}).get("reason"),
+        }
+        llms = m.get("llm") or []
+        if isinstance(llms, dict):
+            llms = [llms]
+        live = [x for x in llms if isinstance(x, dict) and x.get("available")]
+        if live:
+            x = live[0]
+            node["llm"] = {
+                "model": x.get("modelId"), "backend": x.get("backend"),
+                "tps": x.get("generationTps"), "prefill_tps": x.get("prefillTps"),
+                "kv": x.get("kvCacheUsage"), "running": x.get("requestsRunning"),
+                "waiting": x.get("requestsWaiting"), "ttft_p95": x.get("ttftP95Seconds"),
+                "prefix_hit": x.get("prefixCacheHitRate"), "context": x.get("contextLength"),
+                "ports": len(live),
+            }
+        out.append(node)
+    val = {"nodes": out, "source": "sparkdash"}
+    _sd_cache.update(at=now, val=val)
+    return val
+
+
+def telemetry_source():
+    src = (CFG.get("telemetry_source") or "").strip().lower()
+    if src in ("sparkdash", "prometheus"):
+        return src
+    if CFG.get("sparkdash_url") and not CFG.get("prometheus_url"):
+        return "sparkdash"
+    return "prometheus"
+
+
 def telemetry():
+    if telemetry_source() == "sparkdash" and CFG.get("sparkdash_url"):
+        return sparkdash_telemetry()
     out = []
     for node in CFG.get("nodes", []):
         inst = node.get("instance", node["name"])
@@ -888,7 +978,9 @@ class Handler(BaseHTTPRequestHandler):
                           for n in CFG.get("nodes", [])],
                 "identity": CFG.get("identity", {}),
                 "upstream": CFG.get("upstream_url", ""),
-                "telemetry": bool(CFG.get("prometheus_url")),
+                "telemetry": bool(CFG.get("prometheus_url") or CFG.get("sparkdash_url")),
+                "telemetry_source": telemetry_source(),
+                "sparkdash_open_url": CFG.get("sparkdash_open_url") or "",
                 "mcp": bool(CFG.get("mcp_servers")),
                 "video": bool(CFG.get("h3_url")),
                 "netcheck": bool(CFG.get("netcheck_ssh")),
