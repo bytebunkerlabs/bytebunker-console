@@ -16,6 +16,21 @@ LiteLLM, Ollama.
 
 ## Install
 
+One command, no sudo, no pip: installs the console as a background service
+(launchd on macOS, systemd user unit on Linux), writes `config.json`, and can
+place the agent harness next to it.
+
+```
+curl -fsSL https://raw.githubusercontent.com/bytebunkerlabs/bytebunker-console/main/install.sh | bash -s -- \
+  --upstream http://<gateway>:4000/v1 --key <litellm-key>            # add --with-harness for agents in local mode
+```
+
+Then open http://127.0.0.1:8765. See `docs/ARCHITECTURE.md` for how the console,
+the harness, the gateway and the engines fit, and the plan to make them one
+package.
+
+### From this checkout
+
 Requires **Python 3.9+** and nothing else. macOS and most Linux ship it already —
 check with `python3 --version`.
 
@@ -89,7 +104,27 @@ metric that doesn't resolve renders as an em-dash rather than a guess. Leave
 
 ---
 
+## Model deployment recipes
+
+The **Recipes** screen deploys a model from the console. A recipe is a
+parameter form that renders the exact files it would run — install script,
+serve script, systemd unit, litellm entry — so you read them before anything
+executes. **Deploy** runs the script over ssh on the target host with the log
+streamed into the right pane; **Register in litellm** appends the entry to the
+gateway's config (`litellm.ssh`, `litellm.config_path`, `litellm.container` in
+`config.json`) and restarts it, so the new model shows up by name in the
+Models screen and in the harness. Shipped recipes: vLLM on any CUDA GPU (Linux
+or WSL2, tool calling on, rootless service), Ollama on Windows (manual steps),
+vLLM on DGX Spark (docker, one or two nodes).
+
 ## Skills and plugins
+
+Skills can be created in the UI (**Skills → ＋ New skill**): the form writes
+`<name>/SKILL.md` into the first configured skills dir and mirrors it to the
+agent worker, so the master can attach it on the next run. Plugins can be
+added from a git URL or a local folder, created empty (with MCP servers), and
+removed (**Plugins → ＋ Add plugin**).
+
 
 A **skill** is a markdown instruction pack — `<name>/SKILL.md` (or `<name>.md`)
 with frontmatter (`name`, `description`, optional `whenToUse`, `tools`,

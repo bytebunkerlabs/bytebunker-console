@@ -50,7 +50,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "agents", "models", "tuning", "batch", "cluster", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "agents", "models", "tuning", "batch", "recipes", "cluster", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -62,6 +62,7 @@
     if (s === "skills") renderSkills();
     if (s === "plugins") renderPlugins();
     if (s === "agents") renderAgents();
+    if (s === "recipes") renderRecipes();
     if (s === "usage") renderUsage();
     if (s === "video") vidRefresh();
   }
@@ -1590,6 +1591,132 @@
     await renderPlugins();
     await loadSkills();              // a plugin's skills came or went
     if (state.cfg.mcp || on) loadTools();   // and its MCP servers
+  }
+
+  /* ---------------- recipes (model deployment) ---------------- */
+  let recipesCat = null;
+  async function renderRecipes() {
+    let d = { recipes: [], defaults: {}, litellm: {} };
+    try { d = await (await fetch("/api/recipes")).json(); } catch (e) {}
+    recipesCat = d;
+    const left = $("recipes-left"); left.textContent = "";
+    $("recipes-sub").textContent = d.recipes.length + " recipes \u00b7 litellm " + (d.litellm && d.litellm.configured ? "on " + d.litellm.ssh : "not configured");
+    for (const r of d.recipes) {
+      const card = document.createElement("div");
+      card.className = "card"; card.style.gap = "8px";
+      const head = document.createElement("div"); head.className = "skill-head";
+      head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>';
+      head.querySelector("b").textContent = r.title;
+      head.querySelector(".src").textContent = r.target === "ssh" ? "runs over ssh" : "manual steps";
+      const btn = document.createElement("button"); btn.type = "button"; btn.className = "solid-btn"; btn.textContent = "Open";
+      head.appendChild(btn);
+      const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = r.summary;
+      card.appendChild(head); card.appendChild(desc);
+      const form = document.createElement("div"); form.hidden = true; form.style.cssText = "display:flex;flex-direction:column;gap:8px";
+      const inputs = {};
+      for (const p of r.params) {
+        let el;
+        if (p.kind === "select") {
+          el = document.createElement("select"); el.className = "text-input";
+          for (const c of p.choices) { const o = document.createElement("option"); o.value = c; o.textContent = c || "(none)"; el.appendChild(o); }
+          el.value = p.default;
+        } else {
+          el = inputEl(p.help || "", "text-input");
+          if (p.kind === "number") el.type = "number";
+          el.value = (p.name === "host" && !p.default) ? (d.defaults.host || "") : p.default;
+        }
+        el.title = p.help || "";
+        inputs[p.name] = el;
+        const row = formRow(p.label + (p.help ? "  \u2014  " + p.help : ""), el);
+        form.appendChild(row);
+      }
+      const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+      const prev = document.createElement("button"); prev.type = "button"; prev.className = "ghost-btn"; prev.textContent = "Preview";
+      const dep = document.createElement("button"); dep.type = "button"; dep.className = "solid-btn"; dep.textContent = r.target === "ssh" ? "Deploy over ssh" : "Show steps";
+      const note = document.createElement("span"); note.className = "hint";
+      acts.appendChild(prev); acts.appendChild(dep); acts.appendChild(note);
+      form.appendChild(acts);
+      card.appendChild(form);
+      const params = () => { const o = {}; for (const k in inputs) o[k] = inputs[k].value; return o; };
+      btn.onclick = () => { form.hidden = !form.hidden; btn.textContent = form.hidden ? "Open" : "Close"; };
+      prev.onclick = () => previewRecipe(r, params(), note);
+      dep.onclick = () => (r.target === "ssh" ? deployRecipe(r, params(), note) : previewRecipe(r, params(), note));
+      left.appendChild(card);
+    }
+  }
+
+  function recipePane(title) {
+    const pane = $("recipes-detail"); pane.textContent = "";
+    const h = document.createElement("div"); h.className = "skill-head";
+    h.innerHTML = '<div class="skill-id"><b></b></div>';
+    h.querySelector("b").textContent = title;
+    pane.appendChild(h);
+    return pane;
+  }
+
+  function preBlock(pane, label, text) {
+    const l = document.createElement("div"); l.className = "glabel"; l.textContent = label;
+    const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap"; pre.textContent = text;
+    pane.appendChild(l); pane.appendChild(pre);
+    return pre;
+  }
+
+  async function previewRecipe(r, params, note) {
+    note.textContent = "rendering\u2026";
+    let d;
+    try { d = await (await fetch("/api/recipes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "render", id: r.id, params }) })).json(); }
+    catch (e) { note.textContent = "failed: " + e.message; return; }
+    if (d.error) { note.textContent = d.error; return; }
+    note.textContent = "";
+    const pane = recipePane(r.title + " \u00b7 preview");
+    for (const [name, text] of d.files) preBlock(pane, name, text);
+    const lit = preBlock(pane, "litellm entry (model_list item)", d.litellm_entry);
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const reg = document.createElement("button"); reg.type = "button"; reg.className = "solid-btn"; reg.textContent = "Register in litellm";
+    const rn = document.createElement("span"); rn.className = "hint";
+    reg.onclick = async () => {
+      reg.disabled = true; rn.textContent = "registering\u2026";
+      try {
+        const x = await (await fetch("/api/recipes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "register", entry: d.litellm_entry }) })).json();
+        rn.textContent = x.error ? x.error : (x.ok ? "registered \u00b7 " + (x.output || "").split("\n").slice(-1)[0] : "failed: " + (x.output || ""));
+        if (x.ok) loadModels && loadModels();
+      } catch (e) { rn.textContent = "failed: " + e.message; }
+      reg.disabled = false;
+    };
+    row.appendChild(reg); row.appendChild(rn); pane.appendChild(row);
+    if ((d.notes || []).length) {
+      const n = document.createElement("div"); n.className = "glabel"; n.textContent = "notes"; pane.appendChild(n);
+      const ul = document.createElement("ul"); ul.style.cssText = "margin:0;padding-left:18px;font-size:12.5px;color:var(--muted);display:flex;flex-direction:column;gap:6px";
+      for (const t of d.notes) { const li = document.createElement("li"); li.style.whiteSpace = "pre-wrap"; li.textContent = t; ul.appendChild(li); }
+      pane.appendChild(ul);
+    }
+  }
+
+  async function deployRecipe(r, params, note) {
+    if (!confirm("Run this recipe on " + (params.host || "?") + " now? Preview first if you have not read the script.")) return;
+    const pane = recipePane(r.title + " \u00b7 deploying on " + params.host);
+    const out = preBlock(pane, "log", "");
+    const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
+    note.textContent = "running\u2026";
+    try {
+      const resp = await fetch("/api/recipes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "deploy", id: r.id, params }) });
+      if (!resp.ok) { append("error: " + upstreamText(await resp.text())); note.textContent = ""; return; }
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n"); buf = parts.pop();
+        for (const ln of parts) {
+          if (!ln.startsWith("data:")) continue;
+          let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+          if (o.phase === "start") append("\u2014 running on " + o.host + " \u2014");
+          else if (o.phase === "done") { append("\u2014 finished: " + (o.killed ? o.killed : "exit " + o.exit) + " \u2014"); note.textContent = o.exit === 0 ? "deployed \u00b7 now Preview \u2192 Register in litellm" : "exit " + o.exit; }
+          else if (o.error) append("error: " + o.error);
+          else if (o.line != null) append(o.line);
+        }
+      }
+    } catch (e) { append("error: " + e.message); note.textContent = ""; }
   }
 
   /* ---------------- agents (harness) ---------------- */

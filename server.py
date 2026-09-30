@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from traces import TraceLog, StreamCapture, export_lines
 import skills as skillmod
 import agents as agentmod
+import recipes as recipemod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -914,6 +915,13 @@ class Handler(BaseHTTPRequestHandler):
             st = _plugin_state()
             self._json({"plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
                                     for n in sorted(found)], "warnings": warnings})
+        elif path == "/api/recipes":
+            a = CFG.get("agents") or {}
+            lt = CFG.get("litellm") or {}
+            self._json({"recipes": recipemod.catalog(),
+                        "defaults": {"host": a.get("ssh") or "", "lan_ip": ""},
+                        "litellm": {"configured": bool(lt.get("ssh") and lt.get("config_path")),
+                                    "ssh": lt.get("ssh") or "", "container": lt.get("container") or ""}})
         elif path == "/api/traces":
             self._json(TRACE.stats())
         elif path == "/api/export":
@@ -964,7 +972,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -990,6 +998,8 @@ class Handler(BaseHTTPRequestHandler):
             self._plugin_admin(body)
         elif path == "/api/skills":
             self._skill_admin(body)
+        elif path == "/api/recipes":
+            self._recipes(body)
         elif path == "/api/agents":
             self._agents_run(body)
         elif path == "/api/agents/slave":
@@ -1124,6 +1134,86 @@ class Handler(BaseHTTPRequestHandler):
         TRACE.log("agent_run", id=rid, goal=goal[:8000], host=st["host"], mode=st["mode"],
                   isolated=st["isolated"], exit=code, killed=killed or False,
                   lines=lines[0], output=captured, ms=int((time.time() - started) * 1000))
+
+    def _recipes(self, body):
+        """render: the exact files a recipe would run; deploy: run its script
+        over ssh on the target host and stream the output (SSE, like an
+        agent run); register: append the litellm entry on the gateway host
+        and restart the gateway."""
+        import subprocess, shlex as _shlex
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action") or "render"
+        if action == "register":
+            lt = CFG.get("litellm") or {}
+            entry = str(body.get("entry") or "")
+            if not (lt.get("ssh") and lt.get("config_path")):
+                self._json({"error": "litellm is not configured for the console: set litellm.ssh, litellm.config_path, litellm.container in config.json", "entry": entry}, 400)
+                return
+            if "model_name:" not in entry:
+                self._json({"error": "entry must be a litellm model_list item"}, 400)
+                return
+            script = recipemod.litellm_register_script(lt["config_path"], lt.get("container") or "litellm", entry)
+            try:
+                r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", lt["ssh"], "bash -c " + _shlex.quote(script)],
+                                   capture_output=True, text=True, timeout=90)
+                out = (r.stdout + r.stderr).strip()
+                TRACE.log("recipe", action="register", entry=entry[:400], ok=r.returncode == 0, out=out[:800])
+                self._json({"ok": r.returncode == 0, "output": out[-2000:]})
+            except (OSError, subprocess.TimeoutExpired) as e:
+                self._json({"error": "register failed: %s" % e}, 500)
+            return
+        try:
+            rendered = recipemod.render(str(body.get("id") or ""), body.get("params") or {})
+        except KeyError:
+            self._json({"error": "no such recipe"}, 404)
+            return
+        except (TypeError, ValueError) as e:
+            self._json({"error": "bad parameter: %s" % e}, 400)
+            return
+        if action == "render":
+            self._json({"ok": True, **{k: v for k, v in rendered.items() if k != "deploy_script"},
+                        "deployable": bool(rendered.get("deploy_script"))})
+            return
+        if action != "deploy":
+            self._json({"error": "unknown action"}, 400)
+            return
+        script = rendered.get("deploy_script")
+        host = str(rendered["params"].get("host") or "").strip()
+        if not script or not host:
+            self._json({"error": "this recipe is manual (no ssh target) — run the printed steps yourself"}, 400)
+            return
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "bash -c " + _shlex.quote(script)]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        wlock = threading.Lock()
+        stop = threading.Event()
+
+        def emit(obj):
+            try:
+                with wlock:
+                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+                    self.wfile.flush()
+            except OSError:
+                stop.set()
+        emit({"phase": "start", "host": host, "recipe": body.get("id")})
+        captured = []
+
+        def on_line(text):
+            if len(captured) < 2000:
+                captured.append(text)
+            emit({"line": text})
+        try:
+            code, killed = agentmod.run_streaming(cmd, ROOT, on_line, stop, timeout_s=3600)
+        except Exception as e:   # noqa: BLE001
+            emit({"error": str(e)})
+            code, killed = -1, "error"
+        emit({"phase": "done", "exit": code, "killed": killed})
+        TRACE.log("recipe", action="deploy", id=body.get("id"), host=host, params=rendered["params"],
+                  exit=code, killed=killed or False, output=captured[-200:])
 
     def _skill_admin(self, body):
         """Create or delete a skill from the UI. The file is written in the
