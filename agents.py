@@ -394,6 +394,96 @@ except Exception:
     pass
 print(json.dumps(out))
 """
+_USAGE_PY = r"""
+import json, os, glob, time, re
+now = time.time(); horizon = now - 14 * 86400
+root = os.path.expanduser("~/bytebunker-harness")
+out = {"days": {}, "by_role": {}, "by_model": {}, "slaves": 0, "goals": set(), "slave_tokens": 0,
+       "slave_prompt": 0, "slave_completion": 0, "master_prompt": 0, "master_completion": 0,
+       "master_rounds": 0, "panel_tokens": 0, "panels": 0}
+# role -> model, for records written before the ledger carried a model
+models = {"default": "", "thinking": "", "master": ""}
+try:
+    cfg = open(os.path.join(root, "config", "config.yaml")).read()
+    m = re.search(r'(?m)^\s*default_slave_model:\s*"?([^"\n]+)"?', cfg); models["default"] = (m.group(1).strip() if m else "")
+    m = re.search(r'(?m)^\s*thinking_model:\s*"?([^"\n]+)"?', cfg); models["thinking"] = (m.group(1).strip() if m else "")
+    m = re.search(r'(?m)^\s*master_model:\s*"?([^"\n]+)"?', cfg); models["master"] = (m.group(1).strip() if m else "")
+except OSError:
+    pass
+THINKING_ROLES = ("wazir", "malikah")
+def day(ts): return time.strftime("%d", time.localtime(ts))
+def bump(d, k, n): d[k] = d.get(k, 0) + n
+try:
+    with open(os.path.join(root, "trajectories", "spawns.jsonl")) as fh:
+        for line in fh:
+            try: r = json.loads(line)
+            except ValueError: continue
+            ts = r.get("timestamp") or 0
+            if ts < horizon: continue
+            tok = int(r.get("tokens") or 0); pt = int(r.get("prompt_tokens") or 0); ct = int(r.get("completion_tokens") or 0)
+            role = r.get("role") or "?"
+            model = r.get("model") or (models["thinking"] or models["master"] if role in THINKING_ROLES else models["default"]) or "?"
+            out["slaves"] += 1; out["goals"].add(r.get("goal_id"))
+            out["slave_tokens"] += tok; out["slave_prompt"] += pt; out["slave_completion"] += ct
+            bump(out["by_role"], role, tok); bump(out["by_model"], model, tok)
+            d = out["days"].setdefault(day(ts), {"slaves": 0, "master": 0, "panels": 0})
+            d["slaves"] += tok
+except OSError:
+    pass
+for path in glob.glob(os.path.join(root, "trajectories", "goal-*", "master.jsonl")):
+    try:
+        if os.path.getmtime(path) < horizon: continue
+        with open(path) as fh:
+            for line in fh:
+                try: e = json.loads(line)
+                except ValueError: continue
+                ts = e.get("ts") or 0
+                if ts < horizon: continue
+                k = e.get("kind")
+                if k == "llm":
+                    pt = int(e.get("prompt_tokens") or 0); ct = int(e.get("completion_tokens") or 0)
+                    out["master_prompt"] += pt; out["master_completion"] += ct; out["master_rounds"] += 1
+                    out["days"].setdefault(day(ts), {"slaves": 0, "master": 0, "panels": 0})["master"] += pt + ct
+                    bump(out["by_model"], models["master"] or "master", pt + ct)
+                elif k == "panel":
+                    t = int(e.get("tokens") or 0); out["panel_tokens"] += t; out["panels"] += 1
+                    out["days"].setdefault(day(ts), {"slaves": 0, "master": 0, "panels": 0})["panels"] += t
+                    bump(out["by_model"], models["thinking"] or models["master"] or "?", t)
+    except OSError:
+        continue
+out["goals"] = len([g for g in out["goals"] if g])
+out["models"] = models
+print(json.dumps(out))
+"""
+
+_usage_cache = {"at": 0, "val": None}
+
+
+def agent_usage(CFG, max_age=60):
+    """Agent-plane token usage for the Usage screen: the worker's spawn
+    ledger (per slave) plus every goal's master trace (master rounds and
+    skeptic panels), last 14 days, keyed by day like the console's own
+    ledger. One ssh per minute at most."""
+    import json as _json, time as _time
+    now = _time.time()
+    a = agent_cfg(CFG)
+    if not a.get("enabled"):
+        return None
+    if _usage_cache["val"] is not None and now - _usage_cache["at"] < max_age:
+        return _usage_cache["val"]
+    ssh = (a.get("ssh") or "").strip()
+    py = _USAGE_PY.replace("~/bytebunker-harness", (a.get("dir") or "~/bytebunker-harness"))
+    cmd = (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
+           if ssh else ["python3", "-c", py])
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip().splitlines()
+        val = _json.loads(out[-1]) if out else None
+    except Exception as e:   # noqa: BLE001
+        val = {"error": str(e)[:120]}
+    _usage_cache.update(at=now, val=val)
+    return val
+
+
 _stats_cache = {"at": 0, "val": None}
 _fm_last = {}          # previous token counters of the worker's own model, for tok/s
 

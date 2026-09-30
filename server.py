@@ -534,13 +534,27 @@ def usage_summary():
     rates = CFG.get("frontier_rates_per_mtok", {})
     saved = (tot_in / 1e6) * float(rates.get("input", 0)) + \
             (tot_out / 1e6) * float(rates.get("output", 0))
+    # the agent plane's tokens live on the worker, not in this ledger
+    agents = agentmod.agent_usage(CFG)
+    agents_saved = 0.0
+    if agents and not agents.get("error"):
+        a_in = agents.get("slave_prompt", 0) + agents.get("master_prompt", 0)
+        a_out = agents.get("slave_completion", 0) + agents.get("master_completion", 0)
+        # older spawn records carry only a total: price it as input (conservative)
+        unsplit = max(0, agents.get("slave_tokens", 0) - agents.get("slave_prompt", 0) - agents.get("slave_completion", 0))
+        a_in += unsplit + agents.get("panel_tokens", 0)
+        agents_saved = (a_in / 1e6) * float(rates.get("input", 0)) + (a_out / 1e6) * float(rates.get("output", 0))
+        agents["total"] = agents.get("slave_tokens", 0) + agents.get("master_prompt", 0) + agents.get("master_completion", 0) + agents.get("panel_tokens", 0)
+        agents["frontier_saved_usd"] = round(agents_saved, 2)
     return {
         "total_out": tot_out,
         "median_tok_s": tps[len(tps) // 2] if tps else None,
         "requests": sum(1 for _ in tps) or None,
-        "frontier_saved_usd": round(saved, 2),
+        "frontier_saved_usd": round(saved + agents_saved, 2),
+        "chat_saved_usd": round(saved, 2),
         "days": days,
         "by_model": by_model,
+        "agents": agents,
     }
 
 

@@ -2483,8 +2483,14 @@
     mk("Tokens generated", tot >= 1e6 ? (tot / 1e6).toFixed(1) + " M" : tot.toLocaleString(), "completion tokens, 14 days");
     mk("Median throughput", u.median_tok_s ? u.median_tok_s.toFixed(1) : "—", "tok/s per request");
     mk("Requests", u.requests != null ? String(u.requests) : "—", "through this console");
-    mk("Frontier-API equivalent", "$" + (u.frontier_saved_usd || 0).toFixed(2), "not spent, at configured rates");
+    const ag = u.agents && !u.agents.error ? u.agents : null;
+    const fmtTok = (n) => (n || 0) >= 1e6 ? ((n || 0) / 1e6).toFixed(1) + " M" : (n || 0).toLocaleString();
+    if (ag) mk("Agent tokens", fmtTok(ag.total), (ag.goals || 0) + " goals \u00b7 " + (ag.slaves || 0) + " agents \u00b7 " + (ag.master_rounds || 0) + " master rounds, 14 days");
+    mk("Frontier-API equivalent", "$" + (u.frontier_saved_usd || 0).toFixed(2), ag ? "chat $" + (u.chat_saved_usd || 0).toFixed(2) + " + agents $" + (ag.frontier_saved_usd || 0).toFixed(2) : "not spent, at configured rates");
     box.appendChild(cards);
+    if (u.agents && u.agents.error) {
+      const n = document.createElement("div"); n.className = "hint"; n.textContent = "Agent usage not available: " + u.agents.error; box.appendChild(n);
+    }
 
     const days = u.days || {};
     const keys = Object.keys(days).sort();
@@ -2506,6 +2512,54 @@
       box.appendChild(card);
     }
 
+    // the agent plane: per-day stack (agents / Sultan / panels), then by role and by model
+    if (ag && ag.days && Object.keys(ag.days).length) {
+      const dk = Object.keys(ag.days).sort();
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = '<div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:13.5px;font-weight:600">Agent tokens per day</span><span style="font-size:11.5px;color:var(--faint)">prompt + completion \u00b7 agents, the Sultan, skeptic panels</span></div><div class="bars"></div>';
+      const bars = card.querySelector(".bars");
+      const tot = (d) => (d.slaves || 0) + (d.master || 0) + (d.panels || 0);
+      const mx = Math.max(...dk.map((k) => tot(ag.days[k]))) || 1;
+      dk.forEach((k, i) => {
+        const d = ag.days[k];
+        const w = document.createElement("div");
+        w.innerHTML = '<div class="b" style="display:flex;flex-direction:column-reverse;overflow:hidden"></div><small class="mono"></small>';
+        const b = w.querySelector(".b");
+        b.style.height = (18 + (tot(d) / mx) * 82) + "%";
+        b.style.background = "transparent";
+        const seg = (v, color, label) => { if (!v) return; const s2 = document.createElement("div"); s2.style.cssText = "flex:0 0 " + (v / tot(d) * 100) + "%;background:" + color; s2.title = label + ": " + v.toLocaleString(); b.appendChild(s2); };
+        seg(d.slaves, "var(--accent)", "agents"); seg(d.master, "var(--warn)", "the Sultan"); seg(d.panels, "var(--faint)", "skeptic panels");
+        if (i === dk.length - 1) b.classList.add("hot");
+        w.querySelector("small").textContent = k;
+        b.title = tot(d).toLocaleString() + " tokens";
+        bars.appendChild(w);
+      });
+      const legend = document.createElement("div"); legend.className = "hint"; legend.style.marginTop = "6px";
+      legend.textContent = "agents " + fmtTok(ag.slave_tokens) + " \u00b7 the Sultan " + fmtTok((ag.master_prompt || 0) + (ag.master_completion || 0)) + " (" + fmtTok(ag.master_completion) + " out) \u00b7 panels " + fmtTok(ag.panel_tokens) + " over " + (ag.panels || 0) + " panels";
+      card.appendChild(legend);
+      box.appendChild(card);
+      const mix = (title, obj) => {
+        const ks = Object.keys(obj || {}).sort((a, b) => obj[b] - obj[a]);
+        if (!ks.length) return;
+        const c = document.createElement("div"); c.className = "card";
+        c.innerHTML = '<span style="font-size:13.5px;font-weight:600"></span>'; c.firstChild.textContent = title;
+        const top = obj[ks[0]] || 1;
+        for (const k of ks) {
+          const r = document.createElement("div"); r.className = "mix-row";
+          r.innerHTML = '<span class="n mono"></span><div class="bar8"><div></div></div><span class="v mono"></span>';
+          r.querySelector(".n").textContent = k; r.querySelector(".bar8>div").style.width = (obj[k] / top) * 100 + "%"; r.querySelector(".v").textContent = fmtTok(obj[k]);
+          c.appendChild(r);
+        }
+        box.appendChild(c);
+      };
+      mix("Agents by role", ag.by_role);
+      mix("Agents by model", ag.by_model);
+      const note = document.createElement("div"); note.className = "hint";
+      note.textContent = "By model is exact for runs since the spawn ledger started recording the model (30 Sep 2026); older agent records are attributed to the current default slave model.";
+      box.appendChild(note);
+    }
+
     const models = u.by_model || {};
     const mkeys = Object.keys(models).sort((a, b) => models[b] - models[a]);
     if (mkeys.length) {
@@ -2525,7 +2579,7 @@
       }
       box.appendChild(card);
     }
-    if (!keys.length) {
+    if (!keys.length && !ag) {
       box.innerHTML += '<div class="empty-state"><b>Nothing logged yet</b><span>Every completion through the Playground lands in this ledger.</span></div>';
     }
   }
