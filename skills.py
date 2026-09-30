@@ -157,7 +157,8 @@ class Skill:
     def summary(self):
         return {"name": self.name, "description": self.description,
                 "whenToUse": self.when_to_use, "tools": self.tools,
-                "network": self.network, "model": self.model, "source": self.source}
+                "network": self.network, "model": self.model, "source": self.source,
+                "path": self.path}
 
 
 def _parse_skill(path, source, rank, warnings):
@@ -280,7 +281,7 @@ class Plugin:
             scan_skills_dir(self.skills_dir, self.name, 0, tmp, [])
             skills = tmp.names()
         return {"name": self.name, "description": self.description, "version": self.version,
-                "author": self.author, "enabled": enabled,
+                "author": self.author, "enabled": enabled, "root": self.root,
                 "skills": skills, "mcp_servers": sorted(self.mcp_servers),
                 "has_skills": bool(skills), "has_mcp": bool(self.mcp_servers)}
 

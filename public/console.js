@@ -1352,6 +1352,69 @@
     }
   }
 
+  function formRow(label, el) {
+    const w = document.createElement("label");
+    w.style.cssText = "display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted)";
+    w.appendChild(document.createTextNode(label)); w.appendChild(el);
+    return w;
+  }
+  function inputEl(ph, cls) { const i = document.createElement("input"); i.className = cls || "text-input"; i.placeholder = ph || ""; return i; }
+  function textareaEl(ph, rows) { const t = document.createElement("textarea"); t.className = "sys-input"; t.rows = rows || 6; t.placeholder = ph || ""; return t; }
+
+  function skillForm() {
+    const card = document.createElement("div");
+    card.className = "card"; card.style.gap = "10px";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b>New skill</b><span class="src mono">written as &lt;name&gt;/SKILL.md and mirrored to the agent worker</span></div>';
+    const tgl = document.createElement("button"); tgl.type = "button"; tgl.className = "solid-btn"; tgl.textContent = "\uff0b New skill";
+    head.appendChild(tgl); card.appendChild(head);
+    const form = document.createElement("div"); form.hidden = true;
+    form.style.cssText = "display:flex;flex-direction:column;gap:10px";
+    const name = inputEl("kebab-case name, e.g. netscaler-triage");
+    const desc = inputEl("one line: what it does (the catalog shows this to the Sultan)");
+    const when = inputEl("when to use (optional routing hint)");
+    const tools = inputEl("tools allowlist, comma-separated (optional): fetch_url, cve_record, run_shell");
+    const model = inputEl("model hint (optional)");
+    const net = document.createElement("input"); net.type = "checkbox";
+    const netRow = document.createElement("label"); netRow.style.cssText = "display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)";
+    netRow.appendChild(net); netRow.appendChild(document.createTextNode("needs network"));
+    const over = document.createElement("input"); over.type = "checkbox";
+    const overRow = document.createElement("label"); overRow.style.cssText = "display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)";
+    overRow.appendChild(over); overRow.appendChild(document.createTextNode("overwrite if it exists"));
+    const body = textareaEl("The instructions (markdown). Numbered discipline works best: what to do first, what counts as evidence, what to report.", 10);
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = "Save skill";
+    const note = document.createElement("span"); note.className = "hint";
+    row.appendChild(save); row.appendChild(netRow); row.appendChild(overRow); row.appendChild(note);
+    [formRow("name", name), formRow("description", desc), formRow("when to use", when), formRow("tools", tools), formRow("model", model), formRow("instructions", body), row].forEach((e) => form.appendChild(e));
+    card.appendChild(form);
+    tgl.onclick = () => { form.hidden = !form.hidden; if (!form.hidden) name.focus(); };
+    save.onclick = async () => {
+      save.disabled = true; note.textContent = "saving\u2026";
+      try {
+        const r = await fetch("/api/skills", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "create", name: name.value.trim(), description: desc.value.trim(), whenToUse: when.value.trim(),
+            tools: tools.value.trim(), network: net.checked, model: model.value.trim(), body: body.value, overwrite: over.checked }) });
+        const d = await r.json();
+        if (!r.ok || d.error) { note.textContent = d.error || ("HTTP " + r.status); save.disabled = false; return; }
+        const w = d.worker || {};
+        note.textContent = "saved \u00b7 " + (w.pushed ? "mirrored to the agent worker" : "not on the worker: " + (w.reason || "agents off"));
+        setTimeout(renderSkills, 900);
+      } catch (e) { note.textContent = "failed: " + e.message; save.disabled = false; }
+    };
+    return card;
+  }
+
+  async function deleteSkill(name) {
+    if (!confirm("Delete skill \"" + name + "\" from the console and the agent worker?")) return;
+    try {
+      const r = await fetch("/api/skills", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete", name }) });
+      const d = await r.json();
+      if (d.error) alert(d.error);
+    } catch (e) { alert("delete failed: " + e.message); }
+    renderSkills();
+  }
+
   async function renderSkills() {
     await loadSkills();
     const box = $("skills-box");
@@ -1359,10 +1422,13 @@
       ? state.skills.length + " available · " + state.activeSkills.length + " attached"
       : "none installed";
     box.textContent = "";
+    box.appendChild(skillForm());
     if (!state.skills.length) {
-      box.innerHTML = '<div class="empty-state"><b>No skills installed</b><span>' +
-        'Drop a <span class="mono">&lt;name&gt;/SKILL.md</span> into the skills folder, point ' +
+      const e = document.createElement("div");
+      e.innerHTML = '<div class="empty-state"><b>No skills installed</b><span>' +
+        'Create one above, drop a <span class="mono">&lt;name&gt;/SKILL.md</span> into the skills folder, point ' +
         '<span class="mono">skills_dirs</span> at the agent harness to share its packs, or enable a plugin that ships skills.</span></div>';
+      box.appendChild(e);
       return;
     }
     for (const sk of state.skills) {
@@ -1404,12 +1470,69 @@
         if (pre.hidden) { pre.textContent = await skillBody(sk.name); pre.hidden = false; view.textContent = "hide instructions"; }
         else { pre.hidden = true; view.textContent = "view instructions"; }
       };
-      card.appendChild(view); card.appendChild(pre);
+      card.appendChild(view);
+      if (sk.source && !sk.source.startsWith("plugin:")) {
+        const del = document.createElement("button");
+        del.type = "button"; del.className = "linky"; del.textContent = "delete"; del.style.marginLeft = "12px";
+        del.onclick = () => deleteSkill(sk.name);
+        card.appendChild(del);
+      }
+      card.appendChild(pre);
       box.appendChild(card);
     }
   }
 
   /* ---------------- plugins ---------------- */
+  function pluginForm() {
+    const card = document.createElement("div");
+    card.className = "card"; card.style.gap = "10px";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b>Add a plugin</b><span class="src mono">a git URL or a local folder with plugin.json, or start an empty one</span></div>';
+    const tgl = document.createElement("button"); tgl.type = "button"; tgl.className = "solid-btn"; tgl.textContent = "\uff0b Add plugin";
+    head.appendChild(tgl); card.appendChild(head);
+    const form = document.createElement("div"); form.hidden = true;
+    form.style.cssText = "display:flex;flex-direction:column;gap:10px";
+    const src = inputEl("https://github.com/org/plugin.git  \u00b7  or  ~/path/to/plugin");
+    const nm = inputEl("name (optional; derived from the source)");
+    const addRow = document.createElement("div"); addRow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const addBtn = document.createElement("button"); addBtn.type = "button"; addBtn.className = "solid-btn"; addBtn.textContent = "Install";
+    const note = document.createElement("span"); note.className = "hint";
+    addRow.appendChild(addBtn); addRow.appendChild(note);
+    const sep = document.createElement("div"); sep.className = "hint"; sep.textContent = "\u2014 or create an empty plugin \u2014";
+    const cname = inputEl("kebab-case name");
+    const cdesc = inputEl("description");
+    const cmcp = textareaEl('MCP servers as JSON (optional), e.g. {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"]}}', 4);
+    const cRow = document.createElement("div"); cRow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const cBtn = document.createElement("button"); cBtn.type = "button"; cBtn.className = "solid-btn"; cBtn.textContent = "Create";
+    const cnote = document.createElement("span"); cnote.className = "hint";
+    cRow.appendChild(cBtn); cRow.appendChild(cnote);
+    [formRow("source", src), formRow("name", nm), addRow, sep, formRow("name", cname), formRow("description", cdesc), formRow("MCP servers", cmcp), cRow].forEach((e) => form.appendChild(e));
+    card.appendChild(form);
+    tgl.onclick = () => { form.hidden = !form.hidden; };
+    const post = async (payload, n, btn) => {
+      btn.disabled = true; n.textContent = "working\u2026";
+      try {
+        const r = await fetch("/api/plugins", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const d = await r.json();
+        if (d.error) { n.textContent = d.error; btn.disabled = false; return; }
+        n.textContent = "done \u00b7 enable it below";
+        setTimeout(renderPlugins, 700);
+      } catch (e) { n.textContent = "failed: " + e.message; btn.disabled = false; }
+    };
+    addBtn.onclick = () => post({ action: "add", source: src.value.trim(), name: nm.value.trim() }, note, addBtn);
+    cBtn.onclick = () => post({ action: "create", name: cname.value.trim(), description: cdesc.value.trim(), mcp_servers: cmcp.value.trim() }, cnote, cBtn);
+    return card;
+  }
+
+  async function removePlugin(name) {
+    if (!confirm("Remove plugin \"" + name + "\" (deletes its folder under the console's plugins dir)?")) return;
+    try {
+      const r = await fetch("/api/plugins", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "remove", name }) });
+      const d = await r.json(); if (d.error) alert(d.error);
+    } catch (e) { alert("remove failed: " + e.message); }
+    await renderPlugins(); await loadSkills();
+  }
+
   async function renderPlugins() {
     let d = { plugins: [], warnings: [] };
     try { d = await (await fetch("/api/plugins")).json(); } catch (e) {}
@@ -1419,10 +1542,13 @@
     $("plugins-sub").textContent = state.plugins.length
       ? state.plugins.length + " found · " + on + " enabled" : "none found";
     box.textContent = "";
+    box.appendChild(pluginForm());
     if (!state.plugins.length) {
-      box.innerHTML = '<div class="empty-state"><b>No plugins found</b><span>' +
-        'A plugin is a folder under <span class="mono">plugins/</span> with a ' +
+      const e = document.createElement("div");
+      e.innerHTML = '<div class="empty-state"><b>No plugins found</b><span>' +
+        'Add one above, or drop a folder under <span class="mono">plugins/</span> with a ' +
         '<span class="mono">plugin.json</span> that contributes skills and MCP servers. See plugins/README.md.</span></div>';
+      box.appendChild(e);
       return;
     }
     for (const p of state.plugins) {
@@ -1446,6 +1572,10 @@
       t.className = "skill-tags mono";
       t.textContent = bits.length ? bits.join("  ·  ") : "contributes nothing loadable";
       card.appendChild(t);
+      const rm = document.createElement("button");
+      rm.type = "button"; rm.className = "linky"; rm.textContent = "remove";
+      rm.onclick = () => removePlugin(p.name);
+      card.appendChild(rm);
       box.appendChild(card);
     }
   }
@@ -1852,12 +1982,67 @@
       (25 - Math.max(0, Math.min(1, v / 100)) * 23).toFixed(2)).join(" ");
   }
 
+  function workerGpuCard() {
+    // the agent worker's own GPU (e.g. an RTX 2070 on a Windows box), read
+    // through the worker poll rather than Prometheus — same card as a Spark
+    const fm = state.fastModel;
+    if (!fm || !fm.gpu) return null;
+    const g = fm.gpu;
+    const key = "worker-gpu";
+    (state.hist[key] = state.hist[key] || []).push(g.util || 0);
+    state.hist[key] = state.hist[key].slice(-44);
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML =
+      '<div style="display:flex;align-items:flex-start;gap:10px">' +
+      '<div style="display:flex;flex-direction:column;gap:2px"><span class="mono" style="font-size:15px;font-weight:600"></span>' +
+      '<span class="spec" style="font-size:11.5px;color:var(--faint)"></span></div>' +
+      '<div style="flex:1"></div><span class="pill"><span class="d"></span><span class="pt"></span></span></div>' +
+      '<div style="display:flex;flex-direction:column;gap:6px">' +
+      '<div style="display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:var(--muted)">GPU utilization</span>' +
+      '<span class="mono" style="font-size:19px;font-weight:600"></span></div>' +
+      '<svg viewBox="0 0 100 26" preserveAspectRatio="none" style="width:100%;height:44px;display:block"><polyline fill="none" stroke="var(--accent)" stroke-width="1.1" vector-effect="non-scaling-stroke"/></svg></div>' +
+      '<div style="display:flex;flex-direction:column;gap:5px">' +
+      '<div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--muted)">VRAM</span><span class="mono v"></span></div>' +
+      '<div class="bar5"><div></div></div></div>' +
+      '<div class="stat-grid">' +
+      '<div><span class="kv-label">Temp</span><span class="v"></span></div>' +
+      '<div><span class="kv-label">Model</span><span class="v"></span></div>' +
+      '<div><span class="kv-label">Requests</span><span class="v"></span></div>' +
+      '<div><span class="kv-label">Output</span><span class="v"></span></div></div>';
+    card.querySelector(".mono").textContent = (fm.label || "agent worker").split(" on ").slice(-1)[0] + " \u00b7 " + g.name.replace("NVIDIA GeForce ", "");
+    card.querySelector(".spec").textContent = fm.label || "";
+    card.querySelector(".pt").textContent = fm.up ? "serving " + (fm.model || "") : "model down";
+    if (!fm.up) card.querySelector(".pill").style.opacity = ".6";
+    card.querySelectorAll(".mono")[1].textContent = g.util + "%";
+    card.querySelector("polyline").setAttribute("points", sparkline(state.hist[key]));
+    card.querySelector(".mono.v").textContent = (g.mem_used_mb / 1024).toFixed(1) + " / " + (g.mem_total_mb / 1024).toFixed(1) + " GB";
+    card.querySelector(".bar5>div").style.width = (g.mem_used_mb / g.mem_total_mb) * 100 + "%";
+    const vs = card.querySelectorAll(".stat-grid .v");
+    vs[0].textContent = g.temp + "\u00b0C";
+    vs[1].textContent = fm.model || "\u2014";
+    vs[2].textContent = fm.up ? (fm.running || 0) + " run \u00b7 " + (fm.waiting || 0) + " wait" : "\u2014";
+    vs[3].textContent = fm.gen_tps != null ? fm.gen_tps + " tok/s" : "\u2014";
+    return card;
+  }
+
+  function placeWorkerGpuCard() {
+    const cards = $("node-cards");
+    if (!cards) return;
+    const old = cards.querySelector("[data-worker-gpu]");
+    if (old) old.remove();
+    const c = workerGpuCard();
+    if (c) { c.dataset.workerGpu = "1"; cards.appendChild(c); }
+  }
+
   let agentsObsTick = 0;
   async function pollAgentsObs() {
     const box = $("agents-obs");
     if (!box) return;
     let d = {};
     try { d = await (await fetch("/api/agents/stats")).json(); } catch (e) { d = { ok: false, error: e.message }; }
+    state.fastModel = d.fast_model || null;
+    placeWorkerGpuCard();
     box.textContent = "";
     const card = document.createElement("div");
     card.className = "card";
@@ -1993,6 +2178,17 @@
       vs[2].textContent = n.cpu != null ? Math.round(n.cpu) + "%" : "—";
       vs[3].textContent = fmtUp(n.uptime_s);
       cards.appendChild(card);
+    }
+    placeWorkerGpuCard();
+    if (state.fastModel && state.fastModel.gpu) {
+      const g = state.fastModel.gpu;
+      const mini = document.createElement("div");
+      mini.className = "node-mini";
+      mini.innerHTML = '<div class="row"><span class="mono" style="color:var(--muted)"></span><b class="mono"></b></div><div class="bar"><div></div></div>';
+      mini.querySelector("span").textContent = g.name.replace("NVIDIA GeForce ", "");
+      mini.querySelector("b").textContent = g.util + "%";
+      mini.querySelector(".bar>div").style.width = (g.util || 0) + "%";
+      side.appendChild(mini);
     }
     $("side-health").innerHTML = healthy === t.nodes.length && healthy > 0
       ? '<span class="dot"></span>healthy'

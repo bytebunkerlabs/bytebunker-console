@@ -219,6 +219,43 @@ def skill_catalog():
     return skillmod.load_catalog(skill_roots())
 
 
+def user_skills_dir():
+    """Where a skill created in the UI is written: the first configured
+    skills dir (on a deployed console that is the harness mirror), else the
+    repo's own skills/."""
+    for d in (CFG.get("skills_dirs") or []):
+        d = os.path.expanduser(d)
+        if os.path.isdir(d) and os.access(d, os.W_OK):
+            return d
+    os.makedirs(BUILTIN_SKILLS, exist_ok=True)
+    return BUILTIN_SKILLS
+
+
+def plugins_install_dir():
+    for d in (CFG.get("plugins_dirs") or []):
+        d = os.path.expanduser(d)
+        if os.path.isdir(d) and os.access(d, os.W_OK):
+            return d
+    os.makedirs(BUILTIN_PLUGINS, exist_ok=True)
+    return BUILTIN_PLUGINS
+
+
+def render_skill_md(meta, body):
+    """SKILL.md text from the UI form: the same flat frontmatter the harness
+    parses, so one file serves both the console and the agents."""
+    lines = ["---", "name: " + meta["name"], "description: " + meta["description"].replace("\n", " ")]
+    if meta.get("whenToUse"):
+        lines.append("whenToUse: " + meta["whenToUse"].replace("\n", " "))
+    if meta.get("tools"):
+        lines.append("tools: [" + ", ".join(meta["tools"]) + "]")
+    if meta.get("network"):
+        lines.append("network: true")
+    if meta.get("model"):
+        lines.append("model: " + meta["model"])
+    lines += ["---", "", body.strip(), ""]
+    return "\n".join(lines)
+
+
 def effective_mcp_servers():
     """config.json servers plus every enabled plugin's servers. A plugin
     server whose name collides with a configured one does not override it."""
@@ -927,7 +964,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -951,6 +988,8 @@ class Handler(BaseHTTPRequestHandler):
             self._mcp_admin(body)
         elif path == "/api/plugins":
             self._plugin_admin(body)
+        elif path == "/api/skills":
+            self._skill_admin(body)
         elif path == "/api/agents":
             self._agents_run(body)
         elif path == "/api/agents/slave":
@@ -1086,6 +1125,71 @@ class Handler(BaseHTTPRequestHandler):
                   isolated=st["isolated"], exit=code, killed=killed or False,
                   lines=lines[0], output=captured, ms=int((time.time() - started) * 1000))
 
+    def _skill_admin(self, body):
+        """Create or delete a skill from the UI. The file is written in the
+        console's user skills dir and mirrored to the agent worker, so the
+        Sultan can attach it on the next run."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action") or "create"
+        name = str(body.get("name") or "").strip().lower()
+        if not skillmod.NAME_RE.match(name):
+            self._json({"error": "name must be kebab-case: letters, digits, dashes"}, 400)
+            return
+        if action == "delete":
+            sk = skill_catalog().get(name)
+            if not sk:
+                self._json({"error": "no such skill"}, 404)
+                return
+            if sk.source.startswith("plugin:"):
+                self._json({"error": "that skill belongs to a plugin; disable the plugin instead"}, 400)
+                return
+            try:
+                os.remove(sk.path)
+                d = os.path.dirname(sk.path)
+                if os.path.basename(sk.path) == "SKILL.md" and not os.listdir(d):
+                    os.rmdir(d)
+            except OSError as e:
+                self._json({"error": "could not delete: %s" % e}, 500)
+                return
+            worker = agentmod.remove_skill_remote(CFG, name)
+            TRACE.log("skill", action="delete", name=name, worker=worker)
+            self._json({"ok": True, "worker": worker, "skills": skill_catalog().summaries()})
+            return
+        if action != "create":
+            self._json({"error": "unknown action"}, 400)
+            return
+        description = str(body.get("description") or "").strip()
+        skill_body = str(body.get("body") or "").strip()
+        if not description or not skill_body:
+            self._json({"error": "description and instructions are required"}, 400)
+            return
+        tools = body.get("tools") or []
+        if isinstance(tools, str):
+            tools = [t.strip() for t in tools.split(",") if t.strip()]
+        meta = {"name": name, "description": description[:skillmod.MAX_DESC],
+                "whenToUse": str(body.get("whenToUse") or "").strip(),
+                "tools": [str(t) for t in tools][:20], "network": bool(body.get("network")),
+                "model": str(body.get("model") or "").strip()}
+        text = render_skill_md(meta, skill_body)
+        root = user_skills_dir()
+        target = os.path.join(root, name, "SKILL.md")
+        if (os.path.exists(target) or os.path.exists(os.path.join(root, name + ".md"))) and not body.get("overwrite"):
+            self._json({"error": "a skill named %s already exists; tick overwrite to replace it" % name}, 409)
+            return
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            self._json({"error": "could not write: %s" % e}, 500)
+            return
+        worker = agentmod.push_skill(CFG, name, text)
+        TRACE.log("skill", action="create", name=name, path=target, worker=worker)
+        self._json({"ok": True, "path": target, "worker": worker,
+                    "skills": skill_catalog().summaries()})
+
     def _plugin_admin(self, body):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)
@@ -1093,7 +1197,13 @@ class Handler(BaseHTTPRequestHandler):
         action = body.get("action")
         name = (body.get("name") or "").strip()
         found, warnings = discover_plugins()
-        if action in ("enable", "disable"):
+        if action in ("add", "create", "remove"):
+            err = self._plugin_install(action, body, found)
+            if err:
+                self._json({"error": err}, 400)
+                return
+            found, warnings = discover_plugins()
+        elif action in ("enable", "disable"):
             if name not in found:
                 self._json({"error": "no such plugin"}, 404)
                 return
@@ -1108,6 +1218,87 @@ class Handler(BaseHTTPRequestHandler):
         st = _plugin_state()
         self._json({"ok": True, "plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
                                             for n in sorted(found)], "warnings": warnings})
+
+    def _plugin_install(self, action, body, found):
+        """add: git URL or local path into the plugins dir; create: a new
+        empty plugin (manifest + optional MCP servers); remove: delete one the
+        console installed. Returns an error string or None."""
+        import shutil, subprocess
+        root = plugins_install_dir()
+        if action == "remove":
+            name = (body.get("name") or "").strip()
+            p = found.get(name)
+            if not p:
+                return "no such plugin"
+            if os.path.dirname(os.path.abspath(p.root)) != os.path.abspath(root):
+                return "that plugin was not installed by the console; remove it on disk"
+            if os.path.islink(p.root):
+                os.unlink(p.root)
+            else:
+                shutil.rmtree(p.root, ignore_errors=True)
+            _plugin_state().pop(name, None)
+            save_config()
+            TRACE.log("plugin", action="remove", name=name)
+            mcp_reload()
+            return None
+        if action == "create":
+            name = str(body.get("name") or "").strip().lower()
+            if not skillmod.NAME_RE.match(name):
+                return "name must be kebab-case"
+            dest = os.path.join(root, name)
+            if os.path.exists(dest):
+                return "a plugin named %s already exists" % name
+            servers = body.get("mcp_servers") or {}
+            if isinstance(servers, str):
+                try:
+                    servers = json.loads(servers) if servers.strip() else {}
+                except ValueError:
+                    return "MCP servers must be a JSON object"
+            if not isinstance(servers, dict):
+                return "MCP servers must be a JSON object"
+            os.makedirs(os.path.join(dest, "skills"), exist_ok=True)
+            manifest = {"name": name, "description": str(body.get("description") or "").strip(),
+                        "version": "0.1.0", "skills": "skills"}
+            if servers:
+                manifest["mcp_servers"] = servers
+            with open(os.path.join(dest, "plugin.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+            TRACE.log("plugin", action="create", name=name)
+            return None
+        # add
+        source = str(body.get("source") or "").strip()
+        if not source:
+            return "source is required: a git URL or a local path"
+        name = str(body.get("name") or "").strip().lower() or \
+            re.sub(r"\.git$", "", source.rstrip("/").rsplit("/", 1)[-1]).lower()
+        name = re.sub(r"[^a-z0-9-]+", "-", name).strip("-")
+        if not skillmod.NAME_RE.match(name):
+            return "could not derive a plugin name from the source; give one"
+        dest = os.path.join(root, name)
+        if os.path.exists(dest):
+            return "a plugin named %s already exists" % name
+        if source.startswith(("http://", "https://", "git@", "ssh://")):
+            try:
+                r = subprocess.run(["git", "clone", "--depth", "1", source, dest],
+                                   capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return "git clone failed: %s" % e
+            if r.returncode != 0:
+                shutil.rmtree(dest, ignore_errors=True)
+                return "git clone failed: " + (r.stderr or "").strip()[-300:]
+        else:
+            src = os.path.abspath(os.path.expanduser(source))
+            if not os.path.isdir(src):
+                return "no such directory: " + source
+            os.symlink(src, dest)
+        if skillmod._plugin_manifest(dest) is None:
+            if os.path.islink(dest):
+                os.unlink(dest)
+            else:
+                shutil.rmtree(dest, ignore_errors=True)
+            return "not a plugin: no plugin.json (or .claude-plugin/plugin.json) and no skills/ dir"
+        TRACE.log("plugin", action="add", name=name, source=source)
+        return None
 
     def _mcp_admin(self, body):
         if not isinstance(body, dict):

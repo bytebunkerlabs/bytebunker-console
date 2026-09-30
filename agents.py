@@ -438,6 +438,65 @@ def stats(CFG, max_age=8):
     return val
 
 
+def _remote_dir(CFG):
+    a = agent_cfg(CFG)
+    ssh = (a.get("ssh") or "").strip()
+    return ssh, (a.get("dir") or "~/bytebunker-harness")
+
+
+def _rq(path):
+    """Quote a remote path for sh, keeping a leading ~ expandable: a quoted
+    tilde is a literal directory named '~' (measured)."""
+    if path == "~":
+        return '"$HOME"'
+    if path.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
+def push_skill(CFG, name, text):
+    """Mirror a skill written in the console to the agent worker's harness
+    skills/ so the Sultan's roster and the console's Skills screen agree.
+    Local mode: the harness dir is on this host, write it directly."""
+    ssh, d = _remote_dir(CFG)
+    if not agent_cfg(CFG).get("enabled"):
+        return {"pushed": False, "reason": "agents disabled"}
+    rel = "skills/%s/SKILL.md" % name
+    try:
+        if ssh:
+            cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh,
+                   "mkdir -p %s && cat > %s" % (_rq(d + "/skills/" + name), _rq(d + "/" + rel))]
+            r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=25)
+            if r.returncode != 0:
+                return {"pushed": False, "reason": (r.stderr or "ssh failed")[:160]}
+            return {"pushed": True, "where": ssh + ":" + d + "/" + rel}
+        path = os.path.join(os.path.expanduser(d), rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return {"pushed": True, "where": path}
+    except Exception as e:   # noqa: BLE001
+        return {"pushed": False, "reason": str(e)[:160]}
+
+
+def remove_skill_remote(CFG, name):
+    ssh, d = _remote_dir(CFG)
+    if not agent_cfg(CFG).get("enabled") or not _SLAVE_ID.match(name):
+        return {"removed": False}
+    try:
+        target = d + "/skills/" + name
+        if ssh:
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh,
+                                "rm -rf %s %s" % (_rq(target), _rq(target + ".md"))],
+                               capture_output=True, text=True, timeout=20)
+            return {"removed": r.returncode == 0}
+        import shutil
+        shutil.rmtree(os.path.expanduser(target), ignore_errors=True)
+        return {"removed": True}
+    except Exception as e:   # noqa: BLE001
+        return {"removed": False, "reason": str(e)[:120]}
+
+
 def kill_slave(CFG, slave_id):
     """Stop one running slave: its container is named after it. The master
     sees the slave end with an error and decides what to do next."""
