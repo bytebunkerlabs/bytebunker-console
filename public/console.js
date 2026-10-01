@@ -59,7 +59,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "agents", "models", "tuning", "batch", "recipes", "cluster", "sparkdash", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "models", "tuning", "batch", "recipes", "cluster", "sparkdash", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -70,6 +70,7 @@
     if (s === "sessions") renderSessions();
     if (s === "skills") renderSkills();
     if (s === "plugins") renderPlugins();
+    if (s === "mcp") renderMcp();
     if (s === "agents") renderAgents();
     if (s === "recipes") renderRecipes();
     if (s === "sparkdash") renderSparkdash();
@@ -1601,6 +1602,151 @@
     await renderPlugins();
     await loadSkills();              // a plugin's skills came or went
     if (state.cfg.mcp || on) loadTools();   // and its MCP servers
+  }
+
+  /* ---------------- MCP screen ---------------- */
+  function mcpPane(title) {
+    const pane = $("mcp-detail"); pane.textContent = "";
+    const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b></div>';
+    h.querySelector("b").textContent = title; pane.appendChild(h);
+    return pane;
+  }
+  async function showServerTools(name) {
+    const pane = mcpPane(name + " \u00b7 tools");
+    let full = { defs: [] };
+    try { full = await (await fetch("/api/tools?full=1")).json(); } catch (e) {}
+    const defs = (full.defs || []).filter((d) => d.function.name.startsWith(name + "__"));
+    if (!defs.length) { const n = document.createElement("div"); n.className = "hint"; n.textContent = "no tools reported (server not ready, or disabled)"; pane.appendChild(n); return; }
+    for (const d of defs) {
+      const c = document.createElement("div"); c.className = "card"; c.style.gap = "4px";
+      const b = document.createElement("b"); b.className = "mono"; b.style.fontSize = "12.5px"; b.textContent = d.function.name.slice(name.length + 2);
+      const t = document.createElement("div"); t.className = "skill-desc"; t.textContent = d.function.description || "";
+      const props = Object.keys((d.function.parameters || {}).properties || {});
+      const a = document.createElement("div"); a.className = "skill-tags mono"; a.textContent = props.length ? "args: " + props.join(", ") : "no arguments";
+      c.appendChild(b); c.appendChild(t); c.appendChild(a); pane.appendChild(c);
+    }
+  }
+  async function mcpPost(payload) {
+    const r = await fetch("/api/mcp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+    return d;
+  }
+  async function renderMcp() {
+    let d = { catalog: [], runtimes: {}, servers: {}, config: {} };
+    try { d = await (await fetch("/api/mcp/catalog")).json(); } catch (e) {}
+    const left = $("mcp-left"); left.textContent = "";
+    const names = Object.keys(Object.assign({}, d.config, d.servers)).filter((n) => !n.startsWith("_"));
+    const ready = names.filter((n) => (d.servers[n] || {}).state === "ready").length;
+    $("mcp-sub").textContent = names.length + " configured \u00b7 " + ready + " ready \u00b7 runtimes: " + Object.entries(d.runtimes || {}).filter(([k, v]) => v).map(([k]) => k).join(", ");
+
+    // configured servers
+    const cfgCard = document.createElement("div"); cfgCard.className = "card"; cfgCard.style.gap = "8px";
+    cfgCard.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Configured servers</b><span class="src mono">started by the console as subprocesses \u00b7 config.json \u2192 mcp_servers</span></div></div>';
+    if (!names.length) { const n = document.createElement("div"); n.className = "hint"; n.textContent = "None yet. Add one from the catalog below."; cfgCard.appendChild(n); }
+    for (const name of names) {
+      const st = d.servers[name] || { state: "unknown", tools: 0 };
+      const cfg = d.config[name] || {};
+      const on = cfg.enabled !== false;
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:9px;flex-wrap:wrap" + (on ? "" : ";opacity:.6");
+      row.innerHTML = '<span class="d" style="width:8px;height:8px;border-radius:50%;flex:none"></span><b class="mono" style="font-size:13px"></b><span class="s mono" style="font-size:11.5px;color:var(--muted)"></span><span class="cmd mono" style="font-size:11px;color:var(--faint);flex:1;min-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><span class="acts" style="display:flex;gap:6px"></span>';
+      row.querySelector(".d").style.background = st.state === "ready" ? "var(--ok)" : st.state === "error" ? "var(--err)" : "var(--faint)";
+      row.querySelector("b").textContent = name;
+      row.querySelector(".s").textContent = st.state === "ready" ? st.tools + " tools" : (st.state || "") + (st.error ? " \u00b7 " + st.error.slice(0, 80) : "");
+      row.querySelector(".cmd").textContent = (cfg.command || "") + " " + (cfg.args || []).join(" ");
+      row.querySelector(".cmd").title = row.querySelector(".cmd").textContent;
+      const acts = row.querySelector(".acts");
+      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
+      mk("tools", "ghost-btn", () => showServerTools(name));
+      mk(on ? "disable" : "enable", "ghost-btn", async () => { try { await mcpPost({ action: "toggle", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
+      mk("restart", "ghost-btn", async () => { try { await mcpPost({ action: "restart" }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
+      const envKeys = Object.keys(cfg.env || {});
+      mk("env" + (envKeys.length ? " (" + envKeys.length + ")" : ""), "ghost-btn", () => {
+        const pane = mcpPane(name + " \u00b7 environment");
+        const hint = document.createElement("div"); hint.className = "hint"; hint.textContent = "Values are stored in the console's config.json and passed only to this server's process. Empty a value to remove it."; pane.appendChild(hint);
+        const form = document.createElement("div"); form.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:8px";
+        const inputs = {};
+        const addRow = (k, v) => { const i = inputEl("value"); i.value = v || ""; if (/token|key|secret|password/i.test(k)) i.type = "password"; inputs[k] = i; form.appendChild(formRow(k, i)); };
+        envKeys.forEach((k) => addRow(k, cfg.env[k]));
+        const nk = inputEl("NEW_VARIABLE"); const nv = inputEl("value"); form.appendChild(formRow("add a variable", nk)); form.appendChild(formRow("its value", nv));
+        const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = "Save and restart";
+        const note = document.createElement("span"); note.className = "hint";
+        save.onclick = async () => { const env = {}; for (const k in inputs) env[k] = inputs[k].value; if (nk.value.trim()) env[nk.value.trim()] = nv.value; try { await mcpPost({ action: "set_env", name, env }); note.textContent = "saved"; renderMcp(); loadTools(); } catch (e) { note.textContent = e.message; } };
+        const row2 = document.createElement("div"); row2.style.cssText = "display:flex;gap:10px;align-items:center"; row2.appendChild(save); row2.appendChild(note);
+        form.appendChild(row2); pane.appendChild(form);
+      });
+      mk("remove", "rate-btn bad", async () => { if (!confirm("Remove MCP server \"" + name + "\"?")) return; try { await mcpPost({ action: "remove", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
+      cfgCard.appendChild(row);
+    }
+    left.appendChild(cfgCard);
+
+    // catalog
+    const cat = document.createElement("div"); cat.className = "card"; cat.style.gap = "8px";
+    cat.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Catalog</b><span class="src mono">local stdio servers \u00b7 Add starts it on first use; Install locally pre-installs the package first</span></div></div>';
+    const grid = document.createElement("div"); grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px";
+    for (const c of d.catalog || []) {
+      const card = document.createElement("div"); card.style.cssText = "border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;background:var(--surface)";
+      const head = document.createElement("div"); head.style.cssText = "display:flex;align-items:baseline;gap:8px";
+      const b = document.createElement("b"); b.textContent = c.name; b.style.fontSize = "13.5px";
+      const rt = document.createElement("span"); rt.className = "mono"; rt.style.cssText = "font-size:10.5px;color:var(--faint)"; rt.textContent = c.runtime + (d.runtimes && d.runtimes[c.command] === false ? " \u00b7 " + c.command + " missing" : "");
+      head.appendChild(b); head.appendChild(rt); card.appendChild(head);
+      const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = c.description; card.appendChild(desc);
+      const st = document.createElement("div"); st.className = "skill-tags mono"; st.textContent = c.status + (c.installed_as ? "  \u00b7  configured as " + c.installed_as : ""); card.appendChild(st);
+      const cmdl = document.createElement("div"); cmdl.className = "mono"; cmdl.style.cssText = "font-size:10.5px;color:var(--faint);white-space:pre-wrap"; cmdl.textContent = c.command + " " + c.args.join(" "); card.appendChild(cmdl);
+      const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:2px";
+      const addBtn = document.createElement("button"); addBtn.type = "button"; addBtn.className = c.installed_as ? "ghost-btn" : "solid-btn"; addBtn.textContent = c.installed_as ? "Add another" : "Add";
+      acts.appendChild(addBtn);
+      if (c.docs) { const a = document.createElement("a"); a.href = c.docs; a.target = "_blank"; a.rel = "noopener"; a.className = "linky"; a.textContent = "docs"; acts.appendChild(a); }
+      card.appendChild(acts);
+      const form = document.createElement("div"); form.hidden = true; form.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:4px";
+      const nameIn = inputEl("server name"); nameIn.value = c.installed_as ? c.id + "-2" : c.id;
+      form.appendChild(formRow("name", nameIn));
+      const pin = {}; for (const p of c.params || []) { const i = inputEl(p.help || ""); i.value = p.default || ""; pin[p.name] = i; form.appendChild(formRow(p.label, i)); }
+      const ein = {}; for (const e of c.env || []) { const i = inputEl(e.label); i.value = e.default || ""; if (e.secret) i.type = "password"; ein[e.name] = i; form.appendChild(formRow(e.name + (e.secret ? "  \u00b7  stored in config.json" : ""), i)); }
+      const row = document.createElement("div"); row.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+      const go1 = document.createElement("button"); go1.type = "button"; go1.className = "solid-btn"; go1.textContent = "Add";
+      const go2 = document.createElement("button"); go2.type = "button"; go2.className = "ghost-btn"; go2.textContent = (c.install || []).length ? "Install locally + add" : "Add"; if (!(c.install || []).length) go2.hidden = true;
+      const note = document.createElement("span"); note.className = "hint"; if (c.install_note) note.textContent = c.install_note;
+      row.appendChild(go1); row.appendChild(go2); row.appendChild(note); form.appendChild(row); card.appendChild(form);
+      addBtn.onclick = () => { form.hidden = !form.hidden; };
+      const payload = () => { const params = {}; for (const k in pin) params[k] = pin[k].value; const env = {}; for (const k in ein) env[k] = ein[k].value; return { id: c.id, name: nameIn.value.trim(), params, env }; };
+      go1.onclick = async () => { go1.disabled = true; try { const r = await mcpPost(Object.assign({ action: "catalog_add" }, payload())); const st2 = (r.servers || {})[nameIn.value.trim()] || {}; note.textContent = st2.state === "ready" ? "added \u00b7 " + st2.tools + " tools" : "added \u00b7 " + (st2.state || "") + (st2.error ? ": " + st2.error.slice(0, 120) : ""); renderMcp(); loadTools(); } catch (e) { note.textContent = e.message; go1.disabled = false; } };
+      go2.onclick = () => installCatalog(payload(), c);
+      grid.appendChild(card);
+    }
+    cat.appendChild(grid); left.appendChild(cat);
+
+    // custom server
+    const cust = document.createElement("div"); cust.className = "card"; cust.style.gap = "8px";
+    cust.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Custom server</b><span class="src mono">any stdio MCP server: a command and its arguments</span></div></div>';
+    const cn = inputEl("name (letters, digits, - _)"), cc = inputEl("command, e.g. npx or uvx or python3"), ca = inputEl("arguments, space-separated, e.g. -y some-mcp-package --flag"), ce = textareaEl('environment as JSON (optional), e.g. {"API_KEY": "..."}', 3);
+    [formRow("name", cn), formRow("command", cc), formRow("arguments", ca), formRow("environment", ce)].forEach((e) => cust.appendChild(e));
+    const crow = document.createElement("div"); crow.style.cssText = "display:flex;gap:10px;align-items:center";
+    const cb = document.createElement("button"); cb.type = "button"; cb.className = "solid-btn"; cb.textContent = "Add server"; const cnote = document.createElement("span"); cnote.className = "hint";
+    cb.onclick = async () => { let env = {}; try { env = ce.value.trim() ? JSON.parse(ce.value) : {}; } catch (e) { cnote.textContent = "environment must be a JSON object"; return; } try { await mcpPost({ action: "add", name: cn.value.trim(), command: cc.value.trim(), args: ca.value.trim(), env }); cnote.textContent = "added"; renderMcp(); loadTools(); } catch (e) { cnote.textContent = e.message; } };
+    crow.appendChild(cb); crow.appendChild(cnote); cust.appendChild(crow); left.appendChild(cust);
+  }
+  async function installCatalog(payload, c) {
+    const pane = mcpPane("installing " + c.name + " \u00b7 " + payload.name);
+    const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap"; pane.appendChild(pre);
+    const append = (t) => { pre.textContent += t + "\n"; pre.scrollTop = pre.scrollHeight; };
+    try {
+      const resp = await fetch("/api/mcp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ action: "install" }, payload)) });
+      if (!resp.ok) { append("error: " + upstreamText(await resp.text())); return; }
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true }); const parts = buf.split("\n"); buf = parts.pop();
+        for (const ln of parts) {
+          if (!ln.startsWith("data:")) continue; let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+          if (o.phase === "start") append("\u2014 " + (o.steps || []).length + " install step(s) on the console host \u2014");
+          else if (o.phase === "done") { append("\u2014 " + (o.added ? "installed and added" : "stopped: exit " + o.exit) + " \u2014"); renderMcp(); loadTools(); }
+          else if (o.error) append("error: " + o.error);
+          else if (o.line != null) append(o.line);
+        }
+      }
+    } catch (e) { append("error: " + e.message); }
   }
 
   /* ---------------- sparkDash, embedded ---------------- */

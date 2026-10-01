@@ -38,6 +38,7 @@
     <nav class="nav">
       <button data-nav="skills"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8 3 4v3.4c0 3 2.1 5 5 6.8 2.9-1.8 5-3.8 5-6.8V4z"/><path d="M6 7.8 7.4 9.3 10.4 6"/></svg><span>Skills</span></button>
       <button data-nav="plugins"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6v2.2M10 2.6v2.2M4 4.8h8v3.4a4 4 0 0 1-8 0zM8 12.2v1.6"/></svg><span>Plugins</span></button>
+      <button data-nav="mcp"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="2"/><path d="M5.2 7l2 1.6-2 1.6M8.6 10.2h2.4"/></svg><span>MCP</span></button>
       <button data-nav="agents"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="5" r="2.4"/><path d="M3.4 13.2a4.6 4.6 0 0 1 9.2 0"/></svg><span>Agents</span></button>
     </nav>
 
@@ -295,6 +296,15 @@
     </section>
 
     <!-- Usage -->
+    <!-- MCP servers -->
+    <section class="screen" id="screen-mcp">
+      <header><h1>MCP</h1><span class="sub">Local tool servers the model calls through the console · <span id="mcp-sub">—</span></span></header>
+      <div class="scroll agents-grid">
+        <div class="agents-left" id="mcp-left"></div>
+        <aside class="agents-detail" id="mcp-detail"><div class="hint">Pick a server to see its tools, or add one from the catalog. "Install locally" pre-installs the package (and for Playwright the Chromium build) on this host, then adds the server; the log streams here.</div></aside>
+      </div>
+    </section>
+
     <!-- sparkDash, embedded -->
     <section class="screen" id="screen-sparkdash">
       <header>

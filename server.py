@@ -43,6 +43,7 @@ from traces import TraceLog, StreamCapture, export_lines
 import skills as skillmod
 import agents as agentmod
 import recipes as recipemod
+import mcp_catalog as catmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -1085,6 +1086,14 @@ class Handler(BaseHTTPRequestHandler):
                                     for n in sorted(found)], "warnings": warnings})
         elif path == "/api/rack":
             self._json(rack_overview())
+        elif path == "/api/mcp/catalog":
+            try:
+                st = mcp_host().status
+            except Exception as e:   # noqa: BLE001
+                st = {"_error": str(e)[:200]}
+            self._json({"catalog": catmod.catalog_view(CFG.get("mcp_servers", {})),
+                        "runtimes": catmod.runtimes(), "servers": st,
+                        "config": CFG.get("mcp_servers", {})})
         elif path == "/api/recipes":
             a = CFG.get("agents") or {}
             lt = CFG.get("litellm") or {}
@@ -1633,6 +1642,38 @@ class Handler(BaseHTTPRequestHandler):
         servers = CFG.setdefault("mcp_servers", {})
         name = (body.get("name") or "").strip()
 
+        if action == "install":
+            self._mcp_install(body)
+            return
+        if action == "catalog_add":
+            entry = catmod.get(str(body.get("id") or ""))
+            if not entry:
+                self._json({"error": "no such catalog entry"}, 404)
+                return
+            name = name or entry["id"]
+            if not re.match(r"^[A-Za-z0-9_-]{1,32}$", name):
+                self._json({"error": "name must be 1-32 chars: letters, digits, - or _"}, 400)
+                return
+            cmd, args = catmod.render(entry, body.get("params") or {})
+            env = {k: str(v) for k, v in (body.get("env") or {}).items() if str(v).strip()}
+            for e in entry.get("env", []):
+                if e.get("default") and e["name"] not in env:
+                    env[e["name"]] = os.path.expanduser(e["default"]) if str(e["default"]).startswith("~") else e["default"]
+            servers[name] = {"command": cmd, "args": args, "env": env, "enabled": True, "catalog": entry["id"]}
+            TRACE.log("mcp", action="catalog_add", name=name, catalog=entry["id"])
+            action = "restart"
+        elif action == "set_env":
+            if name not in servers:
+                self._json({"error": "no such server"}, 404)
+                return
+            env = servers[name].setdefault("env", {})
+            for k, v in (body.get("env") or {}).items():
+                if str(v).strip():
+                    env[str(k)] = str(v)
+                else:
+                    env.pop(str(k), None)
+            action = "restart"
+
         if action == "add":
             if not name or not re.match(r"^[A-Za-z0-9_-]{1,32}$", name):
                 self._json({"error": "name must be 1-32 chars: letters, digits, - or _"}, 400)
@@ -1670,6 +1711,62 @@ class Handler(BaseHTTPRequestHandler):
         h = mcp_reload()
         self._json({"ok": True, "servers": h.status,
                     "config": CFG.get("mcp_servers", {})})
+
+    def _mcp_install(self, body):
+        """Pre-install a catalog server on this host (npm -g / uv tool /
+        browser downloads), streaming the output, then add it to the config
+        and start it. The model never sees a half-installed server: the add
+        happens only when every install step exited 0."""
+        entry = catmod.get(str(body.get("id") or ""))
+        if not entry:
+            self._json({"error": "no such catalog entry"}, 404)
+            return
+        name = (body.get("name") or entry["id"]).strip()
+        if not re.match(r"^[A-Za-z0-9_-]{1,32}$", name):
+            self._json({"error": "bad name"}, 400)
+            return
+        cmd, args = catmod.render(entry, body.get("params") or {})
+        env = {k: str(v) for k, v in (body.get("env") or {}).items() if str(v).strip()}
+        for e in entry.get("env", []):
+            if e.get("default") and e["name"] not in env:
+                env[e["name"]] = os.path.expanduser(e["default"]) if str(e["default"]).startswith("~") else e["default"]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        wlock = threading.Lock()
+        stop = threading.Event()
+
+        def emit(obj):
+            try:
+                with wlock:
+                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+                    self.wfile.flush()
+            except OSError:
+                stop.set()
+        shell_env = catmod.shell_env()
+        emit({"phase": "start", "id": entry["id"], "name": name, "steps": entry.get("install", [])})
+        code = 0
+        for step in entry.get("install", []):
+            emit({"line": "$ " + step})
+            wrapped = ["env", "PATH=" + shell_env["PATH"], "bash", "-c", step]
+            try:
+                code, killed = agentmod.run_streaming(wrapped, ROOT, lambda t: emit({"line": t}), stop, timeout_s=1800)
+            except Exception as e:   # noqa: BLE001
+                emit({"error": str(e)}); code = -1; killed = "error"
+            if code != 0:
+                emit({"phase": "done", "exit": code, "killed": killed, "added": False})
+                TRACE.log("mcp", action="install", name=name, catalog=entry["id"], exit=code, step=step)
+                return
+        servers = CFG.setdefault("mcp_servers", {})
+        servers[name] = {"command": cmd, "args": args, "env": env, "enabled": True, "catalog": entry["id"]}
+        save_config()
+        h = mcp_reload()
+        st = h.status.get(name) or {}
+        emit({"line": "added %s: %s %s" % (name, cmd, " ".join(args))})
+        emit({"line": "server %s: %s" % (name, (str(st.get("tools")) + " tools") if st.get("state") == "ready" else st.get("state", "?") + (" — " + st["error"] if st.get("error") else ""))})
+        emit({"phase": "done", "exit": 0, "killed": False, "added": True, "status": st})
+        TRACE.log("mcp", action="install", name=name, catalog=entry["id"], exit=0, status=st)
 
     # ---- streaming chat proxy ----
     RETRY_STRIP = ("reasoning_effort", "top_k", "repetition_penalty", "stream_options")
