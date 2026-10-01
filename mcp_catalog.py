@@ -41,7 +41,7 @@ CATALOG = [
         "id": "git", "name": "Git", "status": "reference (MCP project)",
         "description": "Status, diff, log, commit, branch operations on one repository.",
         "runtime": "uv", "command": "uvx", "args": ["mcp-server-git", "--repository", "{repo}"],
-        "params": [{"name": "repo", "label": "repository path", "default": "~/bytebunker-console", "help": ""}],
+        "params": [{"name": "repo", "label": "repository path", "default": "~/rack", "help": "must be a git repository on the console host, or the server exits at start"}],
         "env": [], "install": ["uv tool install mcp-server-git"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
     },
