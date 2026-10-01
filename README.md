@@ -206,8 +206,7 @@ the checkout: `podman build -f docker/Dockerfile.slave -t bytebunker-slave:lates
 Give the model the ability to read files, search a repo, fetch a URL — anything
 with an [MCP](https://modelcontextprotocol.io/) server behind it.
 
-Add one from the params panel (**Tools · MCP → Add MCP server**, which has presets
-for the common servers), or declare it in `config.json`:
+Add one on the **MCP** screen: a catalog of local stdio servers (Playwright, filesystem, fetch, git, memory, sequential thinking, time, SQLite, GitHub, Brave Search, Context7, Puppeteer, PostgreSQL, Slack, Prometheus, a test server, the built-in terminal) with one-click add, a streamed local install, environment editing, and a custom-server form. The params panel keeps a compact list with per-chat enable/disable.
 
 ```json
 {

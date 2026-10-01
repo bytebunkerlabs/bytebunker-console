@@ -59,7 +59,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "models", "tuning", "batch", "recipes", "cluster", "sparkdash", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "models", "recipes", "cluster", "sparkdash", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -1989,7 +1989,7 @@
       ["Model plane", "the Sparks", "serve the LLM only — no agent code runs here"],
       ["Control plane", "this console", "launches goals and watches; runs no agent code"],
       ["Agent plane", d.host || "unset", d.isolated
-        ? "a separate host with Docker isolation" : "NOT a separate host — no isolation"],
+        ? "a separate host; one rootless podman container per agent, no network unless granted" : "NOT a separate host — no isolation"],
     ];
     topo.innerHTML = "<div class='glabel'>Topology</div>";
     for (const [name, host, note] of planes) {
@@ -2307,7 +2307,7 @@
     box.textContent = "";
     const names = Object.keys(Object.assign({}, cfg, status));
     if (!names.length) {
-      box.innerHTML = '<span class="hint">No MCP servers yet. Add one below — the model can then read and write through it.</span>';
+      box.innerHTML = '<span class="hint">No MCP servers yet. Add one on the MCP screen — the model can then read and write through it.</span>';
       return;
     }
     for (const name of names) {
@@ -2316,9 +2316,7 @@
       const r = document.createElement("div");
       r.className = "srv-row" + (on ? "" : " off");
       r.innerHTML = '<span class="d"></span><span class="n mono"></span><span class="s"></span>' +
-        '<span class="acts"><button class="t" title="Enable/disable">\u25cf</button>' +
-        '<button class="r" title="Restart">\u21bb</button>' +
-        '<button class="x danger" title="Remove">\u2715</button></span>';
+        '<span class="acts"><button class="t" title="Enable/disable">\u25cf</button></span>';
       r.querySelector(".d").style.background =
         st.state === "ready" ? "var(--ok)" : st.state === "error" ? "var(--err)" : "var(--faint)";
       r.querySelector(".n").textContent = name;
@@ -2327,10 +2325,6 @@
         : st.state === "error" ? "error" : st.state;
       if (st.error) r.querySelector(".s").title = st.error;
       r.querySelector(".t").onclick = () => mcpAdmin({ action: "toggle", name });
-      r.querySelector(".r").onclick = () => mcpAdmin({ action: "restart" });
-      r.querySelector(".x").onclick = () => {
-        if (confirm("Remove MCP server \"" + name + "\"?")) mcpAdmin({ action: "remove", name });
-      };
       box.appendChild(r);
     }
   }
@@ -2344,10 +2338,9 @@
         body: JSON.stringify(payload),
       });
       const d = await r.json();
-      if (!r.ok) { $("mcp-form-err").textContent = d.error || "failed"; }
-      else { $("mcp-form").hidden = true; $("mcp-form-err").textContent = ""; }
+      if (!r.ok) alert(d.error || "failed");
     } catch (e) {
-      $("mcp-form-err").textContent = e.message;
+      alert(e.message);
     }
     await loadTools();   // re-read status and tool schemas after any change
   }
@@ -2466,7 +2459,7 @@
 
     // the worker's own model (a small, fast engine next to the agents)
     const fm = d.fast_model;
-    if (fm && (fm.up || fm.gpu || fm.error)) {
+    if (fm && (fm.up || fm.gpu || fm.error) && !state.telemetryHasWorker) {
       const c2 = document.createElement("div");
       c2.className = "card";
       const t2 = document.createElement("div");
@@ -2601,11 +2594,7 @@
       ? '<span class="dot"></span>healthy'
       : '<span class="dot err"></span>' + healthy + "/" + t.nodes.length;
     $("cluster-poll").innerHTML = '<span class="dot"></span>polling 5s' + (t.source === "sparkdash" ? " \u00b7 sparkDash" : "");
-    if (state.cfg.sparkdash_open_url && !$("sparkdash-link")) {
-      const a = document.createElement("a"); a.id = "sparkdash-link"; a.href = state.cfg.sparkdash_open_url; a.target = "_blank"; a.rel = "noopener";
-      a.className = "ghost-btn"; a.style.cssText = "margin-left:10px;text-decoration:none;font-size:12px"; a.textContent = "open sparkDash";
-      $("cluster-poll").parentNode.appendChild(a);
-    }
+
   }
 
   /* ---------------- usage ---------------- */
@@ -2744,24 +2733,9 @@
     }
   });
 
-  /* ---------------- MCP form ---------------- */
-  $("mcp-add-btn").onclick = () => {
-    const f = $("mcp-form");
-    f.hidden = !f.hidden;
-    if (!f.hidden) $("mcp-name").focus();
-  };
-  $("mcp-cancel").onclick = () => { $("mcp-form").hidden = true; $("mcp-form-err").textContent = ""; };
-  document.querySelectorAll(".mcp-preset").forEach((b) => (b.onclick = () => {
-    $("mcp-name").value = b.dataset.name;
-    $("mcp-cmd").value = b.dataset.cmd;
-    $("mcp-args").value = b.dataset.args;
-  }));
-  $("mcp-save").onclick = () => mcpAdmin({
-    action: "add",
-    name: $("mcp-name").value.trim(),
-    command: $("mcp-cmd").value.trim(),
-    args: $("mcp-args").value.trim(),
-  });
+  /* ---------------- panel links into screens ---------------- */
+  $("mcp-manage").onclick = () => go("mcp");
+  $("models-to-recipes").onclick = () => go("recipes");
 
   /* ---------------- netcheck (Cluster: "is it local?") ---------------- */
   // The verdict comes from rack net on the head node — an in-container /proc
