@@ -59,7 +59,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "models", "recipes", "cluster", "sparkdash", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "models", "recipes", "cluster", "sparkdash", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -71,6 +71,7 @@
     if (s === "skills") renderSkills();
     if (s === "plugins") renderPlugins();
     if (s === "mcp") renderMcp();
+    if (s === "jobs") renderJobs();
     if (s === "agents") renderAgents();
     if (s === "recipes") renderRecipes();
     if (s === "sparkdash") renderSparkdash();
@@ -228,8 +229,17 @@
   // calibrated plus a quarter of whatever is new since the measured prompt
   // (a fresh paste of code tokenizes unlike the prose before it), 2% when
   // guessing. Tool definitions ride along on every request, so they count.
+  // Image parts are base64 blobs; the engine bills them as a few hundred to a
+  // couple of thousand tokens, not one per three characters.
+  function promptShape(msgs) {
+    return msgs.map((m) => {
+      if (!Array.isArray(m.content)) return m;
+      return Object.assign({}, m, { content: m.content.map((p) =>
+        p && p.type === "image_url" ? { type: "image", placeholder: "x".repeat(4000) } : p) });
+    });
+  }
   function estimatePrompt(msgs, tools, model) {
-    const chars = JSON.stringify({ m: msgs, t: tools || null }).length;
+    const chars = JSON.stringify({ m: promptShape(msgs), t: tools || null }).length;
     const k = state.calib;
     const cal = !!(k && k.model === model && k.tokens > 1000 && k.chars > 4000);
     const ratio = cal ? Math.min(6, Math.max(2, k.chars / k.tokens)) : 3.2;
@@ -326,14 +336,60 @@
     if (m.role === "user") {
       const u = document.createElement("div");
       u.className = "msg-user";
-      const b = document.createElement("div");
-      b.textContent = m.content;
-      u.appendChild(b);
+      u.style.flexDirection = "column"; u.style.alignItems = "flex-end";
+      if (m.attachments && m.attachments.length) {
+        const row = document.createElement("div"); row.className = "msg-attach";
+        for (const a of m.attachments) {
+          if (a.kind === "image" && (a.url || a.dataURL)) {
+            const img = document.createElement("img"); img.src = a.url || a.dataURL; img.alt = a.name; img.title = a.name;
+            img.onclick = () => window.open(a.url || a.dataURL, "_blank"); img.style.cursor = "zoom-in";
+            row.appendChild(img);
+          } else {
+            const f = document.createElement(a.url ? "a" : "span"); f.className = "f";
+            if (a.url) { f.href = a.url; f.target = "_blank"; f.rel = "noopener"; }
+            f.textContent = "\ud83d\udcc4 " + a.name + (a.size ? " \u00b7 " + fmtBytes(a.size) : "");
+            row.appendChild(f);
+          }
+        }
+        u.appendChild(row);
+      }
+      if ((m.content || "").trim()) {
+        const b = document.createElement("div");
+        b.textContent = m.content;
+        u.appendChild(b);
+      }
       wrap.appendChild(u);
       return wrap;
     }
     const bot = document.createElement("div");
     bot.className = "msg-bot";
+    // What the turn did, folded into one line above the answer: the answer
+    // is what you came for; the tool traffic is a click away (and all of it
+    // is on the Activity tab).
+    if (m.toolUse && m.toolUse.length) {
+      const d = document.createElement("details"); d.className = "msg-activity";
+      const running = m.toolUse.some((t) => t.result === "running\u2026");
+      const errs = m.toolUse.filter((t) => t.error).length;
+      if (running) d.open = true;
+      const sum = document.createElement("summary");
+      sum.innerHTML = '<span class="n"></span><span class="what"></span>';
+      sum.querySelector(".n").textContent = m.toolUse.length + (m.toolUse.length === 1 ? " tool call" : " tool calls");
+      const names = [...new Set(m.toolUse.map((t) => t.name.replace(/^[^_]+__/, "")))];
+      sum.querySelector(".what").textContent = (running ? "running \u00b7 " : "") + names.slice(0, 4).join(", ") + (names.length > 4 ? " +" + (names.length - 4) : "") + (errs ? " \u00b7 " + errs + " failed" : "");
+      d.appendChild(sum);
+      for (const t of m.toolUse) {
+        const r = document.createElement("div"); r.className = "row";
+        r.innerHTML = '<span class="tn mono"></span><span class="ta mono"></span><span class="ts"></span><button class="more" type="button">details</button>';
+        r.querySelector(".tn").textContent = t.name;
+        r.querySelector(".ta").textContent = oneLine(t.args, 140);
+        const ts = r.querySelector(".ts"); ts.textContent = t.result === "running\u2026" ? "running\u2026" : (t.error ? "error" : "ok"); if (t.error) ts.classList.add("err");
+        const pre = document.createElement("pre"); pre.hidden = true;
+        pre.textContent = "arguments\n" + prettyJson(t.args) + "\n\nresult\n" + String(t.result).slice(0, 6000);
+        r.querySelector(".more").onclick = () => { pre.hidden = !pre.hidden; };
+        d.appendChild(r); d.appendChild(pre);
+      }
+      bot.appendChild(d);
+    }
     for (const p of parseParts(m)) {
       if (p.kind === "think") {
         const d = document.createElement("div");
@@ -362,16 +418,6 @@
         d.textContent = p.text;
         bot.appendChild(d);
       }
-    }
-    for (const t of (m.toolUse || [])) {
-      const d = document.createElement("div");
-      d.className = "part-tool" + (t.error ? " err" : "");
-      d.innerHTML = '<div class="thead"><span class="tname mono"></span><span class="tstate mono"></span></div><pre class="targs"></pre><pre class="tres"></pre>';
-      d.querySelector(".tname").textContent = t.name;
-      d.querySelector(".tstate").textContent = t.result === "running…" ? "running…" : (t.error ? "error" : "ok");
-      d.querySelector(".targs").textContent = t.args;
-      d.querySelector(".tres").textContent = String(t.result).slice(0, 4000);
-      bot.appendChild(d);
     }
     if (m.notice) {
       const n = document.createElement("div");
@@ -444,7 +490,11 @@
     const pin = atBottom(tr);
     const empty = state.messages.length === 0;
     $("empty-state").style.display = empty ? "flex" : "none";
-    box.hidden = empty;
+    box.hidden = empty || state.chatView !== "chat";
+    $("chat-tabs").hidden = empty;
+    updateChatTabs();
+    if (state.chatView === "activity") renderActivityView();
+    if (state.chatView === "files") renderFilesView();
     if (lastOnly && box.lastElementChild && state.messages.length &&
         box.childElementCount === state.messages.length) {
       box.replaceChild(buildMessageNode(state.messages[state.messages.length - 1]),
@@ -774,10 +824,51 @@
         const answer = caps.strip_reasoning ? stripThink(m.content) : m.content;
         if (answer) msgs.push({ role: "assistant", content: answer });
       } else {
-        msgs.push({ role: "user", content: m.content });
+        msgs.push({ role: "user", content: userContent(m) });
       }
     }
     return msgs;
+  }
+
+  // Attachments go to the model three ways: images as image parts (the
+  // vision engine reads them), text-like files inline, everything else as
+  // the path it was saved under — the filesystem and terminal tools can
+  // open it from there.
+  function userContent(m) {
+    const atts = m.attachments || [];
+    if (!atts.length) return m.content;
+    const parts = [];
+    let text = m.content || "";
+    for (const a of atts) {
+      if (a.kind === "image") {
+        if (a.dataURL) parts.push({ type: "image_url", image_url: { url: a.dataURL } });
+        else text += "\n\n[image attached: " + a.name + " — not available in this session; re-attach to show it to the model]";
+      } else if (a.kind === "text" && a.text != null) {
+        text += "\n\n--- attached file: " + a.name + (a.path ? " (saved at " + a.path + ")" : "") + " ---\n" + a.text + "\n--- end of " + a.name + " ---";
+      } else {
+        text += "\n\n[attached file: " + a.name + (a.size ? ", " + fmtBytes(a.size) : "") + (a.path ? ", saved at " + a.path + " — read it with the filesystem or terminal tools" : "") + "]";
+      }
+    }
+    parts.unshift({ type: "text", text: text.trim() || "(see attachments)" });
+    return parts;
+  }
+  function fmtBytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B"; }
+  function oneLine(sv, n) { const t = String(sv || "").replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "\u2026" : t; }
+  function prettyJson(sv) { try { return JSON.stringify(JSON.parse(sv), null, 2); } catch (e) { return String(sv || ""); } }
+
+  // Images are kept in sessions only as their saved URL; before a send they
+  // are read back into base64 for the request.
+  async function hydrateImages(list) {
+    for (const m of list) {
+      for (const a of (m.attachments || [])) {
+        if (a.kind === "image" && !a.dataURL && a.url) {
+          try {
+            const blob = await (await fetch(a.url)).blob();
+            a.dataURL = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+          } catch (e) {}
+        }
+      }
+    }
   }
 
   function traceHeaders(bot) {
@@ -801,8 +892,14 @@
   }
 
   async function send(text) {
-    if (!text || !text.trim() || state.streaming || !state.model) return;
-    text = text.trim();
+    const atts = (state.attachments || []).slice();
+    if ((!text || !text.trim()) && !atts.length) return;
+    if (state.streaming || !state.model) return;
+    text = (text || "").trim();
+    if (atts.some((a) => a.kind === "image") && !capsFor(state.model).vision) {
+      if (!confirm("The selected model is not marked as accepting images. Send anyway?")) return;
+    }
+    await hydrateImages(state.messages);
     if (/^\/compress\b/i.test(text)) { await compress("manual"); return; }
     if (P.autoCompress) {
       // Fold older turns away BEFORE this one joins the transcript, so what
@@ -810,7 +907,7 @@
       // summarizes as much as fits in the summarizer's own window.
       for (let round = 0; round < 3; round++) {
         const c0 = capsFor(state.model);
-        const probe = buildMsgs(state.messages.concat([{ role: "user", content: text }]), c0);
+        const probe = buildMsgs(state.messages.concat([{ role: "user", content: text, attachments: atts }]), c0);
         const est = estimatePrompt(probe, toolDefs(c0), state.model);
         if (est.tokens <= compressLimit(c0.ctx || 131072)) break;
         const did = await compress("auto", est.tokens);
@@ -819,7 +916,9 @@
       }
     }
     if (!state.session) state.session = "s-" + Date.now().toString(36);
-    const user = { role: "user", content: text };
+    const user = { role: "user", content: text, attachments: atts };
+    state.attachments = []; renderAttachChips();
+    autosizeInput();
     // model + effort stamped now: the transcript renders provenance, not
     // whatever the controls happen to say later
     const bot = { role: "bot", content: "", reasoning: "", meta: "",
@@ -1112,6 +1211,157 @@
       if (!state.streaming) { const v = e.target.value; e.target.value = ""; send(v); }
     }
   };
+  // the box grows with what you type, up to the CSS max-height, then scrolls
+  function autosizeInput() {
+    const el = $("input"); el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 260) + "px";
+  }
+  $("input").addEventListener("input", autosizeInput);
+  autosizeInput();
+
+  /* ---------------- attachments ---------------- */
+  state.attachments = [];
+  const TEXT_EXT = /\.(txt|md|markdown|json|jsonl|csv|tsv|yaml|yml|toml|ini|cfg|conf|log|py|js|ts|tsx|jsx|html|css|sh|bash|zsh|sql|xml|env|rs|go|java|c|h|cpp|hpp|rb|php|swift|kt|m|r|tex|diff|patch)$/i;
+  function kindOf(file) {
+    if ((file.type || "").startsWith("image/")) return "image";
+    if ((file.type || "").startsWith("text/") || TEXT_EXT.test(file.name) || file.type === "application/json") return "text";
+    return "file";
+  }
+  // images are resized before upload: a phone photo is 12 MB of pixels the
+  // model does not need, and every later turn resends it
+  function shrinkImage(file) {
+    return new Promise((resolve) => {
+      const img = new Image(); const url = URL.createObjectURL(file);
+      img.onload = () => {
+        const max = 1568; let w = img.width, h = img.height;
+        if (Math.max(w, h) > max) { const k = max / Math.max(w, h); w = Math.round(w * k); h = Math.round(h * k); }
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        const keepPng = file.type === "image/png" && file.size < 600000;
+        resolve(c.toDataURL(keepPng ? "image/png" : "image/jpeg", 0.85));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(file); };
+      img.src = url;
+    });
+  }
+  async function uploadToConsole(name, dataURLorText, isText) {
+    const data = isText ? btoa(unescape(encodeURIComponent(dataURLorText))) : dataURLorText.split(",", 2)[1];
+    const r = await fetch("/api/upload", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: state.session || (state.session = "s-" + Date.now().toString(36)), name, data }) });
+    const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+    return d;
+  }
+  async function addFiles(files) {
+    for (const file of files) {
+      if (file.size > 25 * 1024 * 1024) { alert(file.name + " is larger than 25 MB"); continue; }
+      const a = { kind: kindOf(file), name: file.name || ("pasted-" + Date.now() + ".png"), size: file.size, mime: file.type, status: "reading" };
+      state.attachments.push(a); renderAttachChips();
+      try {
+        if (a.kind === "image") {
+          a.dataURL = await shrinkImage(file);
+          const up = await uploadToConsole(a.name, a.dataURL, false);
+          a.url = up.url; a.path = up.path; a.size = up.size;
+        } else if (a.kind === "text") {
+          a.text = await file.text();
+          if (a.text.length > 200000) { a.text = a.text.slice(0, 200000) + "\n\u2026[truncated at 200k chars]"; }
+          const up = await uploadToConsole(a.name, await file.text(), true);
+          a.url = up.url; a.path = up.path;
+        } else {
+          const dataURL = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+          const up = await uploadToConsole(a.name, dataURL, false);
+          a.url = up.url; a.path = up.path;
+        }
+        a.status = "ready";
+      } catch (e) { a.status = "failed: " + e.message; }
+      renderAttachChips();
+    }
+  }
+  function renderAttachChips() {
+    const box = $("attach-chips"); box.textContent = "";
+    box.hidden = !state.attachments.length;
+    state.attachments.forEach((a, i) => {
+      const c = document.createElement("div"); c.className = "attach-chip";
+      if (a.kind === "image" && a.dataURL) { const img = document.createElement("img"); img.src = a.dataURL; c.appendChild(img); }
+      else { const k = document.createElement("span"); k.className = "k"; k.textContent = a.kind === "text" ? "text" : "file"; c.appendChild(k); }
+      const nm = document.createElement("span"); nm.className = "nm"; nm.textContent = a.name; nm.title = a.name; c.appendChild(nm);
+      const sz = document.createElement("span"); sz.className = "sz"; sz.textContent = a.status === "ready" ? fmtBytes(a.size || 0) : a.status; c.appendChild(sz);
+      const x = document.createElement("button"); x.type = "button"; x.textContent = "\u2715"; x.title = "remove"; x.onclick = () => { state.attachments.splice(i, 1); renderAttachChips(); }; c.appendChild(x);
+      box.appendChild(c);
+    });
+  }
+  $("attach-btn").onclick = () => $("attach-input").click();
+  $("attach-input").onchange = (e) => { addFiles([...e.target.files]); e.target.value = ""; };
+  $("input").addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData && e.clipboardData.files ? e.clipboardData.files : [])];
+    if (files.length) { e.preventDefault(); addFiles(files); }
+  });
+  (function () {
+    const box = $("composer-box"), tr = $("transcript");
+    for (const el of [box, tr]) {
+      el.addEventListener("dragover", (e) => { e.preventDefault(); box.classList.add("drop"); });
+      el.addEventListener("dragleave", () => box.classList.remove("drop"));
+      el.addEventListener("drop", (e) => { e.preventDefault(); box.classList.remove("drop"); if (e.dataTransfer && e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); });
+    }
+  })();
+
+  /* ---------------- chat tabs: Activity and Files ---------------- */
+  state.chatView = "chat";
+  function chatActivity() {
+    const rows = [];
+    state.messages.forEach((m, i) => { if (m.role === "bot") for (const t of (m.toolUse || [])) rows.push({ turn: i, model: m.model, t }); });
+    return rows;
+  }
+  function chatFiles() {
+    const out = [];
+    state.messages.forEach((m) => {
+      for (const a of (m.attachments || [])) out.push({ kind: a.kind, name: a.name, path: a.path, url: a.url, size: a.size, from: "attached", img: a.kind === "image" ? (a.url || a.dataURL) : null });
+      for (const t of (m.toolUse || [])) {
+        let args = {}; try { args = JSON.parse(t.args || "{}"); } catch (e) {}
+        const p = args.path || args.file_path || args.filename || args.destination || args.target;
+        if (p && /write|edit|create|save|move|copy|mkdir|append/i.test(t.name) && !t.error) out.push({ kind: "written", name: String(p).split("/").pop(), path: String(p), from: t.name.replace(/^[^_]+__/, "") });
+      }
+    });
+    return out;
+  }
+  function updateChatTabs() {
+    const a = chatActivity().length, f = chatFiles().length;
+    $("tab-activity-n").textContent = a ? String(a) : ""; $("tab-files-n").textContent = f ? String(f) : "";
+    document.querySelectorAll("#chat-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.view === state.chatView));
+    $("activity-view").hidden = state.chatView !== "activity";
+    $("files-view").hidden = state.chatView !== "files";
+  }
+  function renderActivityView() {
+    const box = $("activity-view"); box.textContent = "";
+    const rows = chatActivity();
+    if (!rows.length) { box.innerHTML = '<div class="hint">No tool calls in this chat yet. Every call the model makes — arguments and results — lands here.</div>'; return; }
+    rows.forEach((r, k) => {
+      const d = document.createElement("div"); d.className = "act-row";
+      d.innerHTML = '<div class="h"><span class="t"></span><b></b><span class="st"></span><span class="mono" style="color:var(--muted);font-size:11.5px;flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span></div>';
+      d.querySelector(".t").textContent = "#" + (k + 1) + " \u00b7 turn " + Math.floor(r.turn / 2 + 1);
+      d.querySelector("b").textContent = r.t.name;
+      const st = d.querySelector(".st"); st.textContent = r.t.error ? "error" : (r.t.result === "running\u2026" ? "running" : "ok"); if (r.t.error) st.classList.add("err");
+      d.querySelector(".mono").textContent = oneLine(r.t.args, 160);
+      const det = document.createElement("details"); const sum = document.createElement("summary"); sum.textContent = "arguments and result"; det.appendChild(sum);
+      const pre = document.createElement("pre"); pre.textContent = "arguments\n" + prettyJson(r.t.args) + "\n\nresult\n" + String(r.t.result).slice(0, 20000); det.appendChild(pre);
+      d.appendChild(det); box.appendChild(d);
+    });
+  }
+  function renderFilesView() {
+    const box = $("files-view"); box.textContent = "";
+    const files = chatFiles();
+    if (!files.length) { box.innerHTML = '<div class="hint">Nothing yet. Files you attach and files the tools write show up here.</div>'; return; }
+    for (const f of files) {
+      const d = document.createElement("div"); d.className = "file-row";
+      if (f.img) { const img = document.createElement("img"); img.src = f.img; d.appendChild(img); }
+      else { const k = document.createElement("span"); k.className = "k"; k.textContent = f.kind === "written" ? "written" : f.kind; d.appendChild(k); }
+      const nm = document.createElement("span"); nm.className = "nm"; nm.textContent = f.name; d.appendChild(nm);
+      const pth = document.createElement("span"); pth.className = "pth"; pth.textContent = (f.path || "") + (f.size ? "  \u00b7  " + fmtBytes(f.size) : "") + (f.from && f.from !== "attached" ? "  \u00b7  by " + f.from : ""); pth.title = f.path || ""; d.appendChild(pth);
+      if (f.url) { const a = document.createElement("a"); a.href = f.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "open"; d.appendChild(a); }
+      box.appendChild(d);
+    }
+  }
+  document.querySelectorAll("#chat-tabs button").forEach((b) => (b.onclick = () => { state.chatView = b.dataset.view; renderMessages(); }));
   document.querySelectorAll("[data-chip]").forEach((b) => (b.onclick = () => send(b.dataset.chip)));
 
   /* ---------------- sessions ---------------- */
@@ -1124,6 +1374,8 @@
     state.session = null;
     state.ctxUsed = null;
     state.calib = null;
+    state.attachments = []; renderAttachChips();
+    state.chatView = "chat";
     go("playground");
     // a new chat keeps whatever skills are attached — they are a working set,
     // not a per-conversation choice, and clearing them surprises people
@@ -1136,13 +1388,13 @@
   function saveSession() {
     if (!state.messages.length) return;
     if (!state.session) state.session = "s-" + Date.now().toString(36);
-    const first = state.messages.find((m) => m.role === "user" && (m.content || "").trim());
+    const first = state.messages.find((m) => m.role === "user" && ((m.content || "").trim() || (m.attachments || []).length));
     const toks = state.messages.reduce((a, m) => a + (m.content || "").length, 0);
     fetch("/api/sessions", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: state.session,
-        title: first ? first.content.slice(0, 80) : "untitled",
+        title: first ? ((first.content || "").trim() || ("\ud83d\udcc4 " + (first.attachments || []).map((a) => a.name).join(", "))).slice(0, 80) : "untitled",
         model: state.model,
         turns: state.messages.length,
         chars: toks,
@@ -1168,6 +1420,10 @@
     if (m.traces) o.traces = m.traces;
     if (m.rating) o.rating = m.rating;
     if (m.skills && m.skills.length) o.skills = m.skills;
+    if (m.attachments && m.attachments.length) {
+      o.attachments = m.attachments.map((a) => ({ kind: a.kind, name: a.name, size: a.size, mime: a.mime, url: a.url, path: a.path,
+                                                 text: a.kind === "text" ? (a.text || "").slice(0, 120000) : undefined }));
+    }
     return o;
   }
 
@@ -1602,6 +1858,111 @@
     await renderPlugins();
     await loadSkills();              // a plugin's skills came or went
     if (state.cfg.mcp || on) loadTools();   // and its MCP servers
+  }
+
+  /* ---------------- scheduled jobs ---------------- */
+  let jobsTimer = null, jobsSelected = null;
+  function fmtWhen(ts) { if (!ts) return "\u2014"; const d = new Date(ts * 1000); return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }); }
+  function jobForm(existing) {
+    const j = existing || {};
+    const card = document.createElement("div"); card.className = "card"; card.style.gap = "8px";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono">cron or every N minutes \u00b7 one prompt, or one goal for the Sultan</span></div>';
+    head.querySelector("b").textContent = existing ? "Edit job" : "New job";
+    const tgl = document.createElement("button"); tgl.type = "button"; tgl.className = existing ? "ghost-btn" : "solid-btn"; tgl.textContent = existing ? "Close" : "\uff0b New job";
+    head.appendChild(tgl); card.appendChild(head);
+    const form = document.createElement("div"); form.hidden = !existing; form.style.cssText = "display:flex;flex-direction:column;gap:8px";
+    const name = inputEl("name"); name.value = j.name || "";
+    const kind = document.createElement("select"); kind.className = "text-input";
+    for (const [v, l] of [["chat", "chat: one prompt, with tools and skills"], ["agent", "agent: a goal for the Sultan and the court"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; kind.appendChild(o); }
+    kind.value = j.kind || "chat";
+    const skind = document.createElement("select"); skind.className = "text-input";
+    for (const [v, l] of [["cron", "cron expression"], ["interval", "every N minutes"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; skind.appendChild(o); }
+    skind.value = (j.schedule || {}).kind || "cron";
+    const cron = inputEl("minute hour day month weekday \u2014 e.g. 0 9 * * mon-fri"); cron.value = (j.schedule || {}).cron || "0 9 * * mon-fri";
+    const every = inputEl("minutes"); every.type = "number"; every.min = "1"; every.value = (j.schedule || {}).every_min || 60;
+    const prompt = textareaEl("What should the model do each time? Be concrete: what to look at, what to produce, where to write it.", 5); prompt.value = j.prompt || "";
+    const model = document.createElement("select"); model.className = "text-input";
+    for (const m of (state.models || [])) { const o = document.createElement("option"); o.value = m.id || m; o.textContent = m.id || m; model.appendChild(o); }
+    model.value = j.model || state.model || "";
+    const tools = document.createElement("input"); tools.type = "checkbox"; tools.checked = j.tools !== false;
+    const toolsRow = document.createElement("label"); toolsRow.style.cssText = "display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)"; toolsRow.appendChild(tools); toolsRow.appendChild(document.createTextNode("let it use the MCP tools"));
+    const skills = inputEl("skills to attach, comma-separated (optional): web-research, cve-lookup"); skills.value = (j.skills || []).join(", ");
+    const sys = textareaEl("standing instructions for this job (optional)", 2); sys.value = j.system || "";
+    const hops = inputEl("max tool hops"); hops.type = "number"; hops.min = "1"; hops.max = "30"; hops.value = j.max_hops || 12;
+    const chatOnly = [formRow("model", model), toolsRow, formRow("skills", skills), formRow("instructions", sys), formRow("max tool hops", hops)];
+    const cronRow = formRow("cron", cron), everyRow = formRow("every (minutes)", every);
+    const sync = () => { const c = kind.value === "chat"; chatOnly.forEach((e) => e.hidden = !c); cronRow.hidden = skind.value !== "cron"; everyRow.hidden = skind.value !== "interval"; prompt.placeholder = c ? "What should the model do each time? Be concrete: what to look at, what to produce, where to write it." : "The goal for the Sultan, as you would type it on the Agents screen."; };
+    kind.onchange = sync; skind.onchange = sync;
+    [formRow("name", name), formRow("type", kind), formRow("schedule", skind), cronRow, everyRow, formRow(kind.value === "chat" ? "prompt" : "goal", prompt)].concat(chatOnly).forEach((e) => form.appendChild(e));
+    sync();
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = existing ? "Save changes" : "Create job";
+    const note = document.createElement("span"); note.className = "hint";
+    row.appendChild(save); row.appendChild(note); form.appendChild(row); card.appendChild(form);
+    tgl.onclick = () => { if (existing) { renderJobs(); } else { form.hidden = !form.hidden; } };
+    save.onclick = async () => {
+      save.disabled = true; note.textContent = "saving\u2026";
+      const job = { id: j.id, name: name.value.trim(), kind: kind.value, prompt: prompt.value, enabled: j.enabled !== false,
+        schedule: skind.value === "cron" ? { kind: "cron", cron: cron.value.trim() } : { kind: "interval", every_min: parseInt(every.value, 10) || 60 },
+        model: model.value, tools: tools.checked, skills: skills.value.split(",").map((x) => x.trim()).filter(Boolean), system: sys.value, max_hops: parseInt(hops.value, 10) || 12 };
+      try {
+        const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", job }) });
+        const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+        jobsSelected = d.job.id; renderJobs();
+      } catch (e) { note.textContent = e.message; save.disabled = false; }
+    };
+    return card;
+  }
+  async function renderJobs() {
+    let d = { jobs: [], running: null };
+    try { d = await (await fetch("/api/jobs")).json(); } catch (e) {}
+    const left = $("jobs-left"); left.textContent = "";
+    const on = d.jobs.filter((j) => j.enabled).length;
+    $("jobs-sub").textContent = d.jobs.length + " jobs \u00b7 " + on + " enabled" + (d.running ? " \u00b7 running " + d.running : "");
+    left.appendChild(jobForm(null));
+    if (!d.jobs.length) { const e = document.createElement("div"); e.className = "hint"; e.textContent = "No jobs yet. A morning summary of the trace log, a nightly CVE sweep for your products, a weekly report written to a file: anything you would ask in the Playground, on a timer."; left.appendChild(e); }
+    for (const j of d.jobs) {
+      const card = document.createElement("div"); card.className = "card" + (jobsSelected === j.id ? " skill-card on" : ""); card.style.gap = "8px"; card.style.cursor = "pointer";
+      const head = document.createElement("div"); head.className = "skill-head";
+      head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div><span class="src mono" style="text-align:right"></span>';
+      head.querySelector("b").textContent = (j.enabled ? "" : "\u23f8 ") + j.name;
+      head.querySelectorAll(".src")[0].textContent = j.kind + " \u00b7 " + j.schedule_text + (j.model && j.kind === "chat" ? " \u00b7 " + j.model : "");
+      head.querySelectorAll(".src")[1].textContent = (j.enabled && j.next_run ? "next " + fmtWhen(j.next_run) : "paused") + (d.running === j.id ? " \u00b7 RUNNING" : "");
+      const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = j.prompt.length > 220 ? j.prompt.slice(0, 220) + "\u2026" : j.prompt;
+      const last = document.createElement("div"); last.className = "skill-tags mono";
+      last.textContent = j.last ? ("last " + fmtWhen(j.last.ts) + " \u00b7 " + (j.last.ok ? "ok" : "failed") + " \u00b7 " + Math.round((j.last.ms || 0) / 1000) + " s" + (j.last.tokens ? " \u00b7 " + j.last.tokens + " tok" : "") + " \u00b7 " + (j.runs || 0) + " runs") : "never run";
+      const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
+      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = (e) => { e.stopPropagation(); fn(); }; acts.appendChild(b); };
+      const post = async (payload) => { try { const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const x = await r.json(); if (x.error) alert(x.error); } catch (e) { alert(e.message); } renderJobs(); };
+      mk("run now", "solid-btn", () => post({ action: "run_now", id: j.id }));
+      mk(j.enabled ? "pause" : "resume", "ghost-btn", () => post({ action: "toggle", id: j.id }));
+      mk("edit", "ghost-btn", () => { const pane = $("jobs-detail"); pane.textContent = ""; pane.appendChild(jobForm(j)); });
+      mk("delete", "rate-btn bad", () => { if (confirm("Delete job \"" + j.name + "\" and its history?")) post({ action: "delete", id: j.id }); });
+      card.appendChild(head); card.appendChild(desc); card.appendChild(last); card.appendChild(acts);
+      card.onclick = () => { jobsSelected = j.id; showJobRuns(j); };
+      left.appendChild(card);
+    }
+    if (jobsSelected) { const j = d.jobs.find((x) => x.id === jobsSelected); if (j) showJobRuns(j); }
+    clearInterval(jobsTimer);
+    jobsTimer = setInterval(() => { if (state.screen === "jobs") renderJobs(); else clearInterval(jobsTimer); }, 15000);
+  }
+  async function showJobRuns(j) {
+    const pane = $("jobs-detail"); pane.textContent = "";
+    const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>';
+    h.querySelector("b").textContent = j.name; h.querySelector(".src").textContent = j.kind + " \u00b7 " + j.schedule_text; pane.appendChild(h);
+    let d = { runs: [] };
+    try { d = await (await fetch("/api/jobs/runs?id=" + encodeURIComponent(j.id))).json(); } catch (e) {}
+    if (!d.runs.length) { const n = document.createElement("div"); n.className = "hint"; n.textContent = "No runs yet. Use \"run now\" to try it."; pane.appendChild(n); return; }
+    for (const r of d.runs) {
+      const c = document.createElement("div"); c.className = "card"; c.style.gap = "6px";
+      const top = document.createElement("div"); top.className = "skill-tags mono";
+      top.textContent = fmtWhen(r.ts) + " \u00b7 " + r.trigger + " \u00b7 " + (r.ok ? "ok" : "FAILED") + " \u00b7 " + Math.round((r.ms || 0) / 1000) + " s" + (r.hops ? " \u00b7 " + r.hops + " hops" : "") + (r.tokens ? " \u00b7 " + r.tokens + " tok" : "");
+      c.appendChild(top);
+      const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap"; pre.style.maxHeight = "420px";
+      pre.textContent = r.error ? ("error: " + r.error) : (r.output || "(no output)");
+      c.appendChild(pre); pane.appendChild(c);
+    }
   }
 
   /* ---------------- MCP screen ---------------- */

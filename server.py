@@ -44,6 +44,7 @@ import skills as skillmod
 import agents as agentmod
 import recipes as recipemod
 import mcp_catalog as catmod
+import jobs as jobmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -106,7 +107,7 @@ def agent_run_timeout(cfg):
 #                   the client learns the real figure from its overflow error
 #                   and uses that for the rest of the session.
 CAPS_FALLBACK = {"tools": True, "effort": [], "ctk": {}, "strip_reasoning": True,
-                 "ctx": 131072}
+                 "ctx": 131072, "vision": False}
 DEFAULT_CAPS = {
     # vLLM defaults DeepSeek-V4 thinking OFF (DeepSeek's own API defaults it
     # ON at high) — so it must be asked for explicitly. The tokenizer wrapper
@@ -124,7 +125,7 @@ DEFAULT_CAPS = {
     # line (or a model_capabilities override) must follow.
     "deepseek-v4-vision": {"tools": True, "effort": ["max"], "strip_reasoning": False,
                            "ctk": {"thinking": True, "reasoning_effort": "max"},
-                           "ctx": 262144},
+                           "ctx": 262144, "vision": True},
     # Inkling's renderer accepts none/minimal/low/medium/high/xhigh/max —
     # 'minimal', not 'min': an unknown name resolves to None and the template
     # falls back to its 0.9 default, i.e. the dial silently stops working.
@@ -305,6 +306,170 @@ def rack_overview(max_age=15):
         val["status_raw"] = "rack status failed: %s" % str(e)[:120]
     _rack_cache.update(at=now, val=val)
     return val
+
+
+# ---------------------------------------------------------------- uploads --
+# Files attached in the composer. Images travel to the model as base64 in the
+# request; everything is also saved here so the tools (filesystem, terminal)
+# can read it and the Files tab can open it. Default under data/; point
+# `uploads_dir` at the filesystem server's root to make attachments reachable
+# by the model's tools.
+UPLOAD_MAX = 25 * 1024 * 1024
+_SAFE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
+
+
+def uploads_root():
+    root = os.path.expanduser(CFG.get("uploads_dir") or os.path.join(DATA, "uploads"))
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def save_upload(session, name, data):
+    sess = _SAFE_NAME.sub("_", str(session or "nosession"))[:48] or "nosession"
+    base = _SAFE_NAME.sub("_", os.path.basename(str(name or "file")))[:120] or "file"
+    d = os.path.join(uploads_root(), sess)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, base)
+    stem, ext = os.path.splitext(base)
+    n = 1
+    while os.path.exists(path):          # never overwrite an earlier attachment
+        n += 1
+        path = os.path.join(d, "%s-%d%s" % (stem, n, ext))
+    with open(path, "wb") as f:
+        f.write(data)
+    return {"name": os.path.basename(path), "path": path, "size": len(data),
+            "url": "/api/uploads/%s/%s" % (sess, os.path.basename(path))}
+
+
+def trace_safe(payload):
+    """The request as logged: image data URLs replaced by their size, so a
+    screenshot does not become 300 KB of base64 in every trace line."""
+    try:
+        msgs = payload.get("messages")
+        if not isinstance(msgs, list):
+            return payload
+        out = dict(payload)
+        new_msgs = []
+        for m in msgs:
+            c = m.get("content") if isinstance(m, dict) else None
+            if isinstance(c, list):
+                parts = []
+                for part in c:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        url = str((part.get("image_url") or {}).get("url") or "")
+                        if url.startswith("data:"):
+                            head = url.split(",", 1)[0]
+                            part = {"type": "image_url", "image_url": {"url": "%s,<%d bytes>" % (head, len(url))}}
+                    parts.append(part)
+                m = dict(m, content=parts)
+            new_msgs.append(m)
+        out["messages"] = new_msgs
+        return out
+    except Exception:   # noqa: BLE001 - logging must never break the chat
+        return payload
+
+
+# ------------------------------------------------------------------ jobs --
+# Scheduled work: the console wakes up and has the model do a task, with the
+# same tools, skills and model caps a chat turn would use, or hands a goal
+# to the agent harness. The scheduler thread starts with the server.
+JOBS = jobmod.JobStore(DATA)
+SCHED = None
+
+
+def upstream_json(path, payload, timeout=900):
+    req = upstream_request(path, payload, "POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def run_job(job):
+    """One run. chat: a bounded tool loop against the gateway, like the
+    Playground does but server-side. agent: a harness goal. Returns
+    {output, hops, tokens}."""
+    if job.get("kind") == "agent":
+        st = agentmod.status(CFG)
+        if not st.get("enabled"):
+            raise RuntimeError("agents are disabled in config.json")
+        cmd, cwd = agentmod.build_command(CFG, job["prompt"])
+        lines = []
+        stop = threading.Event()
+        code, killed = agentmod.run_streaming(cmd, cwd, lambda t: lines.append(t), stop,
+                                             timeout_s=agent_run_timeout(CFG))
+        TRACE.log("agent_run", id="job-" + job["id"], goal=job["prompt"][:8000], host=st["host"], mode=st["mode"],
+                  isolated=st["isolated"], exit=code, killed=killed or False, lines=len(lines), output=lines[-400:],
+                  via="job")
+        if code != 0:
+            raise RuntimeError("harness exited %s%s\n%s" % (code, " (" + killed + ")" if killed else "", "\n".join(lines[-20:])))
+        return {"output": "\n".join(lines), "hops": None, "tokens": None}
+
+    model = job.get("model") or ""
+    if not model:
+        try:
+            with urllib.request.urlopen(upstream_request("/models"), timeout=10) as r:
+                ids = [m["id"] for m in json.load(r).get("data", [])]
+            model = ids[0] if ids else ""
+        except Exception:   # noqa: BLE001
+            pass
+    if not model:
+        raise RuntimeError("no model configured for the job and none offered upstream")
+    caps = caps_for(model)
+    sys_parts = []
+    bodies = skill_catalog().bodies(job.get("skills") or [])
+    for name, body in bodies.items():
+        if body:
+            sys_parts.append("# Skill: " + name + "\n\n" + body)
+    if job.get("system"):
+        sys_parts.append(job["system"])
+    sys_parts.append("You are running as a scheduled job named %r at %s. There is no human in the loop: do the task "
+                     "with the tools you have, then write the result as your final message." % (job["name"], time.strftime("%Y-%m-%d %H:%M")))
+    msgs = [{"role": "system", "content": "\n\n".join(sys_parts)}, {"role": "user", "content": job["prompt"]}]
+    tools = None
+    if job.get("tools", True) and caps.get("tools", True):
+        try:
+            tools = mcp_host().openai_tools() or None
+        except Exception:   # noqa: BLE001
+            tools = None
+    total_tokens = 0
+    hops = 0
+    for hop in range(max(1, int(job.get("max_hops") or 12))):
+        payload = {"model": model, "messages": msgs, "max_tokens": 8000, "temperature": 0.3}
+        if caps.get("ctk"):
+            payload["chat_template_kwargs"] = dict(caps["ctk"])
+        if tools:
+            payload["tools"] = tools
+        resp = upstream_json("/chat/completions", payload)
+        TRACE.log("chat", status=200, request=trace_safe(payload), response=resp, purpose="job", job=job["id"])
+        usage = resp.get("usage") or {}
+        total_tokens += int(usage.get("total_tokens") or 0)
+        choice = (resp.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        calls = msg.get("tool_calls") or []
+        hops += 1
+        if not calls:
+            return {"output": msg.get("content") or "", "hops": hops, "tokens": total_tokens}
+        entry = {"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls}
+        if not caps.get("strip_reasoning", True) and msg.get("reasoning_content"):
+            entry["reasoning_content"] = msg["reasoning_content"]
+        msgs.append(entry)
+        for tc in calls:
+            fn = tc.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            text, is_err = mcp_host().call(fn.get("name") or "", args)
+            TRACE.log("tool", name=fn.get("name"), args=args, result=str(text)[:4000], is_error=bool(is_err), purpose="job", job=job["id"])
+            msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": str(text)[:20000]})
+    return {"output": "(stopped after %d tool hops without a final answer)" % hops, "hops": hops, "tokens": total_tokens}
+
+
+def start_scheduler():
+    global SCHED
+    if SCHED is None:
+        SCHED = jobmod.Scheduler(JOBS, run_job, log=print)
+        SCHED.start()
+    return SCHED
 
 
 def render_skill_md(meta, body):
@@ -1086,6 +1251,32 @@ class Handler(BaseHTTPRequestHandler):
                                     for n in sorted(found)], "warnings": warnings})
         elif path == "/api/rack":
             self._json(rack_overview())
+        elif path.startswith("/api/uploads/"):
+            rel = path[len("/api/uploads/"):]
+            parts = [urllib.parse.unquote(x) for x in rel.split("/") if x]
+            if len(parts) != 2 or any(_SAFE_NAME.sub("_", x) != x for x in parts):
+                self._json({"error": "bad path"}, 400)
+                return
+            fp = os.path.join(uploads_root(), parts[0], parts[1])
+            if not os.path.isfile(fp):
+                self._json({"error": "no such file"}, 404)
+                return
+            import mimetypes
+            ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", "inline; filename=\"%s\"" % parts[1])
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.end_headers()
+            self.wfile.write(data)
+        elif path == "/api/jobs":
+            self._json({"jobs": JOBS.list(), "running": SCHED.running if SCHED else None})
+        elif path == "/api/jobs/runs":
+            jid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
+            self._json({"id": jid, "runs": JOBS.runs(jid, 30)})
         elif path == "/api/mcp/catalog":
             try:
                 st = mcp_host().status
@@ -1151,7 +1342,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -1179,6 +1370,61 @@ class Handler(BaseHTTPRequestHandler):
             self._skill_admin(body)
         elif path == "/api/recipes":
             self._recipes(body)
+        elif path == "/api/jobs":
+            if not isinstance(body, dict):
+                self._json({"error": "expected object"}, 400)
+                return
+            action = body.get("action") or "save"
+            try:
+                if action == "save":
+                    job = JOBS.upsert(body.get("job") or body)
+                    TRACE.log("job", action="save", id=job["id"], name=job["name"], schedule=job["schedule"], kind=job["kind"])
+                    self._json({"ok": True, "job": job, "jobs": JOBS.list()})
+                elif action == "delete":
+                    JOBS.delete(str(body.get("id") or ""))
+                    TRACE.log("job", action="delete", id=body.get("id"))
+                    self._json({"ok": True, "jobs": JOBS.list()})
+                elif action == "toggle":
+                    j = JOBS.get(str(body.get("id") or ""))
+                    if not j:
+                        self._json({"error": "no such job"}, 404)
+                        return
+                    JOBS.set_enabled(j["id"], not j.get("enabled", True))
+                    self._json({"ok": True, "jobs": JOBS.list()})
+                elif action == "run_now":
+                    j = JOBS.get(str(body.get("id") or ""))
+                    if not j:
+                        self._json({"error": "no such job"}, 404)
+                        return
+                    if SCHED and SCHED.running:
+                        self._json({"error": "a job is already running (%s); try again when it finishes" % SCHED.running}, 409)
+                        return
+                    threading.Thread(target=lambda: start_scheduler().run_job(j, "manual"), daemon=True).start()
+                    self._json({"ok": True, "started": j["id"]})
+                else:
+                    self._json({"error": "unknown action"}, 400)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+        elif path == "/api/upload":
+            import base64
+            if not isinstance(body, dict) or not body.get("data"):
+                self._json({"error": "expected {session, name, data(base64)}"}, 400)
+                return
+            try:
+                raw = base64.b64decode(str(body["data"]).split(",", 1)[-1], validate=False)
+            except Exception:   # noqa: BLE001
+                self._json({"error": "data is not base64"}, 400)
+                return
+            if len(raw) > UPLOAD_MAX:
+                self._json({"error": "file larger than %d MB" % (UPLOAD_MAX // 2**20)}, 413)
+                return
+            try:
+                info = save_upload(body.get("session"), body.get("name"), raw)
+            except OSError as e:
+                self._json({"error": "could not save: %s" % e}, 500)
+                return
+            TRACE.log("upload", session=body.get("session"), name=info["name"], size=info["size"], path=info["path"])
+            self._json(dict(info, ok=True))
         elif path == "/api/rack":
             self._rack(body)
         elif path == "/api/agents":
@@ -1807,12 +2053,12 @@ class Handler(BaseHTTPRequestHandler):
                     resp = attempt(payload)
                 else:
                     msg = upstream_message(detail)[:1000]
-                    TRACE.log("chat", status=e.code, request=payload, response=None, error=msg,
+                    TRACE.log("chat", status=e.code, request=trace_safe(payload), response=None, error=msg,
                               ms=int((time.time() - started) * 1000), **who)
                     self._json({"error": msg}, e.code)
                     return
         except Exception as e:
-            TRACE.log("chat", status=502, request=payload, response=None, error=str(e)[:500],
+            TRACE.log("chat", status=502, request=trace_safe(payload), response=None, error=str(e)[:500],
                       ms=int((time.time() - started) * 1000), **who)
             self._json({"error": str(e)}, 502)
             return
@@ -1852,7 +2098,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
         finally:
             resp.close()
-            TRACE.log("chat", status=200, request=payload, response=cap.result(started),
+            TRACE.log("chat", status=200, request=trace_safe(payload), response=cap.result(started),
                       ms=int((time.time() - started) * 1000), **who)
 
 
@@ -1870,8 +2116,9 @@ def main():
             "by design. Reach it via SSH tunnel or overlay network." % args.bind)
     CFG["bind"] = args.bind
     srv = ThreadingHTTPServer((args.bind, args.port), Handler)
-    print("ByteBunker Console on http://%s:%d  (upstream %s)" %
-          (args.bind, args.port, CFG.get("upstream_url")))
+    start_scheduler()
+    print("ByteBunker Console on http://%s:%d  (upstream %s)  jobs: %d" %
+          (args.bind, args.port, CFG.get("upstream_url"), len(JOBS.jobs)))
     srv.serve_forever()
 
 

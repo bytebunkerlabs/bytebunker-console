@@ -38,6 +38,7 @@
       <button data-nav="plugins"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6v2.2M10 2.6v2.2M4 4.8h8v3.4a4 4 0 0 1-8 0zM8 12.2v1.6"/></svg><span>Plugins</span></button>
       <button data-nav="mcp"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="2"/><path d="M5.2 7l2 1.6-2 1.6M8.6 10.2h2.4"/></svg><span>MCP</span></button>
       <button data-nav="agents"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="5" r="2.4"/><path d="M3.4 13.2a4.6 4.6 0 0 1 9.2 0"/></svg><span>Agents</span></button>
+      <button data-nav="jobs"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.4 1.6"/></svg><span>Jobs</span></button>
     </nav>
 
     <div class="nav-label">Observe</div>
@@ -69,6 +70,11 @@
         <button class="ghost-btn" id="code-btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 5.5 3.2 8 6 10.5M10 5.5 12.8 8 10 10.5"/></svg>View code</button>
         <button class="icon-btn" id="panel-btn" title="Toggle panel" style="width:30px;height:30px;border-radius:8px"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M10.4 3v10"/></svg></button>
       </header>
+      <div class="chat-tabs" id="chat-tabs" hidden>
+        <button class="on" data-view="chat">Chat</button>
+        <button data-view="activity">Activity <span class="n" id="tab-activity-n"></span></button>
+        <button data-view="files">Files <span class="n" id="tab-files-n"></span></button>
+      </div>
       <div class="transcript" id="transcript">
         <div class="empty" id="empty-state">
           <h2>Your metal, your weights.</h2>
@@ -80,12 +86,17 @@
           </div>
         </div>
         <div class="msgs" id="msgs" hidden></div>
+        <div class="side-view" id="activity-view" hidden></div>
+        <div class="side-view" id="files-view" hidden></div>
       </div>
       <div class="composer-wrap">
         <div class="composer">
           <div id="active-skills" class="active-skills" hidden></div>
-          <div class="composer-box">
-            <textarea id="input" rows="1" placeholder="Ask the rack something…"></textarea>
+          <div id="attach-chips" class="attach-chips" hidden></div>
+          <div class="composer-box" id="composer-box">
+            <button class="attach-btn" id="attach-btn" title="Attach files or images (or drop / paste them)" type="button"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 5.4 6.2 9.8a1.6 1.6 0 0 0 2.3 2.3l4.6-4.6a3 3 0 0 0-4.3-4.3L4 7.9a4.2 4.2 0 0 0 6 6l3-3"/></svg></button>
+            <input type="file" id="attach-input" multiple hidden>
+            <textarea id="input" rows="1" placeholder="Ask the rack something… (drop files or paste images here)"></textarea>
             <button class="send-btn" id="send-btn" title="Send"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.8V3.5M4.2 7.2 8 3.4l3.8 3.8"/></svg></button>
           </div>
           <div class="serving-line mono"><span id="serving-line">connecting…</span></div>
@@ -276,6 +287,15 @@
     </section>
 
     <!-- Usage -->
+    <!-- Scheduled jobs -->
+    <section class="screen" id="screen-jobs">
+      <header><h1>Jobs</h1><span class="sub">The console wakes up on a schedule and the model does the work · <span id="jobs-sub">—</span></span></header>
+      <div class="scroll agents-grid">
+        <div class="agents-left" id="jobs-left"></div>
+        <aside class="agents-detail" id="jobs-detail"><div class="hint">Pick a job to see its runs and what the model produced. A chat job is one prompt with the console's tools and skills; an agent job hands a goal to the harness. Times are the console host's local time.</div></aside>
+      </div>
+    </section>
+
     <!-- MCP servers -->
     <section class="screen" id="screen-mcp">
       <header><h1>MCP</h1><span class="sub">Local tool servers the model calls through the console · <span id="mcp-sub">—</span></span></header>
