@@ -1378,7 +1378,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if action == "save":
                     job = JOBS.upsert(body.get("job") or body)
-                    TRACE.log("job", action="save", id=job["id"], name=job["name"], schedule=job["schedule"], kind=job["kind"])
+                    TRACE.log("job", action="save", id=job["id"], name=job["name"], schedule=job["schedule"], job_kind=job["kind"])
                     self._json({"ok": True, "job": job, "jobs": JOBS.list()})
                 elif action == "delete":
                     JOBS.delete(str(body.get("id") or ""))
