@@ -24,6 +24,7 @@ Config (config.json):
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import threading
@@ -43,11 +44,55 @@ def status(CFG):
     return {
         "enabled": bool(a.get("enabled")),
         "mode": "ssh" if ssh else "local",
-        "host": ssh or "localhost (hermes)",
+        "host": ssh or "this machine",
         "dir": a.get("dir") or "",
         "isolated": bool(ssh),           # local == same host as the console: not isolated
         "configured": bool(a.get("dir")),
     }
+
+
+def ssh_available():
+    """The OpenSSH client: built into macOS and Linux; an optional feature
+    on Windows 10/11 (Settings > Apps > Optional features > OpenSSH Client)."""
+    import shutil
+    import sys as _sys
+    if shutil.which("ssh"):
+        return True
+    return _sys.platform == "win32" and os.path.exists(r"C:\Windows\System32\OpenSSH\ssh.exe")
+
+
+def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py"):
+    """Can this console start the harness on that host? One ssh round trip
+    that reports what is there; nothing is installed or changed."""
+    if not ssh_available():
+        return {"ok": False, "error": "no ssh client on this machine" + (
+            ": install it from Settings > Apps > Optional features > OpenSSH Client" if os.name == "nt" else "")}
+    d = directory or "~/bytebunker-harness"
+    probe = ("cd %s 2>/dev/null || { echo NO_DIR; exit 0; }; "
+             "test -f %s && echo HARNESS_OK || echo NO_HARNESS; "
+             "(command -v podman || command -v docker) >/dev/null 2>&1 && echo RUNTIME_OK || echo NO_RUNTIME; "
+             "%s --version >/dev/null 2>&1 && echo LAUNCHER_OK || echo NO_LAUNCHER; "
+             "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0])
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, probe],
+                           capture_output=True, text=True, timeout=30)
+    except Exception as e:   # noqa: BLE001
+        return {"ok": False, "error": "ssh failed: %s" % str(e)[:160]}
+    out = (r.stdout or "").strip()
+    if r.returncode != 0 and not out:
+        err = (r.stderr or "no answer").strip()[-200:]
+        if "Host key verification failed" in err:
+            err += (" This machine has not verified %s's host key yet. Connect once from a terminal "
+                    "(ssh %s), check the fingerprint and accept it, then test again." % (ssh, ssh))
+        elif "Permission denied" in err:
+            err += " Add this machine's public key to the worker's ~/.ssh/authorized_keys (ssh-copy-id %s)." % ssh
+        return {"ok": False, "error": "ssh %s: %s" % (ssh, err)}
+    checks = {"reachable": True, "harness": "HARNESS_OK" in out, "container runtime": "RUNTIME_OK" in out,
+              "launcher (%s)" % python.split()[0]: "LAUNCHER_OK" in out}
+    if "NO_DIR" in out:
+        checks["harness"] = False
+    system = out.splitlines()[-1] if out and "_OK" not in out.splitlines()[-1] and "NO_" not in out.splitlines()[-1] else ""
+    return {"ok": all(checks.values()), "checks": checks, "system": system}
 
 
 def build_command(CFG, goal):

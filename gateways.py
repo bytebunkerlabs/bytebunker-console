@@ -79,6 +79,35 @@ class Registry:
         self.status = {}            # gateway name -> {ok, models, ms, error, kind}
         self.at = 0
 
+    def live(self):
+        """Live stats for every enabled gateway; tokens/s from the counter
+        delta since the previous call."""
+        gws = self.gateways()
+        out = {}
+        if not gws:
+            return out
+
+        def one(g):
+            try:
+                return g, live_stats(g), None
+            except Exception as e:   # noqa: BLE001
+                return g, {}, str(e)[:120]
+        prev = getattr(self, "_live_prev", {})
+        now = time.time()
+        with ThreadPoolExecutor(max_workers=min(8, len(gws))) as pool:
+            for g, st, err in pool.map(one, gws):
+                if "gen_total" in st:
+                    p = prev.get(g["name"])
+                    if p and 0 < now - p[0] < 600 and st["gen_total"] >= p[1]:
+                        st["gen_tps"] = round((st["gen_total"] - p[1]) / (now - p[0]), 1)
+                        st["prompt_tps"] = round((st["prompt_total"] - p[2]) / (now - p[0]), 1)
+                    prev[g["name"]] = (now, st["gen_total"], st["prompt_total"])
+                if err:
+                    st["error"] = err
+                out[g["name"]] = st
+        self._live_prev = prev
+        return out
+
     def gateways(self, enabled_only=True):
         gws = normalize(self.cfg)
         return [g for g in gws if g.get("enabled", True)] if enabled_only else gws
@@ -147,6 +176,44 @@ class Registry:
             gws = self.gateways()
             g = gws[0] if gws else None
         return model, g
+
+
+def _base(url):
+    return url[:-3] if url.endswith("/v1") else url
+
+
+def live_stats(g):
+    """What an engine is doing right now, from its own endpoints: vLLM's
+    Prometheus /metrics, Ollama's /api/ps. Routers (litellm) and engines
+    without such endpoints return {} — their model list is all we know."""
+    kind = g.get("kind") or ""
+    base = _base(g["url"])
+    if kind == "vllm":
+        req = urllib.request.Request(base + "/metrics")
+        if g.get("key"):
+            req.add_header("Authorization", "Bearer " + g["key"])
+        with urllib.request.urlopen(req, timeout=4) as r:
+            txt = r.read(4_000_000).decode("utf-8", "replace")
+        vals = {}
+        for ln in txt.splitlines():
+            if not ln.startswith("vllm:") or " " not in ln:
+                continue
+            name, v = ln.rsplit(" ", 1)
+            try:
+                vals[name.split("{", 1)[0]] = vals.get(name.split("{", 1)[0], 0.0) + float(v)
+            except ValueError:
+                continue
+        kv = vals.get("vllm:kv_cache_usage_perc", vals.get("vllm:gpu_cache_usage_perc", 0.0))
+        return {"running": int(vals.get("vllm:num_requests_running", 0)),
+                "waiting": int(vals.get("vllm:num_requests_waiting", 0)),
+                "kv_pct": round(100.0 * kv, 1),
+                "gen_total": vals.get("vllm:generation_tokens_total", 0.0),
+                "prompt_total": vals.get("vllm:prompt_tokens_total", 0.0)}
+    if kind == "ollama":
+        ps = get_json(base + "/api/ps", g.get("key"), timeout=4)
+        return {"loaded": [{"name": m.get("name"), "vram_gb": round((m.get("size_vram") or 0) / 2 ** 30, 1)}
+                           for m in ps.get("models") or []]}
+    return {}
 
 
 def get_json(url, key=None, timeout=6):

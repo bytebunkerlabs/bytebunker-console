@@ -72,7 +72,6 @@ jobs:
       - name: Smoke test, window (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        continue-on-error: true      # needs the WebView2 runtime on the runner image
         run: |
           $env:BYTEBUNKER_HOME = "$env:RUNNER_TEMP\bb-gui"
           $p = Start-Process -FilePath desktop/dist/ByteBunker/ByteBunker.exe -ArgumentList "--smoke-gui","$env:RUNNER_TEMP\smoke.json" -Wait -PassThru

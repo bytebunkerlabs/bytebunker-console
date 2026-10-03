@@ -59,7 +59,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "gateways", "models", "recipes", "cluster", "sparkdash", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "gateways", "models", "recipes", "cluster", "sparkdash", "settings", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -73,6 +73,7 @@
     if (s === "mcp") renderMcp();
     if (s === "jobs") renderJobs();
     if (s === "gateways") renderGateways();
+    if (s === "settings") renderSettings();
     if (s === "agents") renderAgents();
     if (s === "recipes") renderRecipes();
     if (s === "sparkdash") renderSparkdash();
@@ -1887,6 +1888,59 @@
     if (state.cfg.mcp || on) loadTools();   // and its MCP servers
   }
 
+  /* ---------------- settings ---------------- */
+  async function renderSettings() {
+    let d = {};
+    try { d = await (await fetch("/api/settings")).json(); } catch (e) {}
+    $("settings-sub").textContent = (d.desktop ? "ByteBunker " + (d.version || "") + " \u00b7 desktop" : "console") + " \u00b7 " + (d.platform || "") + " \u00b7 Python " + (d.python || "");
+    const box = $("settings-box"); box.textContent = "";
+    const card = (title, sub) => { const c = document.createElement("div"); c.className = "card"; c.style.gap = "10px"; const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>'; h.querySelector("b").textContent = title; h.querySelector(".src").textContent = sub || ""; c.appendChild(h); box.appendChild(c); return c; };
+    const line = (c, k, v) => { const r = document.createElement("div"); r.className = "mono"; r.style.cssText = "font-size:12px;color:var(--muted);word-break:break-all"; r.textContent = k + "  " + v; c.appendChild(r); return r; };
+    const api = window.pywebview && window.pywebview.api;
+    // where things live
+    const where = card("Your data", "everything you own lives here; the app itself holds none of it");
+    line(where, "folder", d.home_dir || ""); line(where, "config", d.config_path || ""); line(where, "traces, usage, sessions", d.data_dir || ""); line(where, "attachments", d.uploads_dir || "");
+    const wrow = document.createElement("div"); wrow.style.cssText = "display:flex;gap:10px;flex-wrap:wrap";
+    if (api && api.open_folder) { const b = document.createElement("button"); b.type = "button"; b.className = "ghost-btn"; b.textContent = "Open folder"; b.onclick = () => api.open_folder(d.home_dir); wrow.appendChild(b); }
+    const ex = document.createElement("button"); ex.type = "button"; ex.className = "ghost-btn"; ex.textContent = "Export everything (JSONL)"; ex.onclick = () => openOut("/api/export"); wrow.appendChild(ex);
+    where.appendChild(wrow);
+    // name
+    const who = card("Name", "shown in the sidebar and stamped on exports");
+    const user = inputEl("name"); user.value = (d.identity || {}).user || ""; const host = inputEl("machine"); host.value = (d.identity || {}).host || "";
+    who.appendChild(formRow("name", user)); who.appendChild(formRow("machine", host));
+    // rates
+    const rt = card("Frontier-API equivalent", "the price per million tokens Usage compares your local tokens against");
+    const rin = inputEl("input $/Mtok"); rin.type = "number"; rin.step = "0.01"; rin.value = (d.rates || {}).input ?? 3;
+    const rout = inputEl("output $/Mtok"); rout.type = "number"; rout.step = "0.01"; rout.value = (d.rates || {}).output ?? 15;
+    rt.appendChild(formRow("input, $ per million tokens", rin)); rt.appendChild(formRow("output, $ per million tokens", rout));
+    const srow = document.createElement("div"); srow.style.cssText = "display:flex;gap:10px;align-items:center";
+    const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = "Save";
+    const note = document.createElement("span"); note.className = "hint";
+    save.onclick = async () => {
+      try { await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: user.value, host: host.value, rates: { input: parseFloat(rin.value), output: parseFloat(rout.value) } }) }); note.textContent = "saved"; await refreshConfig(); $("who-user").textContent = state.cfg.identity.user || "local"; $("who-host").textContent = state.cfg.identity.host || ""; } catch (e) { note.textContent = e.message; }
+    };
+    srow.appendChild(save); srow.appendChild(note); rt.appendChild(srow);
+    // updates: only when asked — the app does not phone home on its own
+    if (d.desktop) {
+      const up = card("Updates", "checked only when you press the button; nothing is downloaded or installed");
+      const urow = document.createElement("div"); urow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+      const ub = document.createElement("button"); ub.type = "button"; ub.className = "ghost-btn"; ub.textContent = "Check for updates";
+      const un = document.createElement("span"); un.className = "hint";
+      ub.onclick = async () => {
+        un.textContent = "asking GitHub\u2026";
+        try {
+          const r = await (await fetch("https://api.github.com/repos/bytebunkerlabs/bytebunker-console/releases/latest")).json();
+          const latest = String(r.tag_name || "").replace(/^v/, "");
+          if (!latest) { un.textContent = "no published release yet"; return; }
+          if (latest === d.version) { un.textContent = "you have the latest (" + latest + ")"; return; }
+          un.textContent = latest + " is available \u2014 ";
+          const a = document.createElement("button"); a.type = "button"; a.className = "linky"; a.textContent = "open the release page"; a.onclick = () => openOut(r.html_url); un.appendChild(a);
+        } catch (e) { un.textContent = "could not reach GitHub: " + e.message; }
+      };
+      urow.appendChild(ub); urow.appendChild(un); up.appendChild(urow);
+    }
+  }
+
   /* ---------------- gateways ---------------- */
   function openOut(u) {
     const abs = new URL(u, location.href).href;
@@ -1952,6 +2006,7 @@
       card.appendChild(head);
       if (g.error) { const e = document.createElement("div"); e.className = "hint"; e.style.color = "var(--err)"; e.textContent = g.error; card.appendChild(e); }
       const ml = document.createElement("div"); ml.className = "skill-tags mono"; ml.textContent = g.models.length ? g.models.slice(0, 12).join(", ") + (g.models.length > 12 ? " +" + (g.models.length - 12) : "") : ""; card.appendChild(ml);
+      const lv = document.createElement("div"); lv.className = "mono gw-live"; lv.dataset.gw = g.name; lv.style.cssText = "font-size:11.5px;color:var(--muted)"; card.appendChild(lv);
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
       mk(g.enabled ? "disable" : "enable", "ghost-btn", async () => { try { await gwPost({ action: "toggle", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
@@ -2011,6 +2066,27 @@
       dbtn.disabled = false;
     };
     if (state.autoDiscover) { state.autoDiscover = false; dbtn.click(); }
+    pollGatewayLive();
+    clearInterval(state.gwLiveTimer);
+    state.gwLiveTimer = setInterval(() => { if (state.screen === "gateways") pollGatewayLive(); else clearInterval(state.gwLiveTimer); }, 15000);
+  }
+  // what each engine is doing now, filled into the cards without rebuilding
+  // the screen (a rebuild would eat a half-typed address)
+  async function pollGatewayLive() {
+    let d = {};
+    try { d = await (await fetch("/api/gateways?live=1")).json(); } catch (e) { return; }
+    const live = d.live || {};
+    document.querySelectorAll(".gw-live").forEach((el) => {
+      const st = live[el.dataset.gw] || {};
+      const bits = [];
+      if ("running" in st) {
+        bits.push(st.running + " running \u00b7 " + st.waiting + " waiting", "KV " + st.kv_pct + "%");
+        if (st.gen_tps != null) bits.push(st.gen_tps + " tok/s out \u00b7 " + st.prompt_tps + " tok/s in");
+      }
+      if (st.loaded) bits.push(st.loaded.length ? "loaded: " + st.loaded.map((m) => m.name + (m.vram_gb ? " (" + m.vram_gb + " GB)" : "")).join(", ") : "nothing loaded");
+      if (st.error) bits.push("live stats unavailable: " + st.error);
+      el.textContent = bits.join("  \u00b7  ");
+    });
   }
 
   /* ---------------- scheduled jobs ---------------- */
@@ -2491,6 +2567,33 @@
   }
 
   /* ---------------- agents (harness) ---------------- */
+  function workerSetupForm(d) {
+    const box = document.createElement("div"); box.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:6px";
+    const ssh = inputEl("ssh host: an alias from ~/.ssh/config, or user@host"); ssh.value = d.host && d.host !== "this machine" ? d.host : "";
+    const dir = inputEl("harness folder on the worker"); dir.value = d.dir || "~/bytebunker-harness";
+    const py = inputEl("launcher"); py.value = "uv run";
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const test = document.createElement("button"); test.type = "button"; test.className = "ghost-btn"; test.textContent = "Test";
+    const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn"; go.textContent = "Enable agents";
+    const note = document.createElement("span"); note.className = "hint";
+    const send = async (action) => {
+      note.textContent = "checking over ssh\u2026"; test.disabled = go.disabled = true;
+      try {
+        const r = await (await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, ssh: ssh.value.trim(), dir: dir.value.trim(), python: py.value.trim() }) })).json();
+        if (r.error) note.textContent = r.error;
+        else note.textContent = Object.entries(r.checks || {}).map(([k, v]) => (v ? "\u2713 " : "\u2717 ") + k).join("   ") + (r.system ? "   \u00b7 " + r.system : "") + (r.enabled ? "   \u2014 enabled" : (action === "setup" && !r.ok ? "   \u2014 not enabled: fix the \u2717 first" : ""));
+        if (r.enabled) setTimeout(renderAgents, 800);
+      } catch (e) { note.textContent = e.message; }
+      test.disabled = go.disabled = false;
+    };
+    test.onclick = () => send("test_worker");
+    go.onclick = () => send("setup");
+    row.appendChild(test); row.appendChild(go); row.appendChild(note);
+    [formRow("worker", ssh), formRow("harness folder", dir), formRow("launcher", py), row].forEach((e) => box.appendChild(e));
+    return box;
+  }
+
   async function renderAgents() {
     let d = {};
     try { d = await (await fetch("/api/agents")).json(); } catch (e) {}
@@ -2518,10 +2621,10 @@
     if (!d.enabled) {
       const warn = document.createElement("div");
       warn.className = "msg-note";
-      warn.textContent = "Agents are disabled. Enable them in config.json (agents.enabled) and set " +
-        "agents.dir on a dedicated worker host reached by agents.ssh — not a Spark, not this console. " +
-        "Until then the launcher is inert.";
+      warn.textContent = "Agents are off. They run on a separate worker host reached over ssh (not a model server, " +
+        "not this machine): the worker has the harness and podman or docker; this console launches goals there and watches.";
       topo.appendChild(warn);
+      topo.appendChild(workerSetupForm(d));
     } else if (!d.isolated) {
       const warn = document.createElement("div");
       warn.className = "msg-note";

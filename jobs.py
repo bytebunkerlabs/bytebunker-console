@@ -287,7 +287,8 @@ class Scheduler(threading.Thread):
         rec = {"ts": t0, "trigger": trigger, "kind": job["kind"], "ok": False, "ms": 0, "output": "", "error": None}
         try:
             out = self.runner(job)
-            rec.update(ok=True, output=str(out.get("output") or "")[:40000], hops=out.get("hops"), tokens=out.get("tokens"))
+            rec.update(ok=True, output=str(out.get("output") or "")[:40000], hops=out.get("hops"), tokens=out.get("tokens"),
+                       model=out.get("model"), gateway=out.get("gateway"))
         except Exception as e:   # noqa: BLE001
             rec["error"] = str(e)[:1000]
         rec["ms"] = int((time.time() - t0) * 1000)

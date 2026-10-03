@@ -106,6 +106,7 @@ def prepare_home():
     os.environ["BYTEBUNKER_DATA"] = os.path.join(home, "data")
     os.environ["BYTEBUNKER_CONFIG"] = cfg
     os.environ["BYTEBUNKER_DESKTOP"] = "1"
+    os.environ["BYTEBUNKER_VERSION"] = VERSION
     return home
 
 
@@ -176,6 +177,21 @@ class Bridge:
 
     def version(self):
         return VERSION
+
+    def open_folder(self, path):
+        """Show a folder in Finder / Explorer — only the app's own data."""
+        import subprocess
+        home = home_dir()
+        p = os.path.abspath(os.path.expanduser(str(path or home)))
+        if not (p == home or p.startswith(home + os.sep)) or not os.path.isdir(p):
+            return False
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", p])
+        elif sys.platform == "win32":
+            os.startfile(p)          # noqa: S606 - opening the user's own folder
+        else:
+            subprocess.Popen(["xdg-open", p])
+        return True
 
 
 def open_window(url, home):
@@ -257,6 +273,19 @@ def run_mcp(args):
     return 0
 
 
+def serve_until_closed(srv):
+    """serve_forever, restarted if it ever dies from something unexpected;
+    returns when the window closes and the server is shut down."""
+    import time
+    while True:
+        try:
+            srv.serve_forever()
+            return
+        except Exception as e:   # noqa: BLE001
+            sys.stderr.write("http server stopped (%s); restarting\n" % e)
+            time.sleep(1)
+
+
 # ------------------------------------------------------------------- main --
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -295,7 +324,7 @@ def main(argv=None):
             print("%s %s on %s  (data: %s)" % (APP, VERSION, url, home), flush=True)
             srv.serve_forever()
         else:
-            threading.Thread(target=srv.serve_forever, name="http", daemon=True).start()
+            threading.Thread(target=serve_until_closed, args=(srv,), name="http", daemon=True).start()
             open_window(url, home)
     except KeyboardInterrupt:
         pass

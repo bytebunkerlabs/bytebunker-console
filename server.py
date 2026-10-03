@@ -1229,6 +1229,7 @@ class Handler(BaseHTTPRequestHandler):
                 "gateways": [g["name"] for g in GW.gateways()],
                 "gateway_urls": {g["name"]: g["url"] for g in GW.gateways()},
                 "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
+                "version": os.environ.get("BYTEBUNKER_VERSION") or "",
                 "platform": sys.platform,
                 "telemetry": bool(CFG.get("prometheus_url") or CFG.get("sparkdash_url")),
                 "telemetry_source": telemetry_source(),
@@ -1245,6 +1246,13 @@ class Handler(BaseHTTPRequestHandler):
                             "last_used": last_used_model()})
             except Exception as e:   # noqa: BLE001
                 self._json({"error": str(e), "data": []}, 502)
+        elif path == "/api/settings":
+            self._json({"version": os.environ.get("BYTEBUNKER_VERSION") or "", "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
+                        "platform": sys.platform, "data_dir": DATA, "config_path": CONFIG_PATH,
+                        "home_dir": os.path.dirname(CONFIG_PATH),
+                        "uploads_dir": os.path.expanduser(CFG.get("uploads_dir") or os.path.join(DATA, "uploads")),
+                        "identity": CFG.get("identity") or {}, "rates": CFG.get("frontier_rates_per_mtok") or {},
+                        "python": sys.version.split()[0], "frozen": bool(getattr(sys, "frozen", False))})
         elif path == "/api/gateways":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             GW.refresh(force=bool(q.get("refresh")))
@@ -1255,7 +1263,10 @@ class Handler(BaseHTTPRequestHandler):
                             "enabled": g.get("enabled", True), "has_key": bool(g.get("key")),
                             "ok": st.get("ok"), "models": [m["id"] for m in GW.models if m["gateway"] == g["name"]],
                             "ms": st.get("ms"), "error": st.get("error")})
-            self._json({"gateways": gws, "models": len(GW.models)})
+            body = {"gateways": gws, "models": len(GW.models)}
+            if q.get("live"):
+                body["live"] = GW.live()
+            self._json(body)
         elif path == "/api/telemetry":
             self._json(telemetry())
         elif path == "/api/engine":
@@ -1427,7 +1438,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/settings", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -1561,6 +1572,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": bool(evt)})
         elif path == "/api/gateways":
             self._gateways_admin(body)
+        elif path == "/api/settings":
+            if not isinstance(body, dict):
+                self._json({"error": "expected object"}, 400)
+                return
+            ident = CFG.setdefault("identity", {})
+            if "user" in body:
+                ident["user"] = str(body.get("user") or "").strip()[:60]
+            if "host" in body:
+                ident["host"] = str(body.get("host") or "").strip()[:60]
+            if isinstance(body.get("rates"), dict):
+                r = CFG.setdefault("frontier_rates_per_mtok", {})
+                for k in ("input", "output"):
+                    try:
+                        r[k] = max(0.0, min(1000.0, float(body["rates"].get(k, r.get(k, 0)))))
+                    except (TypeError, ValueError):
+                        pass
+            save_config()
+            self._json({"ok": True})
 
     # ---- MCP server management ----
     # add / remove / toggle / restart, persisted to config.json and applied
@@ -1569,6 +1598,29 @@ class Handler(BaseHTTPRequestHandler):
     def _agents_run(self, body):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)
+            return
+        if body.get("action") in ("test_worker", "setup", "disable"):
+            a = CFG.setdefault("agents", {})
+            ssh = str(body.get("ssh") or "").strip()[:200]
+            d = str(body.get("dir") or "~/bytebunker-harness").strip()[:300]
+            py = str(body.get("python") or "uv run").strip()[:200]
+            if body["action"] == "disable":
+                a["enabled"] = False
+                save_config()
+                TRACE.log("agents", action="disable")
+                self._json({"ok": True, "enabled": False})
+                return
+            if not ssh:
+                self._json({"error": "the worker's ssh host is required (an alias from ~/.ssh/config, or user@host)"}, 400)
+                return
+            res = agentmod.test_worker(ssh, d, py)
+            if body["action"] == "setup" and res.get("ok"):
+                a.update(enabled=True, ssh=ssh, dir=d, python=py)
+                a.setdefault("script", "scripts/run_master.py")
+                save_config()
+                TRACE.log("agents", action="setup", ssh=ssh, dir=d)
+                res["enabled"] = True
+            self._json(res)
             return
         if body.get("action") == "config":
             # Save the master's name + instructions into the agents block.
