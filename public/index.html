@@ -79,7 +79,12 @@
       <div class="transcript" id="transcript">
         <div class="empty" id="empty-state">
           <h2>Your metal, your weights.</h2>
-          <div class="chips">
+          <div class="first-run" id="first-run" hidden>
+            <b>No engines connected yet</b>
+            <span>ByteBunker talks to any OpenAI-compatible engine: litellm, vLLM, Ollama, LM Studio, llama.cpp. Let it look on this machine, your tailnet and, if you allow it, your local network. Or add one by address.</span>
+            <div class="first-run-acts"><button class="solid-btn" id="first-run-find" type="button">Find engines</button><button class="ghost-btn" id="first-run-add" type="button">Add by address</button></div>
+          </div>
+          <div class="chips" id="starter-chips">
             <button class="chip-btn" data-chip="Draft a vLLM launch command for serving across both Sparks">Draft a vLLM launch command</button>
             <button class="chip-btn" data-chip="Write a benchmark plan for both nodes">Benchmark both nodes</button>
             <button class="chip-btn" data-chip="Why would TTFT be spiky on a two-node tensor-parallel vLLM deployment?">Why is my TTFT spiky?</button>

@@ -120,10 +120,10 @@
     const lines = [
       "from openai import OpenAI", "",
       "client = OpenAI(",
-      `    base_url="${state.cfg.upstream || "http://HOST:PORT/v1"}",`,
-      '    api_key="bb-local",', ")", "",
+      `    base_url="${gatewayUrl(state.model) || "http://HOST:PORT/v1"}",`,
+      '    api_key="YOUR_GATEWAY_KEY",', ")", "",
       "stream = client.chat.completions.create(",
-      `    model="${state.model || "MODEL"}",`,
+      `    model="${baseId(state.model) || "MODEL"}",`,
       "    messages=[",
       '        {"role": "system", "content": SYSTEM},',
       '        {"role": "user", "content": prompt},',
@@ -508,8 +508,16 @@
   }
 
   /* ---------------- chat ---------------- */
+  // A model id may carry a pin ("id@gateway") when two gateways serve it.
+  function modelInfo(id) { return (state.modelInfo || {})[id] || {}; }
+  function baseId(id) { return modelInfo(id).base_id || id; }
+  function gatewayOf(id) { return modelInfo(id).gateway || ""; }
+  function gatewayUrl(id) { return ((state.cfg && state.cfg.gateway_urls) || {})[gatewayOf(id)] || ""; }
   function servingLine(txt) {
-    let base = state.model ? `${state.model} · ${state.cfg.upstream}` : "no models at upstream";
+    const haveGw = !!((state.cfg && state.cfg.gateways) || []).length;
+    let base = state.model ? `${baseId(state.model)} · ${gatewayOf(state.model) || "?"}`
+      : (haveGw ? "no models reachable — see Gateways" : "no engine connected — Find engines on the Gateways screen");
+    if ($("code-endpoint")) $("code-endpoint").textContent = gatewayUrl(state.model) || "";
     if (!txt && state.ctxUsed) {
       // denominator from the manifest — a hardcoded window is wrong the
       // moment the served model changes (262k Inkling vs 1M DeepSeek)
@@ -1501,6 +1509,7 @@
     try { data = await (await fetch("/api/models")).json(); } catch (e) {}
     state.models = (data.data || []).map((m) => m.id);
     state.modelGateway = {}; for (const m of (data.data || [])) state.modelGateway[m.id] = m.gateway || "";
+    state.modelInfo = {}; for (const m of (data.data || [])) state.modelInfo[m.id] = m;
     state.gatewayStatus = data.gateways || {};
     // The server publishes what each model actually supports; without this the
     // client guesses, and a wrong guess is a 400 that reads like a crash.
@@ -1511,9 +1520,14 @@
     const gwNames = [...new Set((data.data || []).map((m) => m.gateway || ""))];
     for (const id of state.models) {
       const o = document.createElement("option");
-      o.value = id; o.textContent = gwNames.length > 1 ? id + "  \u00b7  " + (state.modelGateway[id] || "") : id;
+      o.value = id;
+      o.textContent = gwNames.length > 1 ? baseId(id) + "  \u00b7  " + gatewayOf(id) + (modelInfo(id).pinned ? " (direct)" : "") : id;
       sel.appendChild(o);
     }
+    // a gateway's list is what it is configured for, not what is up: start
+    // on the model that last worked, then the first one listed
+    if (state.model && !state.models.includes(state.model)) state.model = "";
+    if (!state.model && data.last_used && state.models.includes(data.last_used)) state.model = data.last_used;
     if (!state.model && state.models.length) state.model = state.models[0];
     if (state.model) sel.value = state.model;
     servingLine();
@@ -1868,6 +1882,18 @@
   }
 
   /* ---------------- gateways ---------------- */
+  async function refreshConfig() {
+    try { state.cfg = await (await fetch("/api/config")).json(); } catch (e) {}
+    updateFirstRun();
+  }
+  function updateFirstRun() {
+    const none = !((state.cfg && state.cfg.gateways) || []).length;
+    $("first-run").hidden = !none;
+    $("starter-chips").hidden = none;
+  }
+  $("first-run-find").onclick = () => { state.autoDiscover = true; go("gateways"); };
+  $("first-run-add").onclick = () => { state.focusAddGateway = true; go("gateways"); };
+  async function afterGatewayChange() { await refreshConfig(); await loadModels(); }
   async function gwPost(payload) {
     const r = await fetch("/api/gateways", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status)); return d;
@@ -1891,10 +1917,10 @@
       const ml = document.createElement("div"); ml.className = "skill-tags mono"; ml.textContent = g.models.length ? g.models.slice(0, 12).join(", ") + (g.models.length > 12 ? " +" + (g.models.length - 12) : "") : ""; card.appendChild(ml);
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
-      mk(g.enabled ? "disable" : "enable", "ghost-btn", async () => { try { await gwPost({ action: "toggle", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
-      mk("key", "ghost-btn", async () => { const k = prompt("API key for " + g.name + " (leave empty to clear):", ""); if (k === null) return; try { await gwPost({ action: "update", name: g.name, key: k }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
-      mk("rename", "ghost-btn", async () => { const n = prompt("New name:", g.name); if (!n || n === g.name) return; try { await gwPost({ action: "update", name: g.name, new_name: n }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
-      mk("remove", "rate-btn bad", async () => { if (!confirm("Remove gateway " + g.name + "?")) return; try { await gwPost({ action: "remove", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
+      mk(g.enabled ? "disable" : "enable", "ghost-btn", async () => { try { await gwPost({ action: "toggle", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
+      mk("key", "ghost-btn", async () => { const k = prompt("API key for " + g.name + " (leave empty to clear):", ""); if (k === null) return; try { await gwPost({ action: "update", name: g.name, key: k }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
+      mk("rename", "ghost-btn", async () => { const n = prompt("New name:", g.name); if (!n || n === g.name) return; try { await gwPost({ action: "update", name: g.name, new_name: n }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
+      mk("remove", "rate-btn bad", async () => { if (!confirm("Remove gateway " + g.name + "?")) return; try { await gwPost({ action: "remove", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
       card.appendChild(acts); left.appendChild(card);
     }
     // add by address
@@ -1903,7 +1929,7 @@
     const url = inputEl("host:port, or a full http://host:port/v1"), nm = inputEl("name (optional)"), key = inputEl("API key (optional)"); key.type = "password";
     const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
     const btn = document.createElement("button"); btn.type = "button"; btn.className = "solid-btn"; btn.textContent = "Add"; const note = document.createElement("span"); note.className = "hint";
-    btn.onclick = async () => { btn.disabled = true; note.textContent = "checking\u2026"; try { const r = await gwPost({ action: "add", url: url.value.trim(), name: nm.value.trim(), key: key.value }); note.textContent = "added \u00b7 " + r.models + " models now"; url.value = ""; nm.value = ""; key.value = ""; renderGateways(); loadModels(); } catch (e) { note.textContent = e.message; } btn.disabled = false; };
+    btn.onclick = async () => { btn.disabled = true; note.textContent = "checking\u2026"; try { const r = await gwPost({ action: "add", url: url.value.trim(), name: nm.value.trim(), key: key.value }); note.textContent = "added \u00b7 " + r.models + " models now"; url.value = ""; nm.value = ""; key.value = ""; renderGateways(); afterGatewayChange(); } catch (e) { note.textContent = e.message; } btn.disabled = false; };
     row.appendChild(btn); row.appendChild(note);
     [formRow("address", url), formRow("name", nm), formRow("key", key), row].forEach((e) => add.appendChild(e)); left.appendChild(add);
     // discovery
@@ -1915,6 +1941,7 @@
     const dbtn = document.createElement("button"); dbtn.type = "button"; dbtn.className = "solid-btn"; dbtn.textContent = "Find engines"; const dnote = document.createElement("span"); dnote.className = "hint";
     drow.appendChild(dbtn); drow.appendChild(lanRow); drow.appendChild(dnote);
     disc.appendChild(formRow("hosts", hosts)); disc.appendChild(drow); left.appendChild(disc);
+    if (state.focusAddGateway) { state.focusAddGateway = false; url.focus(); }
     dbtn.onclick = async () => {
       dbtn.disabled = true; dnote.textContent = "probing\u2026";
       const pane = $("gateways-detail"); pane.textContent = "";
@@ -1933,7 +1960,7 @@
             const rowx = document.createElement("div"); rowx.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
             const kin = f.needs_key ? inputEl("API key") : null; if (kin) { kin.type = "password"; rowx.appendChild(kin); }
             const ab = document.createElement("button"); ab.type = "button"; ab.className = "solid-btn"; ab.textContent = "Add"; const an = document.createElement("span"); an.className = "hint";
-            ab.onclick = async () => { ab.disabled = true; try { const x = await gwPost({ action: "add", url: f.url, name: f.host + ":" + f.port, key: kin ? kin.value : "", kind: f.kind }); an.textContent = "added \u00b7 " + x.models + " models now"; renderGateways(); loadModels(); } catch (e) { an.textContent = e.message; ab.disabled = false; } };
+            ab.onclick = async () => { ab.disabled = true; try { const x = await gwPost({ action: "add", url: f.url, name: f.host + ":" + f.port, key: kin ? kin.value : "", kind: f.kind }); an.textContent = "added \u00b7 " + x.models + " models now"; renderGateways(); afterGatewayChange(); } catch (e) { an.textContent = e.message; ab.disabled = false; } };
             rowx.appendChild(ab); rowx.appendChild(an); c.appendChild(rowx);
           }
           pane.appendChild(c);
@@ -1941,6 +1968,7 @@
       } catch (e) { dnote.textContent = e.message; }
       dbtn.disabled = false;
     };
+    if (state.autoDiscover) { state.autoDiscover = false; dbtn.click(); }
   }
 
   /* ---------------- scheduled jobs ---------------- */
@@ -2471,7 +2499,7 @@
       sel.textContent = "";
       const o0 = document.createElement("option"); o0.value = ""; o0.textContent = "(worker default)"; sel.appendChild(o0);
       const seen = new Set([""]);
-      for (const m of (state.models || []).concat(d[key] ? [d[key]] : [])) { if (seen.has(m)) continue; seen.add(m); const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o); }
+      for (const m of (state.models || []).filter((x) => !modelInfo(x).pinned).concat(d[key] ? [d[key]] : [])) { if (seen.has(m)) continue; seen.add(m); const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o); }
       sel.value = d[key] || "";
     }
 
@@ -3518,7 +3546,7 @@
     $("who-user").textContent = state.cfg.identity.user || "local";
     $("who-host").textContent = state.cfg.identity.host || "";
     $("avatar").textContent = (state.cfg.identity.user || "B")[0].toUpperCase();
-    $("code-endpoint").textContent = state.cfg.upstream;
+    updateFirstRun();
     if (state.cfg.nodes.length) $("cluster-sub").textContent = state.cfg.nodes.length + " nodes configured";
     if (state.cfg.video) { $("nav-video").hidden = false; vidRefresh(); }
     if (state.cfg.netcheck) $("netcheck-card").hidden = false;

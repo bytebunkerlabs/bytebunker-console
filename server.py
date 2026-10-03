@@ -30,6 +30,7 @@ API:
 """
 import argparse
 import json
+import sys
 import os
 import re
 import threading
@@ -49,7 +50,11 @@ import gateways as gwmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
-DATA = os.path.join(ROOT, "data")
+# The code directory is read-only inside a packaged app, so data and config
+# live wherever the launcher says (desktop/app.py sets these per OS). The
+# classic install keeps both beside the code.
+DATA = os.path.abspath(os.path.expanduser(os.environ.get("BYTEBUNKER_DATA") or os.path.join(ROOT, "data")))
+CONFIG_PATH = os.path.abspath(os.path.expanduser(os.environ.get("BYTEBUNKER_CONFIG") or os.path.join(ROOT, "config.json")))
 os.makedirs(DATA, exist_ok=True)
 # Every model request, tool run, rating and archive, append-only, forever:
 # data/traces/<day>.jsonl (gzipped after the day ends). See traces.py.
@@ -148,12 +153,6 @@ def caps_for(model_id):
     return dict(CAPS_FALLBACK)
 
 
-# A console used to have one upstream. Now it has gateways: litellm in front
-# of the Sparks, a vLLM on a workstation GPU, Ollama on a laptop — merged
-# into one model list and routed per request by the model's name.
-GW = gwmod.Registry(CFG, caps_for)
-
-
 def upstream_message(detail):
     """The sentence inside an upstream error body.
 
@@ -182,7 +181,7 @@ def upstream_message(detail):
 
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
-    path = os.path.join(ROOT, "config.json")
+    path = CONFIG_PATH
     if os.path.exists(path):
         with open(path) as f:
             cfg.update(json.load(f))
@@ -191,6 +190,10 @@ def load_config():
 
 CFG = load_config()
 _LOCK = threading.Lock()
+# A console used to have one upstream. Now it has gateways: litellm in front
+# of the Sparks, a vLLM on a workstation GPU, Ollama on a laptop — merged
+# into one model list and routed per request by the model's name.
+GW = gwmod.Registry(CFG, caps_for)
 
 # Skills live in the repo's skills/, in any dir listed in config's skills_dirs
 # (point one at the harness's skills/ to share them), and inside enabled
@@ -390,6 +393,26 @@ def upstream_json(path, payload, timeout=900):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def last_used_model():
+    """The most recent model in the usage ledger that a gateway still lists."""
+    known = {m["id"] for m in GW.models}
+    try:
+        with open(os.path.join(DATA, "usage.jsonl"), "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    for ln in reversed(lines):
+        try:
+            m = str(json.loads(ln).get("model") or "")
+        except ValueError:
+            continue
+        if m in known:
+            return m
+    return ""
+
+
 def run_job(job):
     """One run. chat: a bounded tool loop against the gateway, like the
     Playground does but server-side. agent: a harness goal. Returns
@@ -412,14 +435,16 @@ def run_job(job):
 
     model = job.get("model") or ""
     if not model:
-        try:
-            with urllib.request.urlopen(upstream_request("/models"), timeout=10) as r:
-                ids = [m["id"] for m in json.load(r).get("data", [])]
-            model = ids[0] if ids else ""
-        except Exception:   # noqa: BLE001
-            pass
+        # a gateway's list is what it is configured for, not what is up (litellm
+        # lists every backend, served or not): the model you last used is the
+        # best guess, then the first one listed
+        GW.refresh()
+        model = last_used_model() or (GW.models[0]["id"] if GW.models else "")
     if not model:
-        raise RuntimeError("no model configured for the job and none offered upstream")
+        raise RuntimeError("no model configured for the job and no gateway offers one")
+    model, job_gw = GW.resolve(model)
+    if job_gw is None:
+        raise RuntimeError("no gateway serves %s" % model)
     caps = caps_for(model)
     sys_parts = []
     bodies = skill_catalog().bodies(job.get("skills") or [])
@@ -445,7 +470,9 @@ def run_job(job):
             payload["chat_template_kwargs"] = dict(caps["ctk"])
         if tools:
             payload["tools"] = tools
-        resp = upstream_json("/chat/completions", payload)
+        req = upstream_request("/chat/completions", payload, "POST", gateway=job_gw)
+        with urllib.request.urlopen(req, timeout=900) as r:
+            resp = json.loads(r.read().decode("utf-8", "replace"))
         TRACE.log("chat", status=200, request=trace_safe(payload), response=resp, purpose="job", job=job["id"])
         usage = resp.get("usage") or {}
         total_tokens += int(usage.get("total_tokens") or 0)
@@ -454,7 +481,8 @@ def run_job(job):
         calls = msg.get("tool_calls") or []
         hops += 1
         if not calls:
-            return {"output": msg.get("content") or "", "hops": hops, "tokens": total_tokens}
+            return {"output": msg.get("content") or "", "hops": hops, "tokens": total_tokens,
+                    "gateway": job_gw["name"], "model": model}
         entry = {"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls}
         if not caps.get("strip_reasoning", True) and msg.get("reasoning_content"):
             entry["reasoning_content"] = msg["reasoning_content"]
@@ -535,7 +563,7 @@ def mcp_reload():
 def save_config():
     """Persist CFG back to config.json, preserving formatting sanity. Written
     atomically so a crash mid-write cannot leave the console unbootable."""
-    path = os.path.join(ROOT, "config.json")
+    path = CONFIG_PATH
     tmp = path + ".tmp"
     with _LOCK:
         with open(tmp, "w") as f:
@@ -699,6 +727,9 @@ def usage_summary():
                 day = time.strftime("%d", time.localtime(e["ts"]))
                 days[day] = days.get(day, 0) + out
                 m = str(e.get("model") or "unknown")
+                base, _, pin = m.rpartition("@")
+                if base and GW.gateway(pin):
+                    m = base          # "id@gateway" is a route, not another model
                 by_model[m] = by_model.get(m, 0) + out
                 gname = str(e.get("gateway") or GW.model_map.get(m) or "upstream")
                 by_gateway[gname] = by_gateway.get(gname, 0) + out + inn
@@ -948,15 +979,22 @@ def telemetry():
 
 
 # ---------------------------------------------------------------- upstream --
-def upstream_request(path, payload=None, method="GET", model=None):
+def upstream_request(path, payload=None, method="GET", model=None, gateway=None):
     """A request to the gateway that serves `model` (or the payload's model;
-    'id@gateway' pins one explicitly). No model → the first enabled gateway."""
-    want = model or (payload.get("model") if isinstance(payload, dict) else None)
-    mid, gw = GW.resolve(want) if want else (None, (GW.gateways() or [None])[0])
+    'id@gateway' pins one explicitly). No model → the first enabled gateway.
+    Callers that may retry resolve once and pass `gateway` so a pin holds."""
+    gw = gateway
+    if gw is None:
+        want = model or (payload.get("model") if isinstance(payload, dict) else None)
+        if want:
+            mid, gw = GW.resolve(want)
+            if isinstance(payload, dict) and payload.get("model") != mid:
+                payload["model"] = mid
+        else:
+            gws = GW.gateways()
+            gw = gws[0] if gws else None
     if gw is None:
         raise RuntimeError("no gateway configured: add one on the Gateways screen")
-    if isinstance(payload, dict) and want and payload.get("model") != mid:
-        payload["model"] = mid
     url = gw["url"].rstrip("/") + path
     headers = {"Content-Type": "application/json"}
     if gw.get("key"):
@@ -1185,6 +1223,9 @@ class Handler(BaseHTTPRequestHandler):
                 "identity": CFG.get("identity", {}),
                 "upstream": CFG.get("upstream_url", ""),
                 "gateways": [g["name"] for g in GW.gateways()],
+                "gateway_urls": {g["name"]: g["url"] for g in GW.gateways()},
+                "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
+                "platform": sys.platform,
                 "telemetry": bool(CFG.get("prometheus_url") or CFG.get("sparkdash_url")),
                 "telemetry_source": telemetry_source(),
                 "sparkdash_open_url": CFG.get("sparkdash_open_url") or "",
@@ -1196,7 +1237,8 @@ class Handler(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
                 GW.refresh(force=bool(q.get("refresh")))
-                self._json({"object": "list", "data": GW.models, "gateways": GW.status})
+                self._json({"object": "list", "data": GW.models, "gateways": GW.status,
+                            "last_used": last_used_model()})
             except Exception as e:   # noqa: BLE001
                 self._json({"error": str(e), "data": []}, 502)
         elif path == "/api/gateways":
@@ -1811,9 +1853,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "no such gateway"}, 404)
                 return
             if action == "remove":
-                if len([x for x in gws if x.get("enabled", True)]) <= 1 and g.get("enabled", True):
-                    self._json({"error": "that is the last enabled gateway; add another before removing it"}, 400)
-                    return
                 gws.remove(g)
             elif action == "toggle":
                 g["enabled"] = not g.get("enabled", True)
@@ -2165,8 +2204,12 @@ class Handler(BaseHTTPRequestHandler):
                "purpose": self.headers.get("X-BB-Purpose") or "chat"}
         started = time.time()
 
+        mid, gw = GW.resolve(payload.get("model") or "")
+        payload["model"] = mid
+        who["gateway"] = gw["name"] if gw else None
+
         def attempt(p):
-            req = upstream_request("/chat/completions", p, "POST")
+            req = upstream_request("/chat/completions", p, "POST", gateway=gw)
             return urllib.request.urlopen(req, timeout=600)
 
         try:
@@ -2230,23 +2273,36 @@ class Handler(BaseHTTPRequestHandler):
                       ms=int((time.time() - started) * 1000), **who)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=CFG.get("port", 8765))
-    ap.add_argument("--bind", default=CFG.get("bind", "127.0.0.1"))
-    args = ap.parse_args()
-    if args.bind not in ("127.0.0.1", "localhost", "::1"):
+def serve(bind=None, port=None):
+    """Build the HTTP server (not yet serving) and start the job scheduler.
+    Used by main() and by the desktop app, which runs it on a thread behind
+    a native window. port 0 picks a free port; read it from
+    srv.server_address[1]."""
+    bind = bind or CFG.get("bind", "127.0.0.1")
+    if bind not in ("127.0.0.1", "localhost", "::1"):
         # There is no auth on any route. Loopback-only is the security model;
         # a wider bind turns the rack into an open inference gateway for the
         # whole LAN. Refuse rather than warn — reach it over SSH or the overlay.
         raise SystemExit(
             "refusing to bind %s: the console has no auth and is loopback-only "
-            "by design. Reach it via SSH tunnel or overlay network." % args.bind)
-    CFG["bind"] = args.bind
-    srv = ThreadingHTTPServer((args.bind, args.port), Handler)
+            "by design. Reach it via SSH tunnel or overlay network." % bind)
+    CFG["bind"] = bind
+    srv = ThreadingHTTPServer((bind, int(CFG.get("port", 8765) if port is None else port)), Handler)
+    # the built-in jobs MCP server calls the console back on this port
+    os.environ["BB_CONSOLE_PORT"] = str(srv.server_address[1])
     start_scheduler()
-    print("ByteBunker Console on http://%s:%d  (upstream %s)  jobs: %d" %
-          (args.bind, args.port, CFG.get("upstream_url"), len(JOBS.jobs)))
+    return srv
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=CFG.get("port", 8765))
+    ap.add_argument("--bind", default=CFG.get("bind", "127.0.0.1"))
+    args = ap.parse_args()
+    srv = serve(args.bind, args.port)
+    print("ByteBunker Console on http://%s:%d  gateways: %s  jobs: %d" %
+          (args.bind, srv.server_address[1], ", ".join(g["name"] for g in GW.gateways()) or "none",
+           len(JOBS.jobs)))
     srv.serve_forever()
 
 
