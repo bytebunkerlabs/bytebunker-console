@@ -1,0 +1,97 @@
+name: desktop
+
+# Builds the ByteBunker desktop app for macOS (Apple silicon) and Windows,
+# tests the packaged apps, and attaches them to a DRAFT release on version
+# tags (a human publishes it). Run by hand from the Actions tab, on tags
+# v*, and on pushes to main that touch the app.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build tools
+        run: python -m pip install --upgrade pip pywebview pyinstaller
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: PYTHON=python bash desktop/build-mac.sh
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./desktop/build-win.ps1
+
+      - name: Smoke test, headless (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          export BYTEBUNKER_HOME="$RUNNER_TEMP/bb-headless"
+          desktop/dist/ByteBunker.app/Contents/MacOS/ByteBunker --headless --port 18765 > "$RUNNER_TEMP/headless.log" 2>&1 &
+          python desktop/ci_smoke.py http://127.0.0.1:18765 || { cat "$RUNNER_TEMP/headless.log"; exit 1; }
+
+      - name: Smoke test, headless (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:BYTEBUNKER_HOME = "$env:RUNNER_TEMP\bb-headless"
+          Start-Process -FilePath desktop/dist/ByteBunker/ByteBunker-cli.exe -ArgumentList "--headless","--port","18765" -RedirectStandardOutput "$env:RUNNER_TEMP\headless.log" -RedirectStandardError "$env:RUNNER_TEMP\headless.err"
+          python desktop/ci_smoke.py http://127.0.0.1:18765
+          if ($LASTEXITCODE -ne 0) { Get-Content "$env:RUNNER_TEMP\headless.log","$env:RUNNER_TEMP\headless.err" -ErrorAction SilentlyContinue; exit 1 }
+
+      - name: Smoke test, window (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          export BYTEBUNKER_HOME="$RUNNER_TEMP/bb-gui"
+          desktop/dist/ByteBunker.app/Contents/MacOS/ByteBunker --smoke-gui "$RUNNER_TEMP/smoke.json"
+          cat "$RUNNER_TEMP/smoke.json"
+
+      - name: Smoke test, window (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true      # needs the WebView2 runtime on the runner image
+        run: |
+          $env:BYTEBUNKER_HOME = "$env:RUNNER_TEMP\bb-gui"
+          $p = Start-Process -FilePath desktop/dist/ByteBunker/ByteBunker.exe -ArgumentList "--smoke-gui","$env:RUNNER_TEMP\smoke.json" -Wait -PassThru
+          Get-Content "$env:RUNNER_TEMP\smoke.json"
+          exit $p.ExitCode
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ByteBunker-${{ runner.os }}
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+          if-no-files-found: error
+
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip

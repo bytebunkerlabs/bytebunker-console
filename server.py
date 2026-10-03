@@ -569,6 +569,10 @@ def save_config():
         with open(tmp, "w") as f:
             json.dump(CFG, f, indent=2)
             f.write("\n")
+        try:
+            os.chmod(tmp, 0o600)      # gateway keys live here; a replace must not widen it
+        except OSError:
+            pass
         os.replace(tmp, path)
 
 

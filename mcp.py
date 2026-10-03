@@ -118,7 +118,13 @@ class MCPServer:
             # interpreter is the app itself, entered through --mcp.
             script = os.path.basename(args[0])
             if getattr(sys, "frozen", False):
-                cmd = [sys.executable, "--mcp", script] + args[1:]
+                exe = sys.executable
+                if sys.platform == "win32":
+                    # the windowed exe may have no usable stdio; its console twin does
+                    cli = os.path.join(os.path.dirname(sys.executable), "ByteBunker-cli.exe")
+                    if os.path.exists(cli):
+                        exe = cli
+                cmd = [exe, "--mcp", script] + args[1:]
             else:
                 cmd = [sys.executable, os.path.join(here, script)] + args[1:]
         else:

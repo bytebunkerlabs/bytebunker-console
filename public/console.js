@@ -343,7 +343,7 @@
         for (const a of m.attachments) {
           if (a.kind === "image" && (a.url || a.dataURL)) {
             const img = document.createElement("img"); img.src = a.url || a.dataURL; img.alt = a.name; img.title = a.name;
-            img.onclick = () => window.open(a.url || a.dataURL, "_blank"); img.style.cursor = "zoom-in";
+            img.onclick = () => openOut(a.url || a.dataURL); img.style.cursor = "zoom-in";
             row.appendChild(img);
           } else {
             const f = document.createElement(a.url ? "a" : "span"); f.className = "f";
@@ -1528,6 +1528,12 @@
     // on the model that last worked, then the first one listed
     if (state.model && !state.models.includes(state.model)) state.model = "";
     if (!state.model && data.last_used && state.models.includes(data.last_used)) state.model = data.last_used;
+    if (!state.model) {
+      // a router lists every route it is configured for, live or not; an engine
+      // (vLLM, Ollama, LM Studio, llama.cpp) lists only what it has loaded
+      const direct = state.models.find((id) => { const k = ((state.gatewayStatus || {})[gatewayOf(id)] || {}).kind; return k && k !== "litellm" && !modelInfo(id).pinned; });
+      if (direct) state.model = direct;
+    }
     if (!state.model && state.models.length) state.model = state.models[0];
     if (state.model) sel.value = state.model;
     servingLine();
@@ -1882,6 +1888,37 @@
   }
 
   /* ---------------- gateways ---------------- */
+  function openOut(u) {
+    const abs = new URL(u, location.href).href;
+    const api = window.pywebview && window.pywebview.api;
+    if (api && api.open_external) return api.open_external(abs);
+    window.open(abs, "_blank");
+  }
+  function gatewayEditor(g) {
+    const pane = $("gateways-detail"); pane.textContent = "";
+    const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono">changes apply at once; the key is stored in the console config on this machine</span></div>';
+    h.querySelector("b").textContent = "Edit " + g.name; pane.appendChild(h);
+    const nm = inputEl("name"); nm.value = g.name;
+    const url = inputEl("http://host:port/v1"); url.value = g.url;
+    const key = inputEl(g.has_key ? "a key is set \u2014 type to replace, or clear below" : "API key (optional)"); key.type = "password";
+    const clear = document.createElement("input"); clear.type = "checkbox";
+    const clearRow = document.createElement("label"); clearRow.style.cssText = "display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)"; clearRow.appendChild(clear); clearRow.appendChild(document.createTextNode("remove the stored key"));
+    const kind = document.createElement("select"); kind.className = "text-input";
+    for (const k of ["", "litellm", "vllm", "ollama", "lmstudio", "llama.cpp", "openai-compatible"]) { const o = document.createElement("option"); o.value = k; o.textContent = k || "(detect)"; kind.appendChild(o); }
+    kind.value = g.kind || "";
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = "Save";
+    const note = document.createElement("span"); note.className = "hint";
+    save.onclick = async () => {
+      const body = { action: "update", name: g.name, url: url.value.trim(), kind: kind.value };
+      if (nm.value.trim() && nm.value.trim() !== g.name) body.new_name = nm.value.trim();
+      if (key.value) body.key = key.value; else if (clear.checked) body.key = "";
+      save.disabled = true;
+      try { await gwPost(body); note.textContent = "saved"; renderGateways(); afterGatewayChange(); } catch (e) { note.textContent = e.message; save.disabled = false; }
+    };
+    row.appendChild(save); row.appendChild(note);
+    [formRow("name", nm), formRow("address", url), formRow("key", key), clearRow, formRow("kind", kind), row].forEach((e) => pane.appendChild(e));
+  }
   async function refreshConfig() {
     try { state.cfg = await (await fetch("/api/config")).json(); } catch (e) {}
     updateFirstRun();
@@ -1918,8 +1955,7 @@
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
       mk(g.enabled ? "disable" : "enable", "ghost-btn", async () => { try { await gwPost({ action: "toggle", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
-      mk("key", "ghost-btn", async () => { const k = prompt("API key for " + g.name + " (leave empty to clear):", ""); if (k === null) return; try { await gwPost({ action: "update", name: g.name, key: k }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
-      mk("rename", "ghost-btn", async () => { const n = prompt("New name:", g.name); if (!n || n === g.name) return; try { await gwPost({ action: "update", name: g.name, new_name: n }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
+      mk("edit", "ghost-btn", () => gatewayEditor(g));
       mk("remove", "rate-btn bad", async () => { if (!confirm("Remove gateway " + g.name + "?")) return; try { await gwPost({ action: "remove", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
       card.appendChild(acts); left.appendChild(card);
     }
@@ -1949,7 +1985,13 @@
         const r = await gwPost({ action: "discover", hosts: hosts.value, scan_lan: lan.checked });
         dnote.textContent = r.found.length + " found on " + r.hosts_probed + " hosts in " + Math.round(r.ms / 1000) + " s";
         const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b>Engines found</b></div>'; pane.appendChild(h);
-        if (!r.found.length) { const n = document.createElement("div"); n.className = "hint"; n.textContent = "Nothing answered on the usual ports. Add by address if you know it, or tick the LAN scan."; pane.appendChild(n); }
+        if (!r.found.length) {
+          const n = document.createElement("div"); n.className = "hint";
+          n.textContent = "Nothing answered on the usual ports. Add by address if you know it, or tick the LAN scan." +
+            (state.cfg.platform === "darwin" ? " On a Mac, the first search can come back empty while macOS asks whether ByteBunker may use the local network: allow it in the prompt (or System Settings \u203a Privacy & Security \u203a Local Network) and search again." : "") +
+            (state.cfg.platform === "win32" ? " On Windows, allow ByteBunker through the firewall if it asked, then search again." : "");
+          pane.appendChild(n);
+        }
         for (const f of r.found) {
           const c = document.createElement("div"); c.className = "card"; c.style.gap = "6px";
           const t = document.createElement("div"); t.className = "skill-head"; t.innerHTML = '<div class="skill-id"><b class="mono"></b><span class="src mono"></span></div>';
@@ -3218,11 +3260,11 @@
     }
   }
 
-  $("export-all").onclick = () => window.open("/api/export", "_blank");
+  $("export-all").onclick = () => openOut("/api/export");
   $("agent-run").onclick = runAgent;
   $("agent-stop").onclick = () => { if (state.agentAbort) state.agentAbort.abort(); };
   $("master-save").onclick = saveMaster;
-  $("export-good").onclick = () => window.open("/api/export?rated=up", "_blank");
+  $("export-good").onclick = () => openOut("/api/export?rated=up");
   $("new-chat").onclick = newChat;
   $("new-chat-2").onclick = newChat;
   document.addEventListener("keydown", (e) => {
