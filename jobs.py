@@ -177,6 +177,9 @@ class JobStore:
             "skills": [str(x) for x in (spec.get("skills") or [])][:12],
             "system": str(spec.get("system") or "")[:8000],
             "max_hops": max(1, min(30, int(spec.get("max_hops") or 12))),
+            "created_by": str(spec.get("created_by") or "you")[:40],
+            "reason": str(spec.get("reason") or "")[:500],
+            "goal": str(spec.get("goal") or "")[:40],
             "created": None, "last_run": None, "runs": 0,
         }
         with self._lock:

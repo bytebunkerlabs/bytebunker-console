@@ -82,6 +82,12 @@ def build_command(CFG, goal):
         envs["BYTEBUNKER_MASTER_NAME"] = a["master_name"].strip()
     if (a.get("master_instructions") or "").strip():
         envs["BYTEBUNKER_MASTER_INSTRUCTIONS"] = a["master_instructions"].strip()
+    # which engine each role uses — chosen on the Agents screen, overriding the
+    # worker's config.yaml for this run only
+    for key, env in (("master_model", "BYTEBUNKER_MASTER_MODEL"), ("thinking_model", "BYTEBUNKER_THINKING_MODEL"),
+                     ("slave_model", "BYTEBUNKER_SLAVE_MODEL")):
+        if (a.get(key) or "").strip():
+            envs[env] = a[key].strip()
 
     if ssh:
         # one remote command string; every interpolated value is quoted. A

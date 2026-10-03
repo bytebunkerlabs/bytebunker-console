@@ -140,6 +140,13 @@ CATALOG = [
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything",
     },
     {
+        "id": "jobs", "name": "Jobs (built-in)", "status": "built-in",
+        "description": "Let the model in the Playground file, list, run and delete the console's scheduled jobs — 'every morning summarise X' becomes a job on the Jobs screen.",
+        "runtime": "python", "command": "python3", "args": ["mcp_jobs.py"],
+        "params": [], "env": [], "install": [],
+        "docs": "",
+    },
+    {
         "id": "terminal", "name": "Terminal (built-in)", "status": "built-in",
         "description": "The console's own shell tool: runs commands in one working directory, cwd persists between calls.",
         "runtime": "python", "command": "python3", "args": ["mcp_terminal.py", "{root}"],

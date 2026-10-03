@@ -1205,6 +1205,9 @@ class Handler(BaseHTTPRequestHandler):
             st["master_name"] = a.get("master_name") or ""
             st["master_instructions"] = a.get("master_instructions") or ""
             st["run_timeout_s"] = agent_run_timeout(CFG)
+            st["master_model"] = a.get("master_model") or ""
+            st["thinking_model"] = a.get("thinking_model") or ""
+            st["slave_model"] = a.get("slave_model") or ""
             runs = []
             for e in TRACE.events(time.strftime("%Y-%m-%d",
                                   time.localtime(time.time() - 14 * 86400))):
@@ -1486,6 +1489,9 @@ class Handler(BaseHTTPRequestHandler):
             a = CFG.setdefault("agents", {})
             a["master_name"] = str(body.get("master_name") or "")[:120]
             a["master_instructions"] = str(body.get("master_instructions") or "")[:8000]
+            for key in ("master_model", "thinking_model", "slave_model"):
+                if key in body:
+                    a[key] = str(body.get(key) or "")[:120]
             if body.get("run_timeout_s") is not None:
                 try:
                     # 5 min .. 24 h; a multi-step goal on one Spark is a 1-2 h affair
@@ -1495,7 +1501,9 @@ class Handler(BaseHTTPRequestHandler):
             save_config()
             self._json({"ok": True, "master_name": a["master_name"],
                         "master_instructions": a["master_instructions"],
-                        "run_timeout_s": agent_run_timeout(CFG)})
+                        "run_timeout_s": agent_run_timeout(CFG),
+                        "master_model": a.get("master_model") or "", "thinking_model": a.get("thinking_model") or "",
+                        "slave_model": a.get("slave_model") or ""})
             return
         goal = body.get("goal") or ""
         try:
@@ -1546,6 +1554,21 @@ class Handler(BaseHTTPRequestHandler):
             lines[0] += 1
             if len(captured) < 4000:
                 captured.append(text)
+            # The master files recurring work by printing one structured line;
+            # the agent plane has no other way to reach the console, by design.
+            if text.startswith("BB_JOB "):
+                try:
+                    spec = json.loads(text[7:])
+                    spec["created_by"] = "agents:" + str(spec.get("created_by") or "sultan")[:30]
+                    job = JOBS.upsert(spec)
+                    TRACE.log("job", action="filed_by_agent", id=job["id"], name=job["name"], run=rid,
+                              schedule=job["schedule"], job_kind=job["kind"], by=spec["created_by"])
+                    emit({"job": {"id": job["id"], "name": job["name"], "schedule": job["schedule"], "kind": job["kind"]}})
+                    emit({"line": "%s> \U0001f5d3 filed job \"%s\" (%s) — see the Jobs screen" % (
+                        (CFG.get("agents") or {}).get("master_name") or "Master", job["name"], jobmod.describe_schedule(job))})
+                except (ValueError, KeyError) as e:
+                    emit({"line": "console: could not file the job the master asked for: %s" % str(e)[:160]})
+                return
             emit({"line": text})
 
         try:

@@ -136,6 +136,12 @@
             <input class="text-input" id="run-timeout" type="number" min="5" max="1440" step="5" title="Wall-clock cap on one goal, in minutes" placeholder="minutes" style="width:110px">
             <span class="hint">min per goal</span>
           </div>
+          <div class="prow" style="flex-direction:row;align-items:center;gap:10px;flex-wrap:wrap">
+            <b style="font-size:13px;font-weight:500;white-space:nowrap">Models</b>
+            <label class="hint" style="display:flex;align-items:center;gap:6px">master <select class="text-input" id="model-master" style="min-width:160px"></select></label>
+            <label class="hint" style="display:flex;align-items:center;gap:6px">thinking (wazir, Malikah, panels) <select class="text-input" id="model-thinking" style="min-width:160px"></select></label>
+            <label class="hint" style="display:flex;align-items:center;gap:6px">doers (minions) <select class="text-input" id="model-slave" style="min-width:160px"></select></label>
+          </div>
           <div class="prow">
             <b style="font-size:13px;font-weight:500">Standing instructions</b>
             <textarea class="sys-input" id="master-instructions" rows="4" placeholder="e.g. Give every agent you spawn a short human name and refer to it by that name in all your updates."></textarea>

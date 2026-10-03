@@ -1927,7 +1927,7 @@
       const head = document.createElement("div"); head.className = "skill-head";
       head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div><span class="src mono" style="text-align:right"></span>';
       head.querySelector("b").textContent = (j.enabled ? "" : "\u23f8 ") + j.name;
-      head.querySelectorAll(".src")[0].textContent = j.kind + " \u00b7 " + j.schedule_text + (j.model && j.kind === "chat" ? " \u00b7 " + j.model : "");
+      head.querySelectorAll(".src")[0].textContent = j.kind + " \u00b7 " + j.schedule_text + (j.model && j.kind === "chat" ? " \u00b7 " + j.model : "") + (j.created_by && j.created_by !== "you" ? " \u00b7 filed by " + j.created_by : "");
       head.querySelectorAll(".src")[1].textContent = (j.enabled && j.next_run ? "next " + fmtWhen(j.next_run) : "paused") + (d.running === j.id ? " \u00b7 RUNNING" : "");
       const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = j.prompt.length > 220 ? j.prompt.slice(0, 220) + "\u2026" : j.prompt;
       const last = document.createElement("div"); last.className = "skill-tags mono";
@@ -2381,6 +2381,16 @@
     if (document.activeElement !== $("master-name")) $("master-name").value = d.master_name || "";
     if (document.activeElement !== $("master-instructions")) $("master-instructions").value = d.master_instructions || "";
     if (document.activeElement !== $("run-timeout") && d.run_timeout_s) $("run-timeout").value = Math.round(d.run_timeout_s / 60);
+    // which engine each role uses; blank = whatever the worker's config.yaml says
+    for (const [id, key] of [["model-master", "master_model"], ["model-thinking", "thinking_model"], ["model-slave", "slave_model"]]) {
+      const sel = $(id);
+      if (document.activeElement === sel) continue;
+      sel.textContent = "";
+      const o0 = document.createElement("option"); o0.value = ""; o0.textContent = "(worker default)"; sel.appendChild(o0);
+      const seen = new Set([""]);
+      for (const m of (state.models || []).concat(d[key] ? [d[key]] : [])) { if (seen.has(m)) continue; seen.add(m); const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o); }
+      sel.value = d[key] || "";
+    }
 
     $("agent-run").disabled = !d.enabled || state.streaming;
     $("agent-launch-note").textContent = d.enabled ? "" : "enable agents in config.json first";
@@ -2601,7 +2611,8 @@
         body: JSON.stringify({ action: "config",
           master_name: $("master-name").value.trim(),
           master_instructions: $("master-instructions").value.trim(),
-          run_timeout_s: Math.max(5, parseInt($("run-timeout").value, 10) || 180) * 60 }),
+          run_timeout_s: Math.max(5, parseInt($("run-timeout").value, 10) || 180) * 60,
+          master_model: $("model-master").value, thinking_model: $("model-thinking").value, slave_model: $("model-slave").value }),
       });
       $("master-note").textContent = "Saved. The master uses this on the next run.";
     } catch (e) { $("master-note").textContent = "save failed: " + e.message; }
@@ -2644,6 +2655,7 @@
             if (!ln.startsWith("data:")) continue;
             let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
             if (o.phase === "start") append("— launching on " + o.host + " (" + o.mode + (o.isolated ? ", isolated" : ", NOT isolated") + ") —");
+            else if (o.job) { append("\u2014 job filed: " + o.job.name + " \u2014"); }
             else if (o.phase === "done") append("— finished: " + (o.killed ? o.killed : "exit " + o.exit) + " —");
             else if (o.error) append("error: " + o.error);
             else if (o.line != null) append(o.line);
