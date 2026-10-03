@@ -3,14 +3,20 @@ name: desktop
 # Builds the ByteBunker desktop app for macOS (Apple silicon) and Windows,
 # tests the packaged apps, and attaches them to a DRAFT release on version
 # tags (a human publishes it). Run by hand from the Actions tab, on tags
-# v*, and on pushes to main that touch the app.
+# v*, and on pushes to main that change anything the app bundles.
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
     branches: [main]
-    paths:
+    paths:             # everything that goes into the app
       - "desktop/**"
+      - "public/**"
+      - "*.py"
+      - "skills/**"
+      - "plugins/**"
+      - "tests/**"
+      - "config.json.example"
       - ".github/workflows/desktop.yml"
 
 permissions:
