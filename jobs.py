@@ -184,6 +184,12 @@ class JobStore:
         }
         with self._lock:
             old = next((j for j in self.jobs if j["id"] == job["id"]), None)
+            if old is None and not spec.get("id"):
+                # a master that retries a filing must not create twins
+                old = next((j for j in self.jobs if j["name"] == job["name"] and j["prompt"] == job["prompt"]
+                            and j["schedule"] == job["schedule"]), None)
+                if old:
+                    return dict(old)
             if old:
                 job["created"] = old.get("created"); job["last_run"] = old.get("last_run"); job["runs"] = old.get("runs", 0)
                 self.jobs[self.jobs.index(old)] = job
