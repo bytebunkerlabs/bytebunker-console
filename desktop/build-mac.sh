@@ -11,6 +11,14 @@ rm -rf "$STAGE" && mkdir -p "$STAGE"
 cp -R desktop/dist/ByteBunker.app "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 OUT="desktop/dist/ByteBunker-$VER-mac-$(uname -m).dmg"
-hdiutil create -quiet -volname "ByteBunker $VER" -srcfolder "$STAGE" -ov -format UDZO "$OUT"
+# hdiutil fails intermittently on CI runners ("Resource busy"): retry, loudly
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname "ByteBunker $VER" -srcfolder "$STAGE" -ov -format UDZO "$OUT"; then
+    break
+  fi
+  [ "$attempt" = 5 ] && { echo "hdiutil failed 5 times" >&2; exit 1; }
+  echo "hdiutil failed (attempt $attempt); retrying" >&2
+  sleep $((attempt * 5))
+done
 rm -rf "$STAGE"
 echo "$OUT"
