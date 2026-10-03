@@ -59,7 +59,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "models", "recipes", "cluster", "sparkdash", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "gateways", "models", "recipes", "cluster", "sparkdash", "usage"];
   function go(s) {
     state.screen = s;
     screens.forEach((id) => {
@@ -72,6 +72,7 @@
     if (s === "plugins") renderPlugins();
     if (s === "mcp") renderMcp();
     if (s === "jobs") renderJobs();
+    if (s === "gateways") renderGateways();
     if (s === "agents") renderAgents();
     if (s === "recipes") renderRecipes();
     if (s === "sparkdash") renderSparkdash();
@@ -1499,23 +1500,27 @@
     let data = { data: [] };
     try { data = await (await fetch("/api/models")).json(); } catch (e) {}
     state.models = (data.data || []).map((m) => m.id);
+    state.modelGateway = {}; for (const m of (data.data || [])) state.modelGateway[m.id] = m.gateway || "";
+    state.gatewayStatus = data.gateways || {};
     // The server publishes what each model actually supports; without this the
     // client guesses, and a wrong guess is a 400 that reads like a crash.
     state.caps = {};
     for (const m of (data.data || [])) if (m.caps) state.caps[m.id] = m.caps;
     const sel = $("model-select");
     sel.textContent = "";
+    const gwNames = [...new Set((data.data || []).map((m) => m.gateway || ""))];
     for (const id of state.models) {
       const o = document.createElement("option");
-      o.value = id; o.textContent = id;
+      o.value = id; o.textContent = gwNames.length > 1 ? id + "  \u00b7  " + (state.modelGateway[id] || "") : id;
       sel.appendChild(o);
     }
     if (!state.model && state.models.length) state.model = state.models[0];
     if (state.model) sel.value = state.model;
     servingLine();
+    const gwCount = Object.keys(state.gatewayStatus || {}).length;
     $("models-sub").textContent = state.models.length
-      ? `${state.models.length} served · OpenAI-compatible · ${state.cfg.upstream}`
-      : "upstream unreachable — check config.json";
+      ? `${state.models.length} models across ${gwCount} gateway${gwCount === 1 ? "" : "s"}`
+      : (gwCount ? "no models reachable — see the Gateways screen" : "no gateway configured — add one on the Gateways screen");
     const facts = $("model-facts");
     facts.innerHTML = "";
     const add = (k, v) => {
@@ -1525,15 +1530,17 @@
       d.children[1].textContent = v;
       facts.appendChild(d);
     };
-    add("Upstream", state.cfg.upstream.replace(/^https?:\/\//, ""));
+    add("Gateways", String(Object.keys(state.gatewayStatus || {}).length || "—"));
     add("Models", String(state.models.length || "—"));
     const lm = $("loaded-models");
     lm.textContent = "";
     for (const id of state.models) {
       const c = document.createElement("div");
       c.className = "row-card";
-      c.innerHTML = '<div class="name-col"><b></b><small class="mono">served via upstream</small></div>';
+      c.innerHTML = '<div class="name-col"><b></b><small class="mono"></small></div>';
       c.querySelector("b").textContent = id;
+      const gw = state.modelGateway[id]; const st = (state.gatewayStatus || {})[gw] || {};
+      c.querySelector("small").textContent = "via " + (gw || "?") + (st.kind ? " \u00b7 " + st.kind : "") + ((state.caps[id] || {}).vision ? " \u00b7 vision" : "");
       lm.appendChild(c);
     }
     if (!state.models.length) {
@@ -1858,6 +1865,82 @@
     await renderPlugins();
     await loadSkills();              // a plugin's skills came or went
     if (state.cfg.mcp || on) loadTools();   // and its MCP servers
+  }
+
+  /* ---------------- gateways ---------------- */
+  async function gwPost(payload) {
+    const r = await fetch("/api/gateways", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status)); return d;
+  }
+  async function renderGateways() {
+    let d = { gateways: [], models: 0 };
+    try { d = await (await fetch("/api/gateways")).json(); } catch (e) {}
+    const left = $("gateways-left"); left.textContent = "";
+    const up = d.gateways.filter((g) => g.ok).length;
+    $("gateways-sub").textContent = d.gateways.length + " configured \u00b7 " + up + " reachable \u00b7 " + d.models + " models";
+    for (const g of d.gateways) {
+      const card = document.createElement("div"); card.className = "card"; card.style.gap = "8px"; if (!g.enabled) card.style.opacity = ".6";
+      const head = document.createElement("div"); head.className = "skill-head";
+      head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div><span class="pill"><span class="d"></span><span class="pt"></span></span>';
+      head.querySelector("b").textContent = g.name;
+      head.querySelector(".src").textContent = g.url + (g.kind ? "  \u00b7  " + g.kind : "") + (g.has_key ? "  \u00b7  key set" : "  \u00b7  no key");
+      head.querySelector(".pt").textContent = !g.enabled ? "disabled" : g.ok ? g.models.length + " models \u00b7 " + g.ms + " ms" : "unreachable";
+      if (!g.ok) head.querySelector(".pill").style.opacity = ".6";
+      card.appendChild(head);
+      if (g.error) { const e = document.createElement("div"); e.className = "hint"; e.style.color = "var(--err)"; e.textContent = g.error; card.appendChild(e); }
+      const ml = document.createElement("div"); ml.className = "skill-tags mono"; ml.textContent = g.models.length ? g.models.slice(0, 12).join(", ") + (g.models.length > 12 ? " +" + (g.models.length - 12) : "") : ""; card.appendChild(ml);
+      const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center";
+      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
+      mk(g.enabled ? "disable" : "enable", "ghost-btn", async () => { try { await gwPost({ action: "toggle", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
+      mk("key", "ghost-btn", async () => { const k = prompt("API key for " + g.name + " (leave empty to clear):", ""); if (k === null) return; try { await gwPost({ action: "update", name: g.name, key: k }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
+      mk("rename", "ghost-btn", async () => { const n = prompt("New name:", g.name); if (!n || n === g.name) return; try { await gwPost({ action: "update", name: g.name, new_name: n }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
+      mk("remove", "rate-btn bad", async () => { if (!confirm("Remove gateway " + g.name + "?")) return; try { await gwPost({ action: "remove", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); loadModels(); });
+      card.appendChild(acts); left.appendChild(card);
+    }
+    // add by address
+    const add = document.createElement("div"); add.className = "card"; add.style.gap = "8px";
+    add.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Add a gateway</b><span class="src mono">an IP and port is enough: 172.16.25.83:8001 becomes http://172.16.25.83:8001/v1</span></div></div>';
+    const url = inputEl("host:port, or a full http://host:port/v1"), nm = inputEl("name (optional)"), key = inputEl("API key (optional)"); key.type = "password";
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const btn = document.createElement("button"); btn.type = "button"; btn.className = "solid-btn"; btn.textContent = "Add"; const note = document.createElement("span"); note.className = "hint";
+    btn.onclick = async () => { btn.disabled = true; note.textContent = "checking\u2026"; try { const r = await gwPost({ action: "add", url: url.value.trim(), name: nm.value.trim(), key: key.value }); note.textContent = "added \u00b7 " + r.models + " models now"; url.value = ""; nm.value = ""; key.value = ""; renderGateways(); loadModels(); } catch (e) { note.textContent = e.message; } btn.disabled = false; };
+    row.appendChild(btn); row.appendChild(note);
+    [formRow("address", url), formRow("name", nm), formRow("key", key), row].forEach((e) => add.appendChild(e)); left.appendChild(add);
+    // discovery
+    const disc = document.createElement("div"); disc.className = "card"; disc.style.gap = "8px";
+    disc.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Find engines</b><span class="src mono">this machine \u00b7 hosts of known gateways \u00b7 tailnet peers \u00b7 optionally the whole LAN \u00b7 ports 11434 1234 4000 8000 8001 8080 8888 5000 3000</span></div></div>';
+    const hosts = inputEl("extra hosts to probe, comma-separated (optional)");
+    const lan = document.createElement("input"); lan.type = "checkbox"; const lanRow = document.createElement("label"); lanRow.style.cssText = "display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)"; lanRow.appendChild(lan); lanRow.appendChild(document.createTextNode("scan my whole LAN (/24, ~20 s)"));
+    const drow = document.createElement("div"); drow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const dbtn = document.createElement("button"); dbtn.type = "button"; dbtn.className = "solid-btn"; dbtn.textContent = "Find engines"; const dnote = document.createElement("span"); dnote.className = "hint";
+    drow.appendChild(dbtn); drow.appendChild(lanRow); drow.appendChild(dnote);
+    disc.appendChild(formRow("hosts", hosts)); disc.appendChild(drow); left.appendChild(disc);
+    dbtn.onclick = async () => {
+      dbtn.disabled = true; dnote.textContent = "probing\u2026";
+      const pane = $("gateways-detail"); pane.textContent = "";
+      try {
+        const r = await gwPost({ action: "discover", hosts: hosts.value, scan_lan: lan.checked });
+        dnote.textContent = r.found.length + " found on " + r.hosts_probed + " hosts in " + Math.round(r.ms / 1000) + " s";
+        const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b>Engines found</b></div>'; pane.appendChild(h);
+        if (!r.found.length) { const n = document.createElement("div"); n.className = "hint"; n.textContent = "Nothing answered on the usual ports. Add by address if you know it, or tick the LAN scan."; pane.appendChild(n); }
+        for (const f of r.found) {
+          const c = document.createElement("div"); c.className = "card"; c.style.gap = "6px";
+          const t = document.createElement("div"); t.className = "skill-head"; t.innerHTML = '<div class="skill-id"><b class="mono"></b><span class="src mono"></span></div>';
+          t.querySelector("b").textContent = f.url; t.querySelector(".src").textContent = (f.kind || "openai-compatible") + (f.configured ? "  \u00b7  already configured" : "") + (f.needs_key ? "  \u00b7  needs a key" : "");
+          c.appendChild(t);
+          if (f.models && f.models.length) { const m = document.createElement("div"); m.className = "skill-tags mono"; m.textContent = f.models.slice(0, 10).join(", ") + (f.models.length > 10 ? " +" + (f.models.length - 10) : ""); c.appendChild(m); }
+          if (!f.configured) {
+            const rowx = document.createElement("div"); rowx.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+            const kin = f.needs_key ? inputEl("API key") : null; if (kin) { kin.type = "password"; rowx.appendChild(kin); }
+            const ab = document.createElement("button"); ab.type = "button"; ab.className = "solid-btn"; ab.textContent = "Add"; const an = document.createElement("span"); an.className = "hint";
+            ab.onclick = async () => { ab.disabled = true; try { const x = await gwPost({ action: "add", url: f.url, name: f.host + ":" + f.port, key: kin ? kin.value : "", kind: f.kind }); an.textContent = "added \u00b7 " + x.models + " models now"; renderGateways(); loadModels(); } catch (e) { an.textContent = e.message; ab.disabled = false; } };
+            rowx.appendChild(ab); rowx.appendChild(an); c.appendChild(rowx);
+          }
+          pane.appendChild(c);
+        }
+      } catch (e) { dnote.textContent = e.message; }
+      dbtn.disabled = false;
+    };
   }
 
   /* ---------------- scheduled jobs ---------------- */
@@ -3068,6 +3151,21 @@
       box.appendChild(note);
     }
 
+    const gws = u.by_gateway || {};
+    const gkeys = Object.keys(gws).sort((a, b) => gws[b] - gws[a]);
+    if (gkeys.length) {
+      const card = document.createElement("div"); card.className = "card";
+      card.innerHTML = '<span style="font-size:13.5px;font-weight:600">By gateway</span><span class="hint">chat tokens in + out, plus agent tokens routed by model</span>';
+      const mx = gws[gkeys[0]] || 1;
+      for (const k of gkeys) {
+        const r = document.createElement("div"); r.className = "mix-row";
+        r.innerHTML = '<span class="n mono"></span><div class="bar8"><div></div></div><span class="v mono"></span>';
+        r.querySelector(".n").textContent = k; r.querySelector(".bar8>div").style.width = (gws[k] / mx) * 100 + "%";
+        r.querySelector(".v").textContent = gws[k] >= 1e6 ? (gws[k] / 1e6).toFixed(1) + " M" : gws[k].toLocaleString();
+        card.appendChild(r);
+      }
+      box.appendChild(card);
+    }
     const models = u.by_model || {};
     const mkeys = Object.keys(models).sort((a, b) => models[b] - models[a]);
     if (mkeys.length) {

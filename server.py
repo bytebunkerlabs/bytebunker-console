@@ -45,6 +45,7 @@ import agents as agentmod
 import recipes as recipemod
 import mcp_catalog as catmod
 import jobs as jobmod
+import gateways as gwmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -145,6 +146,12 @@ def caps_for(model_id):
         merged.update(table[max(hits, key=len)])
         return merged
     return dict(CAPS_FALLBACK)
+
+
+# A console used to have one upstream. Now it has gateways: litellm in front
+# of the Sparks, a vLLM on a workstation GPU, Ollama on a laptop — merged
+# into one model list and routed per request by the model's name.
+GW = gwmod.Registry(CFG, caps_for)
 
 
 def upstream_message(detail):
@@ -669,6 +676,7 @@ def usage_summary():
     horizon = now - 14 * 86400
     days = {}
     by_model = {}
+    by_gateway = {}
     tps = []
     tot_in = tot_out = 0
     try:
@@ -692,6 +700,8 @@ def usage_summary():
                 days[day] = days.get(day, 0) + out
                 m = str(e.get("model") or "unknown")
                 by_model[m] = by_model.get(m, 0) + out
+                gname = str(e.get("gateway") or GW.model_map.get(m) or "upstream")
+                by_gateway[gname] = by_gateway.get(gname, 0) + out + inn
                 if dec and not e.get("estimated"):
                     tps.append(dec)
     except FileNotFoundError:
@@ -712,6 +722,14 @@ def usage_summary():
         agents_saved = (a_in / 1e6) * float(rates.get("input", 0)) + (a_out / 1e6) * float(rates.get("output", 0))
         agents["total"] = agents.get("slave_tokens", 0) + agents.get("master_prompt", 0) + agents.get("master_completion", 0) + agents.get("panel_tokens", 0)
         agents["frontier_saved_usd"] = round(agents_saved, 2)
+        # the agents name models; the gateway that serves each one is known here
+        agw = {}
+        for m, n in (agents.get("by_model") or {}).items():
+            gname = GW.model_map.get(m) or "unknown"
+            agw[gname] = agw.get(gname, 0) + int(n or 0)
+        agents["by_gateway"] = agw
+        for gname, n in agw.items():
+            by_gateway[gname] = by_gateway.get(gname, 0) + n
     return {
         "total_out": tot_out,
         "median_tok_s": tps[len(tps) // 2] if tps else None,
@@ -720,6 +738,7 @@ def usage_summary():
         "chat_saved_usd": round(saved, 2),
         "days": days,
         "by_model": by_model,
+        "by_gateway": by_gateway,
         "agents": agents,
     }
 
@@ -929,12 +948,19 @@ def telemetry():
 
 
 # ---------------------------------------------------------------- upstream --
-def upstream_request(path, payload=None, method="GET"):
-    url = CFG["upstream_url"].rstrip("/") + path
-    headers = {
-        "Authorization": "Bearer " + CFG.get("upstream_key", "none"),
-        "Content-Type": "application/json",
-    }
+def upstream_request(path, payload=None, method="GET", model=None):
+    """A request to the gateway that serves `model` (or the payload's model;
+    'id@gateway' pins one explicitly). No model → the first enabled gateway."""
+    want = model or (payload.get("model") if isinstance(payload, dict) else None)
+    mid, gw = GW.resolve(want) if want else (None, (GW.gateways() or [None])[0])
+    if gw is None:
+        raise RuntimeError("no gateway configured: add one on the Gateways screen")
+    if isinstance(payload, dict) and want and payload.get("model") != mid:
+        payload["model"] = mid
+    url = gw["url"].rstrip("/") + path
+    headers = {"Content-Type": "application/json"}
+    if gw.get("key"):
+        headers["Authorization"] = "Bearer " + gw["key"]
     data = json.dumps(payload).encode() if payload is not None else None
     return urllib.request.Request(url, data=data, headers=headers, method=method)
 
@@ -1158,6 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
                           for n in CFG.get("nodes", [])],
                 "identity": CFG.get("identity", {}),
                 "upstream": CFG.get("upstream_url", ""),
+                "gateways": [g["name"] for g in GW.gateways()],
                 "telemetry": bool(CFG.get("prometheus_url") or CFG.get("sparkdash_url")),
                 "telemetry_source": telemetry_source(),
                 "sparkdash_open_url": CFG.get("sparkdash_open_url") or "",
@@ -1166,14 +1193,23 @@ class Handler(BaseHTTPRequestHandler):
                 "netcheck": bool(CFG.get("netcheck_ssh")),
             })
         elif path == "/api/models":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
-                with urllib.request.urlopen(upstream_request("/models"), timeout=8) as r:
-                    body = json.load(r)
-                for m in body.get("data") or []:
-                    m["caps"] = caps_for(m.get("id"))
-                self._json(body)
-            except Exception as e:
+                GW.refresh(force=bool(q.get("refresh")))
+                self._json({"object": "list", "data": GW.models, "gateways": GW.status})
+            except Exception as e:   # noqa: BLE001
                 self._json({"error": str(e), "data": []}, 502)
+        elif path == "/api/gateways":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            GW.refresh(force=bool(q.get("refresh")))
+            gws = []
+            for g in GW.gateways(enabled_only=False):
+                st = GW.status.get(g["name"]) or {}
+                gws.append({"name": g["name"], "url": g["url"], "kind": g.get("kind") or st.get("kind") or "",
+                            "enabled": g.get("enabled", True), "has_key": bool(g.get("key")),
+                            "ok": st.get("ok"), "models": [m["id"] for m in GW.models if m["gateway"] == g["name"]],
+                            "ms": st.get("ms"), "error": st.get("error")})
+            self._json({"gateways": gws, "models": len(GW.models)})
         elif path == "/api/telemetry":
             self._json(telemetry())
         elif path == "/api/engine":
@@ -1345,7 +1381,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -1473,8 +1509,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/usage-event":
             evt = sanitize_usage(body)
             if evt:
+                mid = str(evt.get("model") or "").rsplit("@", 1)
+                evt["gateway"] = (mid[1] if len(mid) == 2 else None) or GW.model_map.get(mid[0]) or ((GW.gateways() or [{}])[0].get("name") or "upstream")
                 append_usage(evt)
             self._json({"ok": bool(evt)})
+        elif path == "/api/gateways":
+            self._gateways_admin(body)
 
     # ---- MCP server management ----
     # add / remove / toggle / restart, persisted to config.json and applied
@@ -1731,6 +1771,71 @@ class Handler(BaseHTTPRequestHandler):
         emit({"phase": "done", "exit": code, "killed": killed})
         TRACE.log("recipe", action="deploy", id=body.get("id"), host=host, params=rendered["params"],
                   exit=code, killed=killed or False, output=captured[-200:])
+
+    def _gateways_admin(self, body):
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action") or "add"
+        gws = gwmod.normalize(CFG)
+        if action == "discover":
+            hosts = body.get("hosts") or []
+            if isinstance(hosts, str):
+                hosts = [h.strip() for h in hosts.split(",") if h.strip()]
+            res = gwmod.discover(CFG, extra_hosts=hosts, scan_lan=bool(body.get("scan_lan")),
+                                 include_tailnet=body.get("tailnet", True))
+            TRACE.log("gateway", action="discover", found=len(res["found"]), hosts=res["hosts_probed"], ms=res["ms"])
+            self._json(dict(res, ok=True))
+            return
+        if action == "refresh":
+            GW.refresh(force=True)
+            self._json({"ok": True, "status": GW.status, "models": len(GW.models)})
+            return
+        name = str(body.get("name") or "").strip()[:60]
+        if action == "add":
+            url = gwmod._norm_url(body.get("url"))
+            if not url:
+                self._json({"error": "url is required (host:port or http://host:port/v1)"}, 400)
+                return
+            if any(g["url"] == url for g in gws):
+                self._json({"error": "that gateway is already configured"}, 409)
+                return
+            name = name or url.split("//")[-1].split("/")[0]
+            if any(g["name"] == name for g in gws):
+                name = name + "-" + str(len(gws) + 1)
+            gws.append({"name": name, "url": url, "key": str(body.get("key") or ""), "enabled": True,
+                        "kind": str(body.get("kind") or "")})
+        else:
+            g = next((x for x in gws if x["name"] == name), None)
+            if not g:
+                self._json({"error": "no such gateway"}, 404)
+                return
+            if action == "remove":
+                if len([x for x in gws if x.get("enabled", True)]) <= 1 and g.get("enabled", True):
+                    self._json({"error": "that is the last enabled gateway; add another before removing it"}, 400)
+                    return
+                gws.remove(g)
+            elif action == "toggle":
+                g["enabled"] = not g.get("enabled", True)
+            elif action == "update":
+                if body.get("url"):
+                    g["url"] = gwmod._norm_url(body["url"])
+                if "key" in body:
+                    g["key"] = str(body.get("key") or "")
+                if body.get("kind") is not None:
+                    g["kind"] = str(body.get("kind") or "")
+                if body.get("new_name"):
+                    g["name"] = str(body["new_name"]).strip()[:60]
+            else:
+                self._json({"error": "unknown action"}, 400)
+                return
+        CFG["gateways"] = gws
+        gwmod.normalize(CFG)          # mirrors the first enabled gateway into upstream_url
+        save_config()
+        GW.refresh(force=True)
+        TRACE.log("gateway", action=action, name=name)
+        self._json({"ok": True, "status": GW.status, "models": len(GW.models),
+                    "gateways": [{"name": g["name"], "url": g["url"], "enabled": g.get("enabled", True)} for g in gws]})
 
     def _skill_admin(self, body):
         """Create or delete a skill from the UI. The file is written in the
