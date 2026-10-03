@@ -2,6 +2,41 @@
 
 Hand-off document for the engineer or agent that turns the ByteBunker console into a standalone desktop application for macOS and Windows that finds, connects to and uses models on the user's machines and rack. Written 2026-10-03 from the live deployment. Read `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md` and `docs/RUNBOOK.md` first; this plan assumes them.
 
+## Status — 2026-10-03
+
+| Phase | State | Where |
+|---|---|---|
+| 1 Gateways (1.1–1.2) | **done**, verified against the rack, deployed to hermes, merged | `gateways.py`, `server.py`, Gateways screen, `tests/test_gateways.py` (12 tests, Python 3.9 and 3.12) |
+| 1.3 live engine stats | **done** — vLLM `/metrics` (running, waiting, KV %, tok/s), Ollama `/api/ps` | Gateways cards, `GET /api/gateways?live=1`, polled every 15 s |
+| 1.4 gateway on records | **done** — chat trace records, usage events, job runs carry `gateway`; agent tokens mapped by model at read time | `server.py` |
+| 2 Desktop shell | **done** — native window, per-OS data dir, first-run discovery, single instance, `--headless`, `--mcp`, `--smoke-gui` | `desktop/app.py` |
+| 3 Packaging and CI | **done** — macOS arm64 DMG (13 MB), Windows x64 zip (16 MB); CI builds both, runs unit tests, HTTP smoke and the real window on each OS; `v*` tags attach both to a **draft** release | `desktop/bytebunker.spec`, `desktop/build-mac.sh`, `desktop/build-win.ps1`, `desktop/ci_smoke.py`, `.github/workflows/desktop.yml` |
+| 4.1 agents from the app | **done** — connect-a-worker form (ssh test of harness, container runtime, launcher), disconnect, OpenSSH check on Windows | Agents screen, `agents.test_worker` |
+| 4.2 harness routes by gateway | **not started** — agents still reach models through one router (litellm) | — |
+| 5 polish | **partly** — live health polling, Settings screen (data folder, name, rates, manual update check, export), server restart guard | Settings screen |
+
+How it was verified: on this laptop against the rack over the tailnet (migration, add by `host:port`, merged list with `model@gateway`, routing proven by litellm's own request log, discovery, usage per gateway, jobs); on hermes after deploy (all ten MCP servers, chat, worker check); the packaged Mac app locally (HTTP smoke, window smoke, DMG mounted read-only); both packaged apps in CI.
+
+Deviations from the plan, with reasons:
+- `engine_stats()` and `netcheck()` never read `upstream_url` (one uses Prometheus, the other `rack net`), so gap 3 in §1 was a non-issue.
+- The branch had never run: the registry was created before the config was loaded, and a pinned `model@gateway` lost its pin on the proxy's automatic retry. Both fixed; the proxy now resolves the gateway once per request.
+- Discovery: the laptop's Tailscale peer list held 535 Mullvad exit nodes, so discovery now probes only the user's own tailnet (MagicDNS suffix, no exit-node tags): 6 hosts in ~0.6 s instead of 542 in 29 s. HTTPS on 443 is probed by MagicDNS name. A 401/403 counts as "engine behind a key" only when the body is JSON (a router login page is not an engine).
+- macOS holds the first local-network connections of a new app until the user allows Local Network access: the bundle carries `NSLocalNetworkUsageDescription` and the UI says what to do when a search comes back empty.
+- Windows: the window exe has no usable stdio, so the bundle also ships `ByteBunker-cli.exe` (console subsystem) for `--headless` and for built-in MCP servers; every child process (ssh, npx, uvx, tailscale) gets `CREATE_NO_WINDOW`.
+- Built-in MCP servers always run on the console's own interpreter (`sys.executable`, or the app itself via `--mcp`), on hermes too: no dependency on a `python3` on the PATH.
+- An explicit `"gateways": []` stays empty (a fresh install); only a config with no `gateways` key migrates from `upstream_url`. Removing the last gateway is therefore allowed.
+- Updates: a manual "Check for updates" button instead of a feed read on start: the app never contacts anything on its own beyond the gateways the user adds.
+- Default model: the last one used, else one a direct engine (vLLM, Ollama, LM Studio, llama.cpp) has loaded, else the first listed. litellm lists every configured route whether or not a backend is up.
+- The agents' model menus exclude `model@gateway` pins: the harness talks to one router, where a pin would 404.
+
+Remaining, in suggested order:
+1. Phase 4.2: harness routes by gateway (port `gateways.Registry` into `bytebunker_agents`, config `llm.gateways`), so a worker without litellm works.
+2. Intel Mac build (GitHub retired the macOS 13 Intel image; needs an x86_64 runner or a universal2 Python toolchain).
+3. Code signing and notarisation (owner decision, §6.1).
+4. The built-in terminal tool on Windows (PowerShell instead of zsh/bash).
+5. Gateway keys in the OS keychain rather than `config.json` (0600 today).
+6. Optional start-at-login for always-on scheduled jobs.
+
 ## 0. The ask, in the owner's words
 
 - "A proper standalone application that just works" on Mac and Windows: install it, open it, it finds the models it can reach and runs them.

@@ -14,6 +14,62 @@ LiteLLM, Ollama.
 
 ---
 
+## Desktop app (macOS and Windows)
+
+The console also ships as a standalone app: download it, open it, and it finds
+the model servers it can reach. No Python, no config file to write.
+
+| Platform | Download | Install |
+|---|---|---|
+| macOS 11+, Apple silicon | `ByteBunker-<version>-mac-arm64.dmg` | open the DMG, drag ByteBunker to Applications |
+| Windows 10/11, x64 | `ByteBunker-<version>-win-x64.zip` | unzip anywhere, run `ByteBunker\ByteBunker.exe` |
+
+Builds come from the **desktop** workflow (Actions tab: run it, or push a `v*`
+tag, which attaches both files to a draft release). They are not code-signed
+yet: on macOS right-click the app and choose Open the first time; on Windows
+choose "More info" then "Run anyway" in SmartScreen.
+
+**First run.** The Playground says no engine is connected and offers **Find
+engines**, which looks on this machine, on hosts of gateways you already have,
+on your Tailscale tailnet (if Tailscale is installed) and, if you tick it,
+across your local network. It recognises litellm, vLLM, Ollama, LM Studio and
+llama.cpp on their usual ports. Click Add on what it finds, or add any
+OpenAI-compatible endpoint by `host:port` on the **Gateways** screen. On a Mac
+the first search can come back empty while macOS asks for Local Network
+permission: allow it and search again.
+
+**Several gateways at once.** Every gateway's models are merged into one
+picker, and each request goes to the gateway that serves the model. When two
+gateways serve the same name (litellm and the engine behind it, say), the
+first one keeps the plain name and the other appears as `model@gateway`.
+Usage shows tokens per gateway; the Gateways screen shows what each vLLM or
+Ollama engine is doing right now.
+
+**Where your data lives** (never inside the app; Settings has an Open folder
+button): `~/Library/Application Support/ByteBunker` on macOS,
+`%APPDATA%\ByteBunker` on Windows, `~/.config/bytebunker` on Linux. Set
+`BYTEBUNKER_HOME` to use another folder.
+
+**Headless.** `ByteBunker --headless --port 8765` (on Windows
+`ByteBunker-cli.exe --headless --port 8765`) serves the console without a
+window, for a Mac mini or a server; the classic install below does the same
+from source.
+
+**Agents** run on a separate worker host as before; the Agents screen has a
+"connect a worker" form that checks the harness, the container runtime and
+the launcher over ssh before enabling them. Scheduled jobs run while the app
+is open.
+
+**Building it yourself.** macOS: `uv venv desktop/.venv --python 3.12 && uv
+pip install --python desktop/.venv/bin/python pywebview pyinstaller` then
+`desktop/build-mac.sh`. Windows: `pip install pywebview pyinstaller` then
+`./desktop/build-win.ps1`. `python desktop/app.py` runs it from source;
+`--smoke-gui out.json` opens the window, checks what rendered and quits;
+`desktop/ci_smoke.py` tests a running build over HTTP.
+
+Not yet: an Intel Mac build, code signing, and the built-in terminal tool on
+Windows.
+
 ## Install
 
 One command, no sudo, no pip: installs the console as a background service
@@ -41,16 +97,22 @@ cd bytebunker-console
 cp config.json.example config.json
 ```
 
-Point it at your model server by editing `upstream_url` in `config.json`:
+Point it at your model servers in `config.json`, or leave the list empty and
+add them on the **Gateways** screen (or let **Find engines** discover them):
 
 ```json
 {
   "bind": "127.0.0.1",
   "port": 8765,
-  "upstream_url": "http://127.0.0.1:8000/v1",
-  "upstream_key": "not-needed"
+  "gateways": [
+    {"name": "litellm", "url": "http://127.0.0.1:4000/v1", "key": "sk-..."},
+    {"name": "ollama", "url": "http://127.0.0.1:11434/v1"}
+  ]
 }
 ```
+
+A config written before gateways existed (`upstream_url` and `upstream_key`)
+keeps working: on start it becomes one gateway named `upstream`.
 
 Run it:
 
@@ -72,8 +134,8 @@ vllm serve Qwen/Qwen3-8B --host 127.0.0.1 --port 8000
 # llama.cpp (CPU or Apple Silicon)
 llama-server -hf unsloth/Qwen3-8B-GGUF --port 8000
 
-# Ollama — note the /v1 suffix goes in upstream_url
-ollama serve     # then set upstream_url to http://127.0.0.1:11434/v1
+# Ollama — Find engines picks it up on port 11434
+ollama serve
 ```
 
 ---
@@ -308,8 +370,9 @@ WireGuard) works the same way.
 |---|---|---|
 | `bind` | `127.0.0.1` | loopback only; anything else refuses to start |
 | `port` | `8765` | |
-| `upstream_url` | `http://127.0.0.1:8000/v1` | any OpenAI-compatible endpoint |
-| `upstream_key` | `bb-local` | sent as a bearer token |
+| `gateways` | *(from `upstream_url`)* | list of `{name, url, key, enabled, kind}`: every OpenAI-compatible endpoint; models are merged and routed by name, `model@gateway` pins one |
+| `upstream_url` / `upstream_key` | — | legacy single upstream; becomes the gateway `upstream`, and is kept in sync with the first enabled gateway |
+| `uploads_dir` | `data/uploads` | where attachments are saved; put it under a tool's root to let tools read them |
 | `prometheus_url` | *(empty)* | enables the Cluster screen |
 | `nodes` | two examples | `name`, `instance` (Prometheus label prefix), `spec` |
 | `mcp_servers` | *(empty)* | `command`, `args`, `env`, `enabled` |

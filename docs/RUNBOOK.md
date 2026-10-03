@@ -97,7 +97,7 @@ Edit `~/bytebunker-console/config.json` to this (the live values, key redacted):
 ```json
 {
   "bind": "127.0.0.1", "port": 8765,
-  "upstream_url": "http://172.16.25.186:4000/v1", "upstream_key": "<LITELLM_KEY>",
+  "gateways": [{"name": "upstream", "url": "http://172.16.25.186:4000/v1", "key": "<LITELLM_KEY>", "enabled": true, "kind": "litellm"}],
   "model_capabilities": { "qwen3-4b-fast": { "tools": true, "effort": [], "ctk": { "enable_thinking": false }, "strip_reasoning": true, "ctx": 24576 } },
   "prometheus_url": "http://127.0.0.1:19090",
   "nodes": [

@@ -2618,6 +2618,16 @@
       row.children[2].textContent = note;
       topo.appendChild(row);
     }
+    if (d.enabled) {
+      const off = document.createElement("button"); off.type = "button"; off.className = "linky"; off.style.marginTop = "6px";
+      off.textContent = "disconnect this worker";
+      off.onclick = async () => {
+        if (!confirm("Turn agents off? The worker and its harness are not touched; you can reconnect any time.")) return;
+        await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "disable" }) });
+        renderAgents();
+      };
+      topo.appendChild(off);
+    }
     if (!d.enabled) {
       const warn = document.createElement("div");
       warn.className = "msg-note";

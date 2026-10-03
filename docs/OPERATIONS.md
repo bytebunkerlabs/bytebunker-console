@@ -75,7 +75,7 @@ Everything the console needs from Windows is one-time and already done; redo aft
 ## 4. Configuration, all of it
 
 **Console `config.json` (hermes)**
-- `upstream_url` / `upstream_key`: litellm. `model_capabilities`: per-model context and thinking switches (`deepseek-v4-vision` 262144 with `ctk thinking:true`; `qwen3-4b-fast` 24576 with `enable_thinking:false`).
+- `gateways`: every OpenAI-compatible endpoint (on hermes one, `upstream` = litellm `http://172.16.25.186:4000/v1`, migrated from the old `upstream_url`/`upstream_key`, which are now kept in sync with the first enabled gateway). Add more on the Gateways screen; models are merged and routed by name, `model@gateway` pins a duplicate. `model_capabilities`: per-model context and thinking switches (`deepseek-v4-vision` 262144 with `ctk thinking:true`; `qwen3-4b-fast` 24576 with `enable_thinking:false`).
 - `skills_dirs: ["~/bytebunker-console/skills-harness"]` — a copy of the harness `skills/`. `plugins` state, `plugins_dirs`.
 - `agents`: `enabled`, `ssh agents-worker`, `dir ~/bytebunker-harness`, `python "/home/trickyfalcon/.local/bin/uv run"`, `script scripts/run_master.py`, `master_name Sultan`, `master_instructions` (the court doctrine; editable on the Agents screen), `run_timeout_s 10800`, `worker_model_metrics http://127.0.0.1:8001/metrics`, `worker_model_label`.
 - `litellm`: `ssh spark-1`, `config_path`, `container` — for the Recipes screen's Register button.
