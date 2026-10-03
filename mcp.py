@@ -28,6 +28,18 @@ import threading
 import time
 
 SEP = "__"          # server/tool name separator in the flattened tool name
+BUILTIN_SCRIPTS = ("mcp_terminal.py", "mcp_jobs.py")
+
+
+def extra_path():
+    """Install roots a GUI-launched process does not see on its PATH."""
+    import os
+    import sys
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        return [os.path.join(os.environ.get("APPDATA", ""), "npm"), os.path.join(home, ".local", "bin"),
+                r"C:\Program Files\nodejs"]
+    return ["/opt/homebrew/bin", "/usr/local/bin", os.path.join(home, ".local", "bin")]
 START_TIMEOUT = 25  # server boot + initialize
 CALL_TIMEOUT = 120  # one tools/call
 
@@ -86,26 +98,36 @@ class MCPServer:
     def start(self):
         import os
         import shutil
+        import sys
         env = dict(os.environ)
-        # launchd hands us a minimal PATH, so `npx`/`uvx` are invisible even
-        # when installed. Search the usual install roots before giving up.
-        env["PATH"] = env.get("PATH", "") + ":" + ":".join([
-            "/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"),
-        ])
+        # launchd and Finder hand us a minimal PATH, so `npx`/`uvx` are
+        # invisible even when installed. Search the usual install roots.
+        env["PATH"] = env.get("PATH", "") + os.pathsep + os.pathsep.join(extra_path())
         env.update(self.spec.get("env") or {})
-        exe = shutil.which(self.spec["command"], path=env["PATH"]) or self.spec["command"]
         # `~` in an argument means the user's home, as it would in a shell —
         # Popen passes it literally, and the filesystem server then roots
         # itself at a directory called "~" that does not exist.
         args = [os.path.expanduser(a) if a.startswith("~") else a
                 for a in self.spec.get("args", [])]
-        cmd = [exe] + args
-        # Servers shipped with the console (mcp_terminal.py) are named by a
-        # path relative to it; launchd's cwd is wherever it feels like.
         here = os.path.dirname(os.path.abspath(__file__))
+        if args and os.path.basename(args[0]) in BUILTIN_SCRIPTS and \
+                os.path.basename(self.spec["command"]).lower().startswith("python"):
+            # Servers shipped with the console run on the console's own
+            # interpreter: no reliance on a `python3` being on the PATH (on
+            # Windows that name can be a Store stub). In a packaged app the
+            # interpreter is the app itself, entered through --mcp.
+            script = os.path.basename(args[0])
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--mcp", script] + args[1:]
+            else:
+                cmd = [sys.executable, os.path.join(here, script)] + args[1:]
+        else:
+            exe = shutil.which(self.spec["command"], path=env["PATH"]) or self.spec["command"]
+            cmd = [exe] + args
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, cwd=here,
+            encoding="utf-8", errors="replace",
         )
         self._rpc("initialize", {
             "protocolVersion": "2025-06-18",

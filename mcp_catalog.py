@@ -158,15 +158,13 @@ CATALOG = [
 
 _BY_ID = {c["id"]: c for c in CATALOG}
 
-EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"),
-              os.path.expanduser("~/.npm-global/bin")]
-
-
 def shell_env():
-    """launchd gives the console a bare PATH; servers and installs need the
-    same roots the MCP host searches."""
+    """launchd and Finder give the console a bare PATH; servers and installs
+    need the same roots the MCP host searches."""
+    from mcp import extra_path
     env = dict(os.environ)
-    env["PATH"] = env.get("PATH", "") + ":" + ":".join(EXTRA_PATH)
+    env["PATH"] = env.get("PATH", "") + os.pathsep + os.pathsep.join(
+        extra_path() + [os.path.expanduser("~/.npm-global/bin")])
     return env
 
 
