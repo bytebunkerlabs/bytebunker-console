@@ -1,0 +1,31 @@
+name: tests
+
+# Unit and API tests on every push, on the Python versions the server must
+# run on: 3.9 (macOS's system Python, as on hermes) and 3.12 (the app's).
+# The desktop workflow covers macOS and Windows builds; this one adds Linux,
+# where the headless server and dgx-serve's nodes live.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile every module
+        run: python -m compileall -q -x "desktop/(build|dist|\.venv)" .
+      - name: Unit and API tests
+        run: python -m unittest discover -s tests -v
