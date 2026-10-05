@@ -32,7 +32,7 @@ import threading
 import urllib.request
 
 APP = "ByteBunker"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 # ------------------------------------------------------------------ paths --
@@ -72,8 +72,7 @@ def first_run_config(home):
         "port": 0,
         "gateways": [],
         "identity": {"user": user, "host": (platform.node() or "this machine").split(".")[0]},
-        "nodes": [],
-        "prometheus_url": "", "sparkdash_url": "", "sparkdash_open_url": "", "telemetry_source": "",
+        "monitors": [],
         "h3_url": "", "netcheck_ssh": "",
         "skills_dirs": [os.path.join(home, "skills")],
         "plugins_dirs": [os.path.join(home, "plugins")],

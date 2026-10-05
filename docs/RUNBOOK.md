@@ -99,12 +99,8 @@ Edit `~/bytebunker-console/config.json` to this (the live values, key redacted):
   "bind": "127.0.0.1", "port": 8765,
   "gateways": [{"name": "upstream", "url": "http://172.16.25.186:4000/v1", "key": "<LITELLM_KEY>", "enabled": true, "kind": "litellm"}],
   "model_capabilities": { "qwen3-4b-fast": { "tools": true, "effort": [], "ctk": { "enable_thinking": false }, "strip_reasoning": true, "ctx": 24576 } },
+  "monitors": [{"name": "rack", "url": "http://100.90.164.11:9177", "token": "<rack monitor token>", "enabled": true}],
   "prometheus_url": "http://127.0.0.1:19090",
-  "nodes": [
-    { "name": "spark-1", "instance": "(node-exporter|nvidia-gpu-exporter|localhost)", "spec": "GB10 Grace Blackwell · 128 GB unified" },
-    { "name": "spark-2", "instance": "192.168.100.2", "spec": "GB10 Grace Blackwell · 128 GB unified" } ],
-  "sparkdash_url": "http://127.0.0.1:15555", "telemetry_source": "sparkdash",
-  "sparkdash_open_url": "https://burhan.tailed338.ts.net",
   "skills_dirs": ["~/bytebunker-console/skills-harness"], "plugins_dirs": [], "plugins": {},
   "agents": {
     "enabled": true, "ssh": "agents-worker", "dir": "~/bytebunker-harness",
@@ -139,7 +135,7 @@ hermes$ curl -s http://127.0.0.1:8765/api/models | head -c 200
 ```
 Restart after server-side changes (never while an agent run streams): `hermes$ launchctl kickstart -k gui/501/ai.bytebunker.console`.
 
-### 2.3 The tunnel to spark-1 (Prometheus, H3, sparkDash)
+### 2.3 The tunnel to spark-1 (H3, Prometheus)
 ```
 hermes$ cat > ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -154,7 +150,6 @@ hermes$ cat > ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist <<'PLIST'
     <string>-o</string><string>ExitOnForwardFailure=yes</string>
     <string>-L</string><string>127.0.0.1:19090:127.0.0.1:9090</string>
     <string>-L</string><string>127.0.0.1:18091:127.0.0.1:8091</string>
-    <string>-L</string><string>127.0.0.1:15555:127.0.0.1:5555</string>
     <string>trickyfalcon@172.16.25.186</string>
   </array>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer>
@@ -163,7 +158,7 @@ PLIST
 hermes$ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist
 hermes$ curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:19090/api/v1/query?query=up'
 ```
-To change forwards later: edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel; launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read the arguments).
+18091 carries the video studio's H3; 19090 is Prometheus, which the console only asks when no rack monitor reports an engine. (The live plist on hermes still forwards 127.0.0.1:15555 to sparkDash from before 0.2.0; nothing uses it.) To change forwards later: edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel; launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read the arguments).
 
 ### 2.4 The skills copy the console lists
 ```
@@ -358,42 +353,54 @@ laptop$ cd ~/Documents/AI/bytebunker-harness && COPYFILE_DISABLE=1 tar c --no-xa
 
 ---
 
-## 4. sparkDash on spark-1 and in the console
+## 4. The rack monitor: every node on the Cluster screen
 
+The Cluster screen reads rack monitors (dgx-spark-serve `monitor/`, `docs/11-monitor.md` there). One command on the head starts one on each Spark; the head's answers for both.
 ```
-spark-1$ git clone https://github.com/MiaAI-Lab/sparkDash.git ~/dgx/sparkDash && cd ~/dgx/sparkDash
-spark-1$ cat > docker-compose.override.yml <<'OVR'
-services:
-  sparkdash:
-    volumes:
-      - ${HOME}/.ssh/id_ed25519_shared:/root/.ssh/id_ed25519:ro
-OVR
-spark-1$ docker compose up --build -d
-spark-1$ curl -s http://127.0.0.1:5555/api/settings | head -c 120
+spark-1$ cd ~/dgx/dgx-spark-serve && git pull
+spark-1$ python3 -m unittest monitor/test_rackmon.py        # 19 tests, no GPU needed
+spark-1$ rack monitor up
+monitor: building rack-monitor:<hash>
+monitor: shipping rack-monitor:<hash> to spark-2
+monitor: spark-2    started with the GPU
+monitor: spark-1    started with the GPU
+monitor: first samples
+  spark-1    ok    head    gpu 0%  mem 119/122 GiB  vllm:8888  11 containers
+  spark-2    ok    worker  gpu 0%  mem 117/122 GiB  no engine  11 containers
+
+add this to ByteBunker: Cluster > Add monitor
+  tailnet   http://100.90.164.11:9177
+            http://burhan.tailed338.ts.net:9177
+  LAN       http://172.16.25.186:9177   (closed by the firewall; to open it on the LAN only:
+             sudo ufw allow from 172.16.25.0/24 to any port 9177 proto tcp)
+  token     rack monitor token
+spark-1$ rack monitor token           # prints it; paste it into the app, not into chat logs
 ```
-Register the three units through its API:
+In the console or the app: **Cluster › Monitors**, endpoint `http://100.90.164.11:9177` and the token (or the one string `http://rack:TOKEN@100.90.164.11:9177`), **Connect**. **Find on this network** lists every monitor answering on the tailnet. The same thing from a shell, without the token ever on screen:
 ```
-spark-1$ B=http://127.0.0.1:5555
-spark-1$ curl -s -X POST $B/api/sparks -H 'Content-Type: application/json' -d '{"id":"spark-1","name":"spark-1","kind":"spark","isLocal":true,"role":"head","lanIp":"172.16.25.186","cx7Ip":"192.168.100.1","llmPorts":[8888]}'
-spark-1$ curl -s -X POST $B/api/sparks -H 'Content-Type: application/json' -d '{"id":"spark-2","name":"spark-2","kind":"spark","isLocal":false,"role":"worker","lanIp":"172.16.25.185","cx7Ip":"192.168.100.2","ssh":{"host":"172.16.25.185","user":"trickyfalcon","auth":"key"},"llmMonitoring":false}'
-spark-1$ curl -s -X POST $B/api/sparks -H 'Content-Type: application/json' -d '{"id":"agents-worker","name":"agents-worker","kind":"host","isLocal":false,"role":"standalone","lanIp":"100.100.129.98","ssh":{"host":"100.100.129.98","user":"trickyfalcon","auth":"key"},"llmPorts":[8001]}'
-spark-1$ sleep 15; for u in spark-1 spark-2 agents-worker; do curl -s $B/api/sparks/$u/metrics | python3 -c "import sys,json; d=json.load(sys.stdin); g=d['metrics']['gpu']; print('$u', d['online'], g['usage'], g['vram']['used'], '/', g['vram']['total'])"; done
+hermes$ T=$(ssh spark-1 cat .config/rack/monitor.token)
+hermes$ curl -s -X POST http://127.0.0.1:8765/api/monitors -H 'Content-Type: application/json' \
+          -d "{\"action\":\"add\",\"name\":\"rack\",\"url\":\"http://100.90.164.11:9177\",\"token\":\"$T\"}"; unset T
+hermes$ curl -s http://127.0.0.1:8765/api/cluster | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(n["name"], n.get("ok"), [e["models"] for e in n.get("engines",[])]) for n in d["nodes"]]'
 ```
-Expose it on the tailnet (one-time; needs MagicDNS + HTTPS certificates enabled in the Tailscale admin console):
+Checks and day-2:
 ```
-spark-1$ sudo tailscale set --operator=$USER
-spark-1$ tailscale serve --bg --https=443 5555
-spark-1$ tailscale serve status              # https://burhan.tailed338.ts.net → 127.0.0.1:5555
-laptop$  curl -s -o /dev/null -w '%{http_code}\n' https://burhan.tailed338.ts.net/api/settings
+laptop$ curl -s http://100.90.164.11:9177/v1/hello                 # no token needed for this one
+spark-1$ rack monitor status                                         # containers, one line per node, the endpoint
+spark-1$ rack monitor logs ; rack monitor logs worker
+spark-1$ rack monitor token --rotate                                 # new token, both nodes restart; paste it again
+spark-1$ rack monitor down                                           # stop both; the token stays
 ```
-The console keys for it are in §2.2 (`sparkdash_url` via the tunnel of §2.3, `telemetry_source`, `sparkdash_open_url`). The ByteBunker palette inside the dashboard is a local commit in `~/dgx/sparkDash` (`git log --oneline -1` → `theme: bytebunker light/dark palettes…`, files `src/components/ThemeSwitch.tsx`, `src/index.css`, `index.html`); after pulling upstream, `git rebase` onto it and `docker compose up --build -d`.
+What runs (`docker ps --filter label=ai.bytebunker.rack-monitor` on each Spark): `rack-monitor` (host network and pids, read-only, no capabilities, your uid, :9177; spark-2's listens only on 192.168.100.2 and loopback) and `rack-monitor-docker` (no network, the only holder of the Docker socket, writes the container list to `~/.local/state/rack-monitor/containers.json`).
+
+sparkDash, which fed this screen before 0.2.0, still runs on spark-1 and nothing reads it. To retire it: `spark-1$ cd ~/dgx/sparkDash && docker compose down && tailscale serve reset`.
 
 ---
 
 ## 5. Smoke tests, end to end
 ```
 hermes$ curl -s http://127.0.0.1:8765/api/agents | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["enabled"], d["host"], d["master_name"])'
-hermes$ curl -s http://127.0.0.1:8765/api/telemetry | python3 -c 'import sys,json; [print(n["name"], n["kind"], n.get("util"), n.get("llm",{}).get("model")) for n in json.load(sys.stdin)["nodes"]]'
+hermes$ curl -s http://127.0.0.1:8765/api/cluster | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(m["name"], m["ok"], m.get("error","")) for m in d["monitors"]]; [print(n["name"], n.get("ok"), (n.get("gpus") or [{}])[0].get("util"), [e["models"] for e in n.get("engines",[])]) for n in d["nodes"]]'
 hermes$ curl -s http://127.0.0.1:8765/api/rack | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["serving"], len(d["recipes"]))'
 hermes$ curl -s http://127.0.0.1:8765/api/recipes | python3 -c 'import sys,json; d=json.load(sys.stdin); print([r["id"] for r in d["recipes"]], d["litellm"])'
 hermes$ cat > /tmp/goal.json <<'GOAL'
@@ -424,6 +431,6 @@ laptop$ COPYFILE_DISABLE=1 tar c --no-xattrs src scripts docker skills | ssh her
 
 **Change what the Sparks serve**: Recipes screen → rack card, or `spark-1$ rack up <recipe>` (`rack down` first when switching between TP=2 recipes).
 
-**Backups worth taking**: hermes `~/bytebunker-console/config.json` and `data/` (traces, usage, sessions); worker `~/bytebunker-harness/config/config.yaml` and `trajectories/`; spark-1 `~/dgx/dgx-spark-setup/config/litellm.config.yaml` (the console keeps `*.bak-*` copies beside it) and `~/dgx/sparkDash/config/`.
+**Backups worth taking**: hermes `~/bytebunker-console/config.json` and `data/` (traces, usage, sessions); worker `~/bytebunker-harness/config/config.yaml` and `trajectories/`; spark-1 `~/dgx/dgx-spark-setup/config/litellm.config.yaml` (the console keeps `*.bak-*` copies beside it) and `~/.config/rack/monitor.token` (or rotate it: `rack monitor token --rotate`).
 
 **Rollback**: console files are plain copies, so `git checkout <sha>` on the laptop and re-copy; harness image tags are not versioned, so rebuild from the checkout at the wanted commit; litellm from its `.bak-*`.

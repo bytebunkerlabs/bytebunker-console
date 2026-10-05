@@ -3,8 +3,8 @@
 
 Successor to chatserve: serves the console UI and provides the small API the
 UI needs. Nothing leaves the rack — the only outbound calls are to the
-upstream OpenAI-compatible endpoint (your gateway or vLLM) and, optionally,
-your own Prometheus.
+OpenAI-compatible gateways you configure and, optionally, the rack monitors
+the Cluster screen reads (monitors.py).
 
   python3 server.py                 # reads config.json next to this file
   python3 server.py --port 8765
@@ -14,7 +14,8 @@ API:
   GET  /api/config           UI-facing config (node names, identity, rates)
   GET  /api/models           proxied upstream /v1/models
   POST /api/chat             proxied streaming /v1/chat/completions (SSE)
-  GET  /api/telemetry        Prometheus-backed node cards (or {"nodes": []})
+  GET  /api/cluster          every node from every rack monitor (?history=N samples)
+  GET  /api/monitors         configured monitors  |  POST add/update/toggle/remove/test/discover
   GET  /api/sessions         list sessions  |  POST save  |  DELETE ?id=
   POST /api/archive          file away compressed turns  |  GET /api/archive/<name>
   POST /api/rate             thumbs up/down on a turn, into the trace log
@@ -47,6 +48,7 @@ import recipes as recipemod
 import mcp_catalog as catmod
 import jobs as jobmod
 import gateways as gwmod
+import monitors as monmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -65,16 +67,13 @@ DEFAULT_CONFIG = {
     "port": 8765,
     "upstream_url": "http://127.0.0.1:8000/v1",
     "upstream_key": "bb-local",
+    # rack monitors for the Cluster screen: [{"name", "url", "token", "enabled"}]
+    "monitors": [],
+    # optional, legacy: a Prometheus that scrapes vLLM, asked only when no
+    # monitor reports an engine (the playground's "engine is busy" hint)
     "prometheus_url": "",
-    "sparkdash_url": "",        # e.g. http://127.0.0.1:15555 (ssh tunnel to the head Spark's sparkDash)
-    "sparkdash_open_url": "",   # where a browser can open sparkDash itself (tailnet URL), for the Cluster link
-    "telemetry_source": "",     # "prometheus" | "sparkdash"; blank = sparkdash if only that is set
     "h3_url": "",
     "netcheck_ssh": "",
-    "nodes": [
-        {"name": "spark-1", "instance": "spark-1"},
-        {"name": "spark-2", "instance": "spark-2"},
-    ],
     "identity": {"user": "mo@bunker", "host": "local"},
     "frontier_rates_per_mtok": {"input": 3.0, "output": 15.0},
     # Safe by default: the harness launcher is inert until you enable it and
@@ -197,6 +196,9 @@ _LOCK = threading.Lock()
 # of the Sparks, a vLLM on a workstation GPU, Ollama on a laptop — merged
 # into one model list and routed per request by the model's name.
 GW = gwmod.Registry(CFG, caps_for)
+# The Cluster screen's source: rack monitors (`rack monitor up` on a head
+# node), each one URL + one token for every node behind it.
+MON = monmod.Monitors(CFG)
 
 # Skills live in the repo's skills/, in any dir listed in config's skills_dirs
 # (point one at the harness's skills/ to share them), and inside enabled
@@ -781,25 +783,7 @@ def usage_summary():
     }
 
 
-# -------------------------------------------------------------- prometheus --
-def prom_query(q):
-    base = CFG.get("prometheus_url", "").rstrip("/")
-    if not base:
-        return None
-    url = base + "/api/v1/query?" + urllib.parse.urlencode({"query": q})
-    try:
-        with urllib.request.urlopen(url, timeout=4) as r:
-            d = json.load(r)
-        if d.get("status") == "success":
-            return d["data"]["result"]
-    except Exception:
-        return None
-    return None
-
-
-# Queries assume utkuozdemir/nvidia_gpu_exporter + node-exporter, one pair per
-# node, labelled by instance. Adjust to your labels; every query failing just
-# renders as an em-dash in the UI, never a fake number.
+# ------------------------------------------------------------ engine stats --
 def _prom_query(q):
     base = CFG.get("prometheus_url", "").rstrip("/")
     url = base + "/api/v1/query?query=" + urllib.parse.quote(q)
@@ -814,9 +798,14 @@ def engine_stats():
     (measured: deepseek_v4 — 64s of silent wire, then a whole file in 15
     bursts) buffer a tool call server-side while the GPU streams into a
     buffer. A dead stream and a busy-but-buffered stream are identical from
-    the client, so the console asks Prometheus, which scrapes vLLM directly.
-    Colons are legal in Prometheus metric names but not in PromQL bare
-    selectors — hence the __name__ form."""
+    the client, so the console asks the engines themselves: the rack
+    monitors read every engine's /metrics. A Prometheus that scrapes vLLM is
+    the fallback. (Colons are legal in Prometheus metric names but not in
+    PromQL bare selectors, hence the __name__ form below.)"""
+    if MON.list():
+        st = MON.engine_stats()
+        if st.get("ok") or not CFG.get("prometheus_url"):
+            return st
     if not CFG.get("prometheus_url"):
         return {"ok": False}
     try:
@@ -866,123 +855,6 @@ def netcheck(fresh=False):
             res = {"ok": False, "at": int(time.time()), "error": str(e)[:200]}
         _NET.update(at=time.time(), result=res)
         return res
-
-
-_sd_cache = {"at": 0, "val": None}
-
-
-def sparkdash_telemetry():
-    """Node cards from sparkDash (MiaAI-Lab/sparkDash) instead of Prometheus:
-    one GET for the unit list, one per unit for its snapshot. sparkDash is
-    loopback-only on the head Spark; the console reaches it through the same
-    ssh tunnel it uses for Prometheus (sparkdash_url, e.g. 127.0.0.1:15555).
-    Its snapshot also carries the unit's LLM probe — model, tok/s, KV cache,
-    queue, TTFT — which Prometheus never gave the cards."""
-    now = time.time()
-    if _sd_cache["val"] is not None and now - _sd_cache["at"] < 2:
-        return _sd_cache["val"]
-    base = CFG.get("sparkdash_url", "").rstrip("/")
-
-    def get(path):
-        with urllib.request.urlopen(urllib.request.Request(base + path), timeout=4) as r:
-            return json.loads(r.read().decode("utf-8", "replace"))
-    try:
-        units = get("/api/sparks")
-        units = units if isinstance(units, list) else (units.get("sparks") or [])
-    except Exception as e:   # noqa: BLE001
-        val = {"nodes": [], "source": "sparkdash", "error": "sparkDash unreachable: %s" % str(e)[:100]}
-        _sd_cache.update(at=now, val=val)
-        return val
-    out = []
-    for u in units:
-        uid = u.get("id")
-        if not uid:
-            continue
-        try:
-            d = get("/api/sparks/%s/metrics" % urllib.parse.quote(str(uid)))
-        except Exception:   # noqa: BLE001
-            d = dict(u, metrics={}, online=False)
-        m = d.get("metrics") or {}
-        gpu = m.get("gpu") or {}
-        vram = gpu.get("vram") or {}
-        cpu = m.get("cpu") or {}
-        power = gpu.get("power") or {}
-        kind = d.get("kind") or u.get("kind") or "spark"
-        online = bool(d.get("online", u.get("online", True)))
-        node = {
-            "name": d.get("name") or u.get("name") or uid,
-            "id": uid, "kind": kind, "role": d.get("role") or u.get("role"),
-            "online": online, "source": "sparkdash",
-            "util": gpu.get("usage") if online else None,
-            "mem_used_gb": round(vram["used"] / 1024, 1) if online and vram.get("used") is not None else None,
-            "mem_total_gb": round(vram["total"] / 1024) if vram.get("total") else None,
-            "mem_label": "VRAM" if kind == "host" else "Unified memory",
-            "temp": gpu.get("temperature") if online else None,
-            "power": power.get("draw") if online else None,
-            "cpu": cpu.get("usage") if online else None,
-            "uptime_s": d.get("uptime") if online else None,
-            "hardware": (d.get("hardware") or {}).get("device"),
-            "throttle": (gpu.get("throttle") or {}).get("reason"),
-        }
-        llms = m.get("llm") or []
-        if isinstance(llms, dict):
-            llms = [llms]
-        live = [x for x in llms if isinstance(x, dict) and x.get("available")]
-        if live:
-            x = live[0]
-            node["llm"] = {
-                "model": x.get("modelId"), "backend": x.get("backend"),
-                "tps": x.get("generationTps"), "prefill_tps": x.get("prefillTps"),
-                "kv": x.get("kvCacheUsage"), "running": x.get("requestsRunning"),
-                "waiting": x.get("requestsWaiting"), "ttft_p95": x.get("ttftP95Seconds"),
-                "prefix_hit": x.get("prefixCacheHitRate"), "context": x.get("contextLength"),
-                "ports": len(live),
-            }
-        out.append(node)
-    val = {"nodes": out, "source": "sparkdash"}
-    _sd_cache.update(at=now, val=val)
-    return val
-
-
-def telemetry_source():
-    src = (CFG.get("telemetry_source") or "").strip().lower()
-    if src in ("sparkdash", "prometheus"):
-        return src
-    if CFG.get("sparkdash_url") and not CFG.get("prometheus_url"):
-        return "sparkdash"
-    return "prometheus"
-
-
-def telemetry():
-    if telemetry_source() == "sparkdash" and CFG.get("sparkdash_url"):
-        return sparkdash_telemetry()
-    out = []
-    for node in CFG.get("nodes", []):
-        inst = node.get("instance", node["name"])
-        def one(q):
-            r = prom_query(q % {"i": inst})
-            try:
-                return float(r[0]["value"][1])
-            except (TypeError, IndexError, KeyError, ValueError):
-                return None
-        mem_total = one('node_memory_MemTotal_bytes{instance=~"%(i)s.*"}')
-        mem_avail = one('node_memory_MemAvailable_bytes{instance=~"%(i)s.*"}')
-        used_gb = None
-        if mem_total and mem_avail:
-            used_gb = round((mem_total - mem_avail) / 2**30, 1)
-        util = one('nvidia_smi_utilization_gpu_ratio{instance=~"%(i)s.*"}')
-        out.append({
-            "name": node["name"],
-            # exporter reports a 0-1 ratio; the UI speaks percent
-            "util": round(util * 100, 1) if util is not None else None,
-            "mem_used_gb": used_gb,
-            "mem_total_gb": round(mem_total / 2**30) if mem_total else None,
-            "temp": one('nvidia_smi_temperature_gpu{instance=~"%(i)s.*"}'),
-            "power": one('nvidia_smi_power_draw_watts{instance=~"%(i)s.*"}'),
-            "cpu": one('100 - avg(rate(node_cpu_seconds_total{mode="idle",instance=~"%(i)s.*"}[1m])) * 100'),
-            "uptime_s": one('time() - node_boot_time_seconds{instance=~"%(i)s.*"}'),
-        })
-    return {"nodes": out}
 
 
 # ---------------------------------------------------------------- upstream --
@@ -1223,10 +1095,6 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/config":
             self._json({
-                # spec is optional operator-declared hardware copy; the UI
-                # renders it verbatim or omits the line — it never invents one
-                "nodes": [{"name": n["name"], "spec": n.get("spec", "")}
-                          for n in CFG.get("nodes", [])],
                 "identity": CFG.get("identity", {}),
                 "upstream": CFG.get("upstream_url", ""),
                 "gateways": [g["name"] for g in GW.gateways()],
@@ -1234,9 +1102,7 @@ class Handler(BaseHTTPRequestHandler):
                 "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
                 "version": os.environ.get("BYTEBUNKER_VERSION") or "",
                 "platform": sys.platform,
-                "telemetry": bool(CFG.get("prometheus_url") or CFG.get("sparkdash_url")),
-                "telemetry_source": telemetry_source(),
-                "sparkdash_open_url": CFG.get("sparkdash_open_url") or "",
+                "monitors": len(MON.list()),
                 "mcp": bool(CFG.get("mcp_servers")),
                 "video": bool(CFG.get("h3_url")),
                 "netcheck": bool(CFG.get("netcheck_ssh")),
@@ -1270,8 +1136,19 @@ class Handler(BaseHTTPRequestHandler):
             if q.get("live"):
                 body["live"] = GW.live()
             self._json(body)
-        elif path == "/api/telemetry":
-            self._json(telemetry())
+        elif path == "/api/cluster":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                hist = int((q.get("history") or ["0"])[0])
+            except ValueError:
+                hist = 0
+            self._json(MON.cluster(hist))
+        elif path == "/api/monitors":
+            recent = MON.latest(max_age=30) or (MON.cluster(0) if MON.list() else {})
+            st = {m["name"]: m for m in recent.get("monitors", [])}
+            self._json({"monitors": [{"name": m["name"], "url": m["url"], "enabled": m["enabled"],
+                                      "has_token": bool(m["token"]), "status": st.get(m["name"])}
+                                     for m in MON.list()]})
         elif path == "/api/engine":
             self._json(engine_stats())
         elif path == "/api/netcheck":
@@ -1441,7 +1318,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/settings", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -1575,6 +1452,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": bool(evt)})
         elif path == "/api/gateways":
             self._gateways_admin(body)
+        elif path == "/api/monitors":
+            self._monitors_admin(body)
         elif path == "/api/settings":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
@@ -1934,6 +1813,78 @@ class Handler(BaseHTTPRequestHandler):
         TRACE.log("gateway", action=action, name=name)
         self._json({"ok": True, "status": GW.status, "models": len(GW.models),
                     "gateways": [{"name": g["name"], "url": g["url"], "enabled": g.get("enabled", True)} for g in gws]})
+
+    def _monitors_admin(self, body):
+        """Add, edit, toggle, remove, test or find rack monitors. Add checks
+        the endpoint first (it must be a rack monitor and the token must
+        work) unless force is set, so a typo is caught here, not later as a
+        blank Cluster screen."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action") or "add"
+        if action == "discover":
+            hosts = body.get("hosts") or []
+            if isinstance(hosts, str):
+                hosts = [h.strip() for h in hosts.split(",") if h.strip()]
+            res = monmod.discover(CFG, extra_hosts=hosts, include_tailnet=body.get("tailnet", True))
+            TRACE.log("monitor", action="discover", found=len(res["found"]), hosts=res["hosts_probed"], ms=res["ms"])
+            self._json(dict(res, ok=True))
+            return
+        mons = monmod.normalize(CFG)
+        name = str(body.get("name") or "").strip()[:60]
+        if action in ("add", "test"):
+            url, url_token = monmod.parse_url(body.get("url"))
+            if not url:
+                self._json({"error": "endpoint is required: host:port or http://host:9177"}, 400)
+                return
+            token = str(body.get("token") or "").strip() or url_token
+            if action == "add" and any(m["url"] == url for m in mons):
+                self._json({"error": "that monitor is already configured"}, 409)
+                return
+            res = monmod.check(url, token)
+            if action == "test":
+                self._json(dict(res, url=url))
+                return
+            if not res["ok"] and not body.get("force"):
+                self._json(dict(res, url=url), 422)
+                return
+            name = name or (res.get("cluster") if res.get("ok") else "") or url.split("//")[-1]
+            if any(m["name"] == name for m in mons):
+                name = "%s-%d" % (name, len(mons) + 1)
+            mons.append({"name": name, "url": url, "token": token, "enabled": True})
+        else:
+            m = next((x for x in mons if x["name"] == name), None)
+            if not m:
+                self._json({"error": "no such monitor"}, 404)
+                return
+            if action == "remove":
+                mons.remove(m)
+            elif action == "toggle":
+                m["enabled"] = not m["enabled"]
+            elif action == "update":
+                if body.get("url"):
+                    url, url_token = monmod.parse_url(body["url"])
+                    if not url:
+                        self._json({"error": "bad endpoint"}, 400)
+                        return
+                    m["url"] = url
+                    if url_token and "token" not in body:
+                        m["token"] = url_token
+                if "token" in body:
+                    m["token"] = str(body.get("token") or "").strip()
+                if body.get("new_name"):
+                    m["name"] = str(body["new_name"]).strip()[:60]
+            else:
+                self._json({"error": "unknown action"}, 400)
+                return
+        CFG["monitors"] = mons
+        save_config()
+        MON.invalidate()
+        TRACE.log("monitor", action=action, name=name)
+        self._json({"ok": True, "name": name,
+                    "monitors": [{"name": m["name"], "url": m["url"], "enabled": m["enabled"],
+                                  "has_token": bool(m["token"])} for m in mons]})
 
     def _skill_admin(self, body):
         """Create or delete a skill from the UI. The file is written in the

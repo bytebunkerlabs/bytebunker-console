@@ -45,7 +45,6 @@
     <div class="nav-label">Observe</div>
     <nav class="nav">
       <button data-nav="cluster"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="2.6" width="12" height="4.4" rx="1.3"/><rect x="2" y="9" width="12" height="4.4" rx="1.3"/><circle cx="4.7" cy="4.8" r="0.75" fill="currentColor" stroke="none"/><circle cx="4.7" cy="11.2" r="0.75" fill="currentColor" stroke="none"/></svg><span>Cluster</span></button>
-      <button data-nav="sparkdash"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 1.8 3.6 9h4l-.8 5.2L12.4 7h-4z"/></svg><span>sparkDash</span></button>
       <button data-nav="settings"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.6M8 12.5v1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M1.9 8h1.6M12.5 8h1.6M3.7 12.3l1.1-1.1M11.2 4.8l1.1-1.1"/></svg><span>Settings</span></button>
       <button data-nav="usage"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3.2 13V8.4M8 13V3.4M12.8 13v-3.1"/></svg><span>Usage</span></button>
     </nav>
@@ -286,13 +285,16 @@
     <!-- Cluster -->
     <section class="screen" id="screen-cluster">
       <header>
-        <h1>Cluster</h1><span class="sub" id="cluster-sub">node telemetry</span><div class="grow"></div>
+        <h1>Cluster</h1><span class="sub" id="cluster-sub">—</span><div class="grow"></div>
         <span class="live mono" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)" id="cluster-poll"><span class="dot"></span>—</span>
+        <button class="ghost-btn" id="cluster-monitors-btn" type="button" style="margin-left:12px">Monitors</button>
       </header>
       <div class="scroll">
-        <div class="card-grid" id="node-cards"></div>
-        <div id="agents-obs" class="card-grid" style="margin-top:14px"></div>
+        <div id="cluster-monitors" hidden></div>
         <div id="cluster-note"></div>
+        <div class="rk-summary" id="cluster-summary" hidden></div>
+        <div class="rk-units" id="node-cards"></div>
+        <div id="agents-obs" class="card-grid" style="margin-top:14px"></div>
         <div class="netcheck" id="netcheck-card" hidden>
           <div class="netcheck-head">
             <div>
@@ -323,19 +325,6 @@
       <div class="scroll agents-grid">
         <div class="agents-left" id="mcp-left"></div>
         <aside class="agents-detail" id="mcp-detail"><div class="hint">Pick a server to see its tools, or add one from the catalog. "Install locally" pre-installs the package (and for Playwright the Chromium build) on this host, then adds the server; the log streams here.</div></aside>
-      </div>
-    </section>
-
-    <!-- sparkDash, embedded -->
-    <section class="screen" id="screen-sparkdash">
-      <header>
-        <h1>sparkDash</h1><span class="sub" id="sparkdash-sub">MiaAI-Lab/sparkDash on the head Spark · tailnet only</span><div class="grow"></div>
-        <button class="ghost-btn" id="sparkdash-reload" type="button">reload</button>
-        <a class="ghost-btn" id="sparkdash-open" href="#" target="_blank" rel="noopener" style="text-decoration:none;margin-left:8px">open in a new tab</a>
-      </header>
-      <div id="sparkdash-wrap" style="flex:1;min-height:0;display:flex;flex-direction:column;height:calc(100vh - 110px)">
-        <div id="sparkdash-note" class="hint" style="padding:14px" hidden></div>
-        <iframe id="sparkdash-frame" title="sparkDash" style="flex:1;width:100%;height:100%;border:0;background:transparent" allow="clipboard-write" referrerpolicy="no-referrer"></iframe>
       </div>
     </section>
 

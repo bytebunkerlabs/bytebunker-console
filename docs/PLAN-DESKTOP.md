@@ -2,7 +2,7 @@
 
 Hand-off document for the engineer or agent that turns the ByteBunker console into a standalone desktop application for macOS and Windows that finds, connects to and uses models on the user's machines and rack. Written 2026-10-03 from the live deployment. Read `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md` and `docs/RUNBOOK.md` first; this plan assumes them.
 
-## Status — 2026-10-03
+## Status — 2026-10-05
 
 | Phase | State | Where |
 |---|---|---|
@@ -14,11 +14,12 @@ Hand-off document for the engineer or agent that turns the ByteBunker console in
 | 4.1 agents from the app | **done** — connect-a-worker form (ssh test of harness, container runtime, launcher), disconnect, OpenSSH check on Windows | Agents screen, `agents.test_worker` |
 | 4.2 harness routes by gateway | **not started** — agents still reach models through one router (litellm) | — |
 | 5 polish | **partly** — live health polling, Settings screen (data folder, name, rates, manual update check, export), server restart guard | Settings screen |
+| Cluster (0.2.0) | **done** — one Cluster screen fed by rack monitors (`rack monitor up` in dgx-spark-serve: one endpoint and token per rack); add / find / token / toggle / remove in Cluster › Monitors; the sparkDash screen and the Prometheus node cards are gone; the engine-busy hint reads the monitors | `monitors.py`, Cluster screen, `tests/test_monitors.py`, CI smoke adds a fake monitor |
 
 How it was verified: on this laptop against the rack over the tailnet (migration, add by `host:port`, merged list with `model@gateway`, routing proven by litellm's own request log, discovery, usage per gateway, jobs); on hermes after deploy (all ten MCP servers, chat, worker check); the packaged Mac app locally (HTTP smoke, window smoke, DMG mounted read-only); both packaged apps in CI.
 
 Deviations from the plan, with reasons:
-- `engine_stats()` and `netcheck()` never read `upstream_url` (one uses Prometheus, the other `rack net`), so gap 3 in §1 was a non-issue.
+- `engine_stats()` and `netcheck()` never read `upstream_url` (one reads the engines' own metrics, now through the rack monitors, the other runs `rack net`), so gap 3 in §1 was a non-issue.
 - The branch had never run: the registry was created before the config was loaded, and a pinned `model@gateway` lost its pin on the proxy's automatic retry. Both fixed; the proxy now resolves the gateway once per request.
 - Discovery: the laptop's Tailscale peer list held 535 Mullvad exit nodes, so discovery now probes only the user's own tailnet (MagicDNS suffix, no exit-node tags): 6 hosts in ~0.6 s instead of 542 in 29 s. HTTPS on 443 is probed by MagicDNS name. A 401/403 counts as "engine behind a key" only when the body is JSON (a router login page is not an engine).
 - macOS holds the first local-network connections of a new app until the user allows Local Network access: the bundle carries `NSLocalNetworkUsageDescription` and the UI says what to do when a search comes back empty.
@@ -151,7 +152,7 @@ Why pywebview + PyInstaller rather than Electron or Tauri: the app is Python alr
   "mcp_servers": {"terminal": {"command": "python3", "args": ["mcp_terminal.py", "~/rack"]}, "jobs": {"command": "python3", "args": ["mcp_jobs.py"]}},
   "uploads_dir": "<data>/uploads",
   "agents": {"enabled": false, "ssh": "", "dir": "~/bytebunker-harness", "python": "uv run", "script": "scripts/run_master.py", "master_name": "Sultan", "master_instructions": "", "run_timeout_s": 10800, "master_model": "", "thinking_model": "", "slave_model": ""},
-  "prometheus_url": "", "sparkdash_url": "", "sparkdash_open_url": "", "telemetry_source": "",
+  "monitors": [],
   "frontier_rates_per_mtok": {"input": 3.0, "output": 15.0}
 }
 ```

@@ -140,42 +140,45 @@ ollama serve
 
 ---
 
-## Cluster telemetry (optional)
+## Cluster: every node from one rack monitor
 
-Two sources feed the node cards. **Prometheus** (`prometheus_url` + `nodes`)
-reads node-exporter and the nvidia-smi exporter. **sparkDash**
-([MiaAI-Lab/sparkDash](https://github.com/MiaAI-Lab/sparkDash), `sparkdash_url`)
-reads its per-unit snapshot instead, which also carries each unit's LLM probe
-(model, tokens/s, KV cache, queue, TTFT p95, prefix-cache hit rate) and treats
-a non-Spark GPU box as a first-class unit. sparkDash binds to loopback on the
-head Spark, so point `sparkdash_url` at an ssh tunnel (the console's tunnel
-service forwards 127.0.0.1:15555 → spark-1:5555) and set
-`telemetry_source: "sparkdash"`. `sparkdash_open_url` adds an "open sparkDash"
-link on the Cluster screen (a Tailscale Serve URL works well).
+The **Cluster** screen draws every machine as a rack unit: a faceplate (what
+the box is, uptime, where the numbers come from), four meters (GPU with
+clocks and throttle reasons, memory with what GPU processes hold, every CPU
+core, power and temperatures), each inference engine it serves (tokens per
+second, queue, KV cache, time to first token, prefix-cache hits), its network
+links by kind (fabric, LAN, tailnet), its disk and its containers. The
+sidebar keeps one bar per node.
 
+The numbers come from **rack monitors**: a small read-only service from
+[dgx-spark-serve](https://github.com/bytebunkerlabs/dgx-spark-serve/blob/main/docs/11-monitor.md)
+(`monitor/rackmon.py`, one file of standard-library Python). On a rack's head
+node:
 
-The Cluster screen and the sidebar bars read from a Prometheus you already run:
-
-```json
-{
-  "prometheus_url": "http://127.0.0.1:9090",
-  "nodes": [
-    { "name": "spark-1", "instance": "node-exporter", "spec": "GB10 · 128 GB unified" },
-    { "name": "spark-2", "instance": "192.168.100.2", "spec": "GB10 · 128 GB unified" }
-  ]
-}
+```bash
+rack monitor up        # runs it on every node; prints the endpoint
+rack monitor token     # prints the token
 ```
 
-`instance` is matched against the Prometheus `instance` label as a prefix regex.
-Queries assume [node_exporter](https://github.com/prometheus/node_exporter) and
-[nvidia_gpu_exporter](https://github.com/utkuozdemir/nvidia_gpu_exporter); any
-metric that doesn't resolve renders as an em-dash rather than a guess. Leave
-`prometheus_url` empty and the screen says so instead of inventing numbers.
+Then **Cluster › Monitors**: paste the endpoint and the token, or
+`http://rack:TOKEN@host:9177` as one string, or press **Find on this
+network**. The console checks it is a monitor and that the token works
+before saving, fetches `/v1/cluster` server-side (the token never reaches the
+browser), and merges any number of monitors into one view. A machine without
+rack runs the same file bare: `python3 rackmon.py serve` with
+`MONITOR_TOKEN_FILE` set.
 
-> **On GB10 specifically:** node_exporter's default collector set hangs on this
-> hardware — scrapes pile up until every metric goes blank. Start it with an
-> explicit minimal set:
-> `--collector.disable-defaults --collector.meminfo --collector.cpu --collector.stat --collector.loadavg`
+```json
+"monitors": [
+  { "name": "rack", "url": "http://spark-1:9177", "token": "…", "enabled": true }
+]
+```
+
+The agents worker's own GPU and model, read over ssh by the agents poll, is
+drawn as one more unit. The Playground's "engine is busy" hint (when a stream
+goes quiet while a tool call buffers) reads the same monitors; a Prometheus
+that scrapes vLLM (`prometheus_url`) is only asked when no monitor reports an
+engine.
 
 ---
 
@@ -373,8 +376,8 @@ WireGuard) works the same way.
 | `gateways` | *(from `upstream_url`)* | list of `{name, url, key, enabled, kind}`: every OpenAI-compatible endpoint; models are merged and routed by name, `model@gateway` pins one |
 | `upstream_url` / `upstream_key` | — | legacy single upstream; becomes the gateway `upstream`, and is kept in sync with the first enabled gateway |
 | `uploads_dir` | `data/uploads` | where attachments are saved; put it under a tool's root to let tools read them |
-| `prometheus_url` | *(empty)* | enables the Cluster screen |
-| `nodes` | two examples | `name`, `instance` (Prometheus label prefix), `spec` |
+| `monitors` | *(empty)* | list of `{name, url, token, enabled}`: rack monitors the Cluster screen reads (add them from Cluster › Monitors) |
+| `prometheus_url` | *(empty)* | optional fallback for the Playground's engine-busy hint when no monitor reports an engine |
 | `mcp_servers` | *(empty)* | `command`, `args`, `env`, `enabled` |
 | `frontier_rates_per_mtok` | 3 / 15 | used for the "not spent" figure on Usage |
 | `skills_dirs` | *(empty)* | extra directories of skill packs; point one at the agent harness's `skills/` to share them |

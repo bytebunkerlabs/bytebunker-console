@@ -10,12 +10,12 @@ debug it. The command-by-command reproduction of every host is `RUNBOOK.md`. Wri
 | Host | What it is | Reach it | Runs |
 |---|---|---|---|
 | **hermes** (`mos-mac-mini`) | Control plane, Mac mini, user `mo` | `ssh hermes` from the laptop; LAN + tailnet 100.112.146.107 | console (launchd), ssh tunnel service (launchd) |
-| **spark-1** (`burhan`) | Model plane head, DGX Spark, user `trickyfalcon` | `ssh spark-1` (laptop and hermes → `trickyfalcon@172.16.25.186`); tailnet 100.90.164.11; direct link 192.168.100.1 | vLLM head (`serve_node`, docker), litellm gateway (`dgx-inference-litellm-1`, :4000), Prometheus (:9090), Grafana, sparkDash (:5555, docker) |
-| **spark-2** (`aleem`) | Model plane worker, DGX Spark | `ssh spark-2` from spark-1; LAN 172.16.25.185; direct link 192.168.100.2 | vLLM tensor-parallel worker (`serve_node`), node + GPU exporters |
+| **spark-1** (`burhan`) | Model plane head, DGX Spark, user `trickyfalcon` | `ssh spark-1` (laptop and hermes → `trickyfalcon@172.16.25.186`); tailnet 100.90.164.11; direct link 192.168.100.1 | vLLM head (`serve_node`, docker), litellm gateway (`dgx-inference-litellm-1`, :4000), rack monitor (:9177, `rack monitor`), Prometheus (:9090), Grafana |
+| **spark-2** (`aleem`) | Model plane worker, DGX Spark | `ssh spark-2` from spark-1; LAN 172.16.25.185; direct link 192.168.100.2 | vLLM tensor-parallel worker (`serve_node`), rack monitor (fabric only, 192.168.100.2:9177), node + GPU exporters |
 | **leagueofash** | Windows Server box with an RTX 2070 (8 GB); LAN 172.16.25.83; tailnet 100.95.150.96 | RDP / local | Ollama (native, unused by the stack), Windows port forwards, the WSL2 VM below |
 | **agents-worker** | Ubuntu WSL2 inside leagueofash, user `trickyfalcon`; its own tailnet node 100.100.129.98; NAT address 172.22.36.141 (changes on reboot) | `ssh agents-worker` from hermes and the laptop | agent harness, rootless podman, vLLM for the small model (`vllm-qwen3-4b-fast.service`, :8001) |
 
-Addresses the console cares about: litellm `http://172.16.25.186:4000/v1` (LAN), Prometheus through the hermes tunnel `127.0.0.1:19090`, sparkDash through the hermes tunnel `127.0.0.1:15555` and on the tailnet `https://burhan.tailed338.ts.net`.
+Addresses the console cares about: litellm `http://172.16.25.186:4000/v1` (LAN) and the rack monitor `http://100.90.164.11:9177` (tailnet; ufw closes :9177 on the LAN, see §3). Prometheus through the hermes tunnel `127.0.0.1:19090` is only a fallback for the Playground's engine-busy hint.
 
 The rule behind the layout: **agents never run on a model host or on the control host.** The Sparks only serve; hermes only launches and watches; the worker runs agents in containers with no network.
 
@@ -27,9 +27,8 @@ The rule behind the layout: **agents never run on a model host or on the control
 |---|---|---|---|
 | `bytebunkerlabs/bytebunker-console` | public | `~/Documents/AI/bytebunker-console` | hermes `~/bytebunker-console` — **a file copy, not a git checkout** |
 | `bytebunkerlabs/bytebunker-harness` | private, no LICENSE | `~/Documents/AI/bytebunker-harness` | agents-worker `~/bytebunker-harness` — a git clone whose deploy key needs a passphrase, so code is pushed with tar (see §6) |
-| `bytebunkerlabs/dgx-spark-serve` | | | spark-1 `~/dgx/dgx-spark-serve` (`rack` CLI, recipes for the Sparks) |
+| `bytebunkerlabs/dgx-spark-serve` | public | | spark-1 `~/dgx/dgx-spark-serve` (`rack` CLI, recipes for the Sparks, `monitor/` = the rack monitor) |
 | `bytebunkerlabs/dgx-spark-setup` | | | spark-1 `~/dgx/dgx-spark-setup` (host prep; litellm and Prometheus configs live here) |
-| `MiaAI-Lab/sparkDash` | MIT | | spark-1 `~/dgx/sparkDash`, with one local commit (ByteBunker themes) |
 
 Console layout: `server.py` (HTTP server, all API routes), `agents.py` (harness launch, live views, worker stats, agent usage), `recipes.py` (model deployment recipes), `skills.py` (skills + plugins), `traces.py` (trace log + training export), `mcp.py` / `mcp_terminal.py` (MCP host and the terminal tool), `public/` (one HTML, one JS, one CSS), `skills/` (built-in skills), `plugins/`, `docs/`, `install.sh`.
 
@@ -43,14 +42,15 @@ Harness layout (`src/bytebunker_agents/`): `master/` (the Sultan: `agent.py` loo
 - **Console**: launchd `ai.bytebunker.console` → `/usr/bin/python3 ~/bytebunker-console/server.py`, port 8765, log `~/bytebunker-console/data/console.log`.
   `launchctl kickstart -k gui/501/ai.bytebunker.console` restarts it. **Never restart while an agent run is streaming**: the run's ssh session dies with the server.
   `public/*.js|html|css` are read from disk on every request: copy and reload the browser, no restart. `server.py`, `agents.py`, `recipes.py`, `skills.py`, `config.json` need a restart.
-- **Tunnels**: launchd `ai.bytebunker.tunnel` → `ssh -N … -L 127.0.0.1:19090:127.0.0.1:9090 -L 127.0.0.1:18091:127.0.0.1:8091 -L 127.0.0.1:15555:127.0.0.1:5555 trickyfalcon@172.16.25.186`. Edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel && launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read ProgramArguments).
+- **Tunnels**: launchd `ai.bytebunker.tunnel` → `ssh -N … -L 127.0.0.1:19090:127.0.0.1:9090 -L 127.0.0.1:18091:127.0.0.1:8091 -L 127.0.0.1:15555:127.0.0.1:5555 trickyfalcon@172.16.25.186`. 18091 is the video studio's H3; 19090 (Prometheus) is the engine-busy fallback; 15555 (sparkDash) is unused since 0.2.0 and can go. Edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel && launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read ProgramArguments).
 - Data: `data/config.json` is **not** the config; the live config is `~/bytebunker-console/config.json`. `data/traces/<day>.jsonl` (every chat, tool call, rating, agent run, recipe action), `data/usage.jsonl` (chat token ledger), `data/sessions/`.
 
 ### spark-1 / spark-2 (model plane)
 - **Engine**: `rack up <recipe>` / `rack down` / `rack status` / `rack logs` from `~/dgx/dgx-spark-serve` (also on PATH as `rack`). The recipe `recipes/dsv4-vision-ab.env` is what serves today: TP=2, `--max-model-len 262144`, `--kv-cache-dtype fp8`, tool + reasoning parsers, and `--default-chat-template-kwargs '{"thinking":true,"reasoning_effort":"max"}'` — **thinking is on by default at the engine**, clients must send `chat_template_kwargs.thinking=false` to turn it off. `rack up` also registers the recipe's `GATEWAY_NAME` with litellm.
 - **litellm**: container `dgx-inference-litellm-1`, config bind-mounted from `~/dgx/dgx-spark-setup/config/litellm.config.yaml`. Add a `model_list` entry, then `docker restart dgx-inference-litellm-1`. Every engine on the rack is a name here: `deepseek-v4-vision-uncensored` (the Sparks), `qwen3-4b-fast` (the 2070).
 - **Prometheus/Grafana**: `~/dgx/dgx-spark-setup` compose. Spark-2's GPU exporter loses NVML after a while: `docker restart monitoring-nvidia-gpu-exporter-1` on spark-2.
-- **sparkDash**: `~/dgx/sparkDash`, `docker compose up --build -d` (container `sparkDash`, host network, loopback :5555). Units live in `config/sparks.json`; secrets in `config/`. Exposed on the tailnet with `tailscale serve --bg --https=443 5555` (operator mode was set with `sudo tailscale set --operator=$USER`; MagicDNS and HTTPS certs are enabled on the tailnet).
+- **rack monitor**: `rack monitor up | status | token | logs | down` on spark-1 (dgx-spark-serve `docs/11-monitor.md`). Two containers per node from one image: `rack-monitor` (host network and pids, read-only, no capabilities, your uid; samples every 2 s and serves :9177 behind a token; spark-2's listens only on 192.168.100.2 and loopback, and the head merges it over the fabric) and `rack-monitor-docker` (no network; the only thing holding the Docker socket). Token: `~/.config/rack/monitor.token` on both nodes. ufw drops :9177 on the LAN (LiteLLM's :4000 passes only because Docker-published ports bypass ufw); to open it: `sudo ufw allow from 172.16.25.0/24 to any port 9177 proto tcp`.
+- **sparkDash** (MiaAI-Lab) still runs on spark-1 from before (`~/dgx/sparkDash`, loopback :5555, Tailscale Serve on :443). Nothing in ByteBunker reads it any more. To retire it: `cd ~/dgx/sparkDash && docker compose down`, then `tailscale serve reset` (its two entries, :443 and :5555, are the only serve config on spark-1).
 
 ### agents-worker (agent plane)
 - **Harness**: `~/bytebunker-harness`, run by the console as `uv run scripts/run_master.py --goal …` (uv at `/home/trickyfalcon/.local/bin/uv`). `config/config.yaml` holds the models and limits (§4).
@@ -67,7 +67,7 @@ Everything the console needs from Windows is one-time and already done; redo aft
    netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8001 connectaddress=<wsl-ip> connectport=8001
    netsh advfirewall firewall add rule name="vllm-8001" dir=in action=allow protocol=TCP localport=8001
    ```
-   litellm reaches the model at `http://172.16.25.83:8001/v1` through this forward. There is no forward for ssh: the console and sparkDash reach the VM over its tailnet address.
+   litellm reaches the model at `http://172.16.25.83:8001/v1` through this forward. There is no forward for ssh: the console reaches the VM over its tailnet address.
 4. Ollama on Windows is installed but not part of the stack; it can be registered in litellm with the Ollama recipe if wanted.
 
 ---
@@ -80,7 +80,7 @@ Everything the console needs from Windows is one-time and already done; redo aft
 - `agents`: `enabled`, `ssh agents-worker`, `dir ~/bytebunker-harness`, `python "/home/trickyfalcon/.local/bin/uv run"`, `script scripts/run_master.py`, `master_name Sultan`, `master_instructions` (the court doctrine; editable on the Agents screen), `run_timeout_s 10800`, `worker_model_metrics http://127.0.0.1:8001/metrics`, `worker_model_label`.
 - `litellm`: `ssh spark-1`, `config_path`, `container` — for the Recipes screen's Register button.
 - `rack`: `ssh spark-1`, `dir ~/dgx/dgx-spark-serve` — for the Recipes screen's Spark card.
-- `prometheus_url http://127.0.0.1:19090`, `nodes` (spec strings), `sparkdash_url http://127.0.0.1:15555`, `telemetry_source sparkdash`, `sparkdash_open_url https://burhan.tailed338.ts.net`.
+- `monitors`: `rack` → `http://100.90.164.11:9177` with the token from `rack monitor token` (Cluster › Monitors writes it). `prometheus_url http://127.0.0.1:19090` stays as the engine-busy fallback. The pre-0.2.0 keys (`nodes`, `sparkdash_url`, `sparkdash_open_url`, `telemetry_source`) are ignored.
 
 **Harness `config/config.yaml` (worker)**
 - `llm`: `base_url http://172.16.25.186:4000/v1` (LAN, never the tailnet), `api_key` (the litellm key), `master_model deepseek-v4-vision-uncensored`, `default_slave_model qwen3-4b-fast`, `thinking_model deepseek-v4-vision-uncensored`, `timeout_s 900`, `master_max_tokens 8000`, `slave_max_tokens 3000`, `slave_transcript_chars 36000`, `fetch_max_chars 8000`; defaults in code: `thinking_extra` (on, max effort) and `thinking_off_extra`.
@@ -123,7 +123,7 @@ Host-side files (`master/*`, `harness/spawn.py`, `config.py`, `trajectories/*`, 
 
 **Sparks**: Recipes screen → rack card, or `rack up <recipe>` on spark-1.
 
-**sparkDash**: edit under `~/dgx/sparkDash`, `docker compose up --build -d`. Keep the local commit `theme: bytebunker light/dark palettes…` when pulling upstream (rebase onto it), or the embedded frame loses the palette.
+**rack monitor**: edit `monitor/rackmon.py` in dgx-spark-serve on spark-1, run `python3 -m unittest monitor/test_rackmon.py`, then `rack monitor up`. The image tag is a hash of the code, so `up` rebuilds, ships to spark-2 and restarts both; unchanged code just restarts. The console reads the schema in `/v1/cluster` (`schema: 1`); a breaking change bumps it on both sides.
 
 **Test suite** for the harness: `uv run pytest -q` in the harness checkout (the tests use a scripted LLM transport; no engine needed).
 
@@ -133,17 +133,18 @@ Host-side files (`master/*`, `harness/spawn.py`, `config.py`, `trajectories/*`, 
 
 | Symptom | Where to look | Usual cause / fix |
 |---|---|---|
-| Agent run "starts" then nothing | Agents screen Sultan card; `trajectories/<goal>/master.jsonl` on the worker (`llm` events show each round's seconds and tokens) | The Sultan is writing prose; the engine is busy (check sparkDash TTFT p95). Not a hang unless a round exceeds `llm.timeout_s`. |
+| Agent run "starts" then nothing | Agents screen Sultan card; `trajectories/<goal>/master.jsonl` on the worker (`llm` events show each round's seconds and tokens) | The Sultan is writing prose; the engine is busy (Cluster screen, the head's engine row: queue and first-token p95). Not a hang unless a round exceeds `llm.timeout_s`. |
 | Run ends `killed: timeout` | `agents.run_timeout_s` in the console config (minutes on the Agents form) | Raise it; multi-step goals are 60–90 min on this engine. |
 | Agent "failed: out of time before verification" | Slave detail: `verify_skipped_out_of_time` | Not a failure: the answer is there, unverified. The Sultan should verify with a panel; if it re-spawns the same brief, check the doctrine text. |
 | Wrong facts from a minion | Slave timeline: which tools ran | For CVEs the `cve-lookup` skill must be attached (`cve_record`, `kev_lookup`). Bot-gated pages fetched via `fetch_url` mislead small models. |
 | Stop button leaves containers | `podman ps` on the worker; labels `bytebunker.pgid` | `pkill -KILL -f "run_maste[r].py"; podman ps -q \| xargs -r podman kill`. Note the `[r]` trick: `pkill -f run_master.py` self-matches the ssh shell. |
-| Small model down | Cluster screen worker card; `systemctl --user status vllm-qwen3-4b-fast`; `~/vllm-qwen3-4b-fast.log` | "Failed to find C compiler" → `build-essential`; port in use → another unit still active; after a Windows reboot the port forward points at a stale WSL IP → re-run the netsh line with the new address. |
+| Small model down | Cluster screen, the agents-worker unit; `systemctl --user status vllm-qwen3-4b-fast`; `~/vllm-qwen3-4b-fast.log` | "Failed to find C compiler" → `build-essential`; port in use → another unit still active; after a Windows reboot the port forward points at a stale WSL IP → re-run the netsh line with the new address. |
 | litellm 404 for a model | `docker logs dgx-inference-litellm-1`; `curl 172.16.25.186:4000/v1/models` | Entry missing or api_base unreachable from the Spark (test `curl http://172.16.25.83:8001/v1/models` from spark-1). |
-| Cluster cards empty | `/api/telemetry` on hermes; `curl 127.0.0.1:15555/api/sparks` | Tunnel down (`launchctl print gui/501/ai.bytebunker.tunnel`), or sparkDash stopped (`docker ps` on spark-1). |
-| sparkDash shows the worker without a GPU | ssh from spark-1 to `trickyfalcon@100.100.129.98 nvidia-smi` | `nvidia-smi` not on PATH for ssh sessions (the `.bashrc` line), or spark-1's key missing from the worker's `authorized_keys`. |
-| Spark-2 GPU metrics flat | Prometheus target `spark-2-gpu` | `docker restart monitoring-nvidia-gpu-exporter-1` on spark-2 (NVML loss in a long-lived container). |
-| Everything is slow | sparkDash LLM panel for the head: tokens/s, KV %, queue, TTFT p95, prefix hit | One engine shared by all agents (~27 tok/s total). Hidden reasoning must be off for doers (it is, via `thinking_off_extra`); move doers to the small model (`default_slave_model`). |
+| Cluster says a monitor is failing | the red line on Cluster (and Cluster › Monitors); `rack monitor status` on spark-1; `curl http://100.90.164.11:9177/v1/hello` | `unauthorized`: the token changed (`rack monitor token`, then **token** on the monitor's row). `refused` / `timed out`: the monitor is down (`rack monitor up`) or the path is closed (LAN :9177 is firewalled; use the tailnet address). A brand-new Mac app: allow ByteBunker under Privacy & Security › Local Network. |
+| A Spark shows "no nvidia-smi in the container" | `rack monitor logs` (or `logs worker`) | The monitor started without `--gpus all`; `rack monitor up` restores it. |
+| The agents-worker unit shows no GPU | `ssh agents-worker nvidia-smi` | `nvidia-smi` not on PATH for ssh sessions (the `.bashrc` line). |
+| Grafana: spark-2 GPU flat | Prometheus target `spark-2-gpu` | `docker restart monitoring-nvidia-gpu-exporter-1` on spark-2 (NVML loss in a long-lived container). |
+| Everything is slow | Cluster screen, the head's engine row: tokens/s, KV %, queue, first-token p50/p95, prefix hits | One engine shared by all agents (~27 tok/s total). Hidden reasoning must be off for doers (it is, via `thinking_off_extra`); move doers to the small model (`default_slave_model`). |
 
 Useful one-liners on the worker: `ls -td trajectories/goal-* | head -1` (latest goal), `tail -f /tmp/bb-<agent>-*/events.jsonl` (a live agent), `podman ps --format '{{.Names}} {{.Status}}'`.
 
@@ -155,7 +156,7 @@ Useful one-liners on the worker: `ls -td trajectories/goal-* | head -1` (latest 
 - **A new tool for agents**: `tools/restricted.py` → define a function returning `ToolResult`, `reg.register(ToolDef(name, description, json-schema, fn))`, add the name to the right list in `slaves/archetypes.py` (`READ_ONLY_TOOLS`, `READ_WRITE_TOOLS`, `NETWORK_TOOLS`), rebuild the image. `cve_record` / `kev_lookup` are the template for "deterministic facts a small model must not guess".
 - **A new archetype**: `slaves/archetypes.py` → `Archetype(name, tools, max_attempts, depth, thinking, max_tokens, timeout_s, description)`; mention it in the doctrine if the Sultan should use it; add to `allowed_roles` if it needs the network.
 - **A new engine**: Recipes screen (any CUDA host or Ollama on Windows) or a `rack` recipe for the Sparks; then it is a name in litellm and can be set as `default_slave_model`, `thinking_model` or `master_model`.
-- **A new telemetry source**: `server.py` `telemetry()` returns a list of node dicts (`name, util, mem_used_gb, mem_total_gb, temp, power, cpu, uptime_s`, optional `llm`, `kind`, `role`); add a function like `sparkdash_telemetry()` and a `telemetry_source` value.
+- **A new measurement on the Cluster screen**: add it to the node snapshot in dgx-spark-serve `monitor/rackmon.py` (`Node.sample`), deploy with `rack monitor up`, and draw it in `rackUnit()` in `console.js`. **Another machine on the screen**: run `rackmon.py serve` on it (one file, no dependencies) and add it in Cluster › Monitors, or list it in the head's `MONITOR_PEERS`.
 - **A new console screen**: a `<section class="screen" id="screen-x">` + a nav button `data-nav="x"` in `index.html`, the name in the `screens` array and a `render…()` call in `go()` in `console.js`.
 - **Training data**: `/api/export` (chat traces, optionally `?rated=up`) from the console; `trajectories/spawns.jsonl` and each goal's `master.jsonl` from the worker.
 

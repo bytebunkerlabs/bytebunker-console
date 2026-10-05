@@ -14,7 +14,7 @@
 
   const state = {
     screen: "playground",
-    cfg: { nodes: [], identity: {}, upstream: "", telemetry: false },
+    cfg: { identity: {}, upstream: "", monitors: 0 },
     models: [],
     model: null,
     params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 8192,
@@ -35,22 +35,13 @@
     plugins: [],            // plugin list from /api/plugins
     agentAbort: null,       // AbortController for a live agent run
     agentDetail: null,      // {kind:"run"|"slave", id} shown in the right-hand pane
-    hist: {},               // node name -> util history for sparklines
+    hist: {},               // the agents worker's GPU and output traces (monitor nodes bring their own)
   };
 
   /* ---------------- theme ---------------- */
   function applyTheme(dark) {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
     try { localStorage.setItem("bb.theme", dark ? "dark" : "light"); } catch (e) {}
-    syncSparkdashTheme();
-  }
-  // the embedded sparkDash carries a ByteBunker palette in both modes; tell it
-  // which one the console is in, live, without reloading the frame
-  function sparkdashTheme() { return document.documentElement.getAttribute("data-theme") === "dark" ? "bytebunker-dark" : "bytebunker"; }
-  function syncSparkdashTheme() {
-    const f = document.getElementById("sparkdash-frame");
-    if (!f || !f.dataset.src || !f.contentWindow) return;
-    try { f.contentWindow.postMessage({ type: "sparkdash-theme", theme: sparkdashTheme() }, new URL(f.dataset.src).origin); } catch (e) {}
   }
   applyTheme((() => {
     try { return localStorage.getItem("bb.theme") === "dark"; } catch (e) { return false; }
@@ -59,9 +50,11 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "gateways", "models", "recipes", "cluster", "sparkdash", "settings", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
   function go(s) {
     state.screen = s;
+    // the screen lives in the URL hash: a reload stays put, a link can open one
+    try { if (location.hash.slice(1) !== s) history.replaceState(null, "", s === "playground" ? location.pathname + location.search : "#" + s); } catch (e) {}
     screens.forEach((id) => {
       $("screen-" + id).classList.toggle("on", id === s);
       document.querySelector(`[data-nav="${id}"]`).classList.toggle("on", id === s);
@@ -76,7 +69,7 @@
     if (s === "settings") renderSettings();
     if (s === "agents") renderAgents();
     if (s === "recipes") renderRecipes();
-    if (s === "sparkdash") renderSparkdash();
+    if (s === "cluster") pollCluster(true);
     if (s === "usage") renderUsage();
     if (s === "video") vidRefresh();
   }
@@ -2339,31 +2332,6 @@
     } catch (e) { append("error: " + e.message); }
   }
 
-  /* ---------------- sparkDash, embedded ---------------- */
-  // The dashboard is loaded only when the screen is opened, and only once:
-  // it streams metrics over a WebSocket, so it should not run behind every
-  // other screen. Reload re-creates the frame.
-  function renderSparkdash() {
-    const url = (state.cfg.sparkdash_open_url || "").trim();
-    const frame = $("sparkdash-frame"), note = $("sparkdash-note"), open = $("sparkdash-open");
-    if (!url) {
-      note.hidden = false;
-      note.textContent = "Set sparkdash_open_url in config.json (the dashboard's tailnet address, e.g. https://<node>.<tailnet>.ts.net) and restart the console.";
-      frame.hidden = true; open.hidden = true;
-      return;
-    }
-    open.href = url; open.hidden = false; note.hidden = true; frame.hidden = false;
-    if (frame.dataset.src !== url) {
-      frame.dataset.src = url;
-      frame.src = url + (url.includes("?") ? "&" : "?") + "theme=" + sparkdashTheme();
-      frame.onload = syncSparkdashTheme;
-    } else {
-      syncSparkdashTheme();
-    }
-    $("sparkdash-sub").textContent = url.replace(/^https?:\/\//, "") + " \u00b7 tailnet only \u00b7 your browser must be on the tailnet";
-  }
-  $("sparkdash-reload").onclick = () => { const f = $("sparkdash-frame"); if (f.dataset.src) f.src = f.dataset.src + (f.dataset.src.includes("?") ? "&" : "?") + "theme=" + sparkdashTheme(); };
-
   /* ---------------- recipes (model deployment) ---------------- */
   let recipesCat = null;
   async function renderRecipes() {
@@ -2984,99 +2952,584 @@
     await loadTools();   // re-read status and tool schemas after any change
   }
 
-  /* ---------------- telemetry ---------------- */
+  /* ---------------- cluster ---------------- */
+  // One view of every machine. Nodes come from rack monitors: `rack monitor
+  // up` on a head node prints a URL, `rack monitor token` its token, and the
+  // console fetches /v1/cluster server-side. Each node is drawn as a rack
+  // unit: a faceplate, four meters (GPU, memory, CPU, power and heat), the
+  // engines it serves, its links and disk, and its containers. The monitor
+  // keeps 15 minutes of samples, so the traces are full the moment the
+  // screen opens. The agents worker's own GPU (read over ssh by the agents
+  // poll) is drawn as one more unit of the same shape.
+  const GiB = 1073741824;
   const fmtUp = (s) => {
     if (s == null) return "—";
-    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
-    return d + "d " + String(h).padStart(2, "0") + "h";
+    const d = Math.floor(s / 86400), hr = Math.floor((s % 86400) / 3600);
+    return d ? d + "d " + String(hr).padStart(2, "0") + "h" : hr + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
   };
-  function sparkline(arr) {
-    if (!arr || arr.length < 2) return "";
-    const n = arr.length;
-    return arr.map((v, i) =>
-      ((i * 100) / (n - 1)).toFixed(2) + "," +
-      (25 - Math.max(0, Math.min(1, v / 100)) * 23).toFixed(2)).join(" ");
+  const fmtGiB = (b) => (b == null ? "—" : (b / GiB >= 100 ? Math.round(b / GiB) : (b / GiB).toFixed(1)) + " GiB");
+  const fmtRate = (bps) => {
+    if (bps == null) return "—";
+    const units = ["B/s", "kB/s", "MB/s", "GB/s"];
+    let v = bps, i = 0;
+    while (v >= 1000 && i < units.length - 1) { v /= 1000; i++; }
+    return (i === 0 || v >= 100 ? Math.round(v) : v.toFixed(1)) + " " + units[i];
+  };
+  const fmtCount = (n) => (n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n)));
+  const fmtPct = (v) => (v == null ? "—" : Math.round(v) + "%");
+  const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const BAD_THROTTLE = ["power cap", "hw slowdown", "thermal", "hw thermal", "power brake"];
+  state.rkOpen = {};          // node name -> containers list unfolded
+  state.cluster = null;
+
+  function rkEl(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
   }
 
-  function workerGpuCard() {
-    // the agent worker's own GPU (e.g. an RTX 2070 on a Windows box), read
-    // through the worker poll rather than Prometheus — same card as a Spark
-    const fm = state.fastModel;
-    if (!fm || !fm.gpu) return null;
+  // An area trace over the monitor's history. Gaps (null) are skipped, not
+  // drawn as zero; `max` pins the scale (100 for percentages), else it fits
+  // the data with headroom but never below `floor`, so an idle 10 W reads as
+  // a low line rather than a full-height block.
+  function rkSpark(values, max, cls, floor) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 100 32");
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("class", "rk-spark" + (cls ? " " + cls : ""));
+    const vals = (values || []).map((v) => (v == null || isNaN(v) ? null : +v));
+    const real = vals.filter((v) => v != null);
+    if (real.length < 2) { svg.classList.add("empty"); return svg; }
+    const top = max != null && max > 0 ? max : Math.max(floor || 1e-9, Math.max(...real) * 1.25);
+    const n = vals.length;
+    let line = "", first = null, last = null;
+    vals.forEach((v, i) => {
+      if (v == null) return;
+      const x = (i * 100) / (n - 1), y = 31 - Math.max(0, Math.min(1, v / top)) * 29;
+      line += (line ? " L" : "M") + x.toFixed(2) + " " + y.toFixed(2);
+      if (first == null) first = x;
+      last = x;
+    });
+    const area = document.createElementNS(NS, "path");
+    area.setAttribute("d", line + " L" + last.toFixed(2) + " 32 L" + first.toFixed(2) + " 32 Z");
+    area.setAttribute("class", "fill");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", line);
+    path.setAttribute("class", "line");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(area, path);
+    return svg;
+  }
+
+  function rkMeter(label, big) {
+    const m = rkEl("div", "rk-meter");
+    m.appendChild(rkEl("div", "rk-k", label));
+    m.appendChild(rkEl("div", "rk-big", big));
+    return m;
+  }
+
+  function rkEngine(e, hist) {
+    const row = rkEl("div", "rk-engine");
+    const head = rkEl("div", "rk-ehead");
+    const names = { vllm: "vLLM", sglang: "SGLang", "llama.cpp": "llama.cpp", ollama: "Ollama", openai: "OpenAI API" };
+    head.appendChild(rkEl("span", "rk-kind", names[e.kind] || e.kind || "engine"));
+    head.appendChild(rkEl("span", "rk-model", (e.models || []).join(", ") || "no model listed"));
+    const meta = [];
+    if (e.port != null) meta.push(":" + e.port);
+    if (e.max_model_len) meta.push(Math.round(e.max_model_len / 1024) + "k context");
+    head.appendChild(rkEl("span", "rk-emeta", meta.join(" · ")));
+    const busy = (e.running || 0) + (e.waiting || 0);
+    const stateTxt = e.ok === false ? "not answering" : busy ? "serving" : "idle";
+    head.appendChild(rkEl("span", "rk-state " + (e.ok === false ? "err" : busy ? "busy" : "idle"), stateTxt));
+    row.appendChild(head);
+    if (e.ok === false) { row.appendChild(rkEl("div", "rk-sub", e.error || "")); return row; }
+    if (e.kind === "ollama") { row.appendChild(rkEl("div", "rk-sub", e.loaded_bytes ? fmtGiB(e.loaded_bytes) + " loaded" : "nothing loaded")); return row; }
+    if (e.kind === "openai") return row;
+    const grid = rkEl("div", "rk-egrid");
+    const cell = (label, big, sub, extra) => {
+      const c = rkEl("div", "rk-cell");
+      c.appendChild(rkEl("div", "rk-k", label));
+      c.appendChild(rkEl("div", "rk-mid", big));
+      if (extra) c.appendChild(extra);
+      if (sub) c.appendChild(rkEl("div", "rk-sub", sub));
+      grid.appendChild(c);
+    };
+    cell("Output", e.gen_tps != null ? e.gen_tps.toFixed(1) + " tok/s" : "—",
+      "prompt " + (e.prompt_tps != null ? fmtCount(e.prompt_tps) + " tok/s" : "—"), rkSpark(hist.gen_tps, null, null, 10));
+    cell("Requests", (e.running || 0) + " running", (e.waiting || 0) + " waiting");
+    const kv = rkEl("div", "rk-stack");
+    const kb = rkEl("b", "kv");
+    kb.style.width = Math.min(100, e.kv_pct || 0) + "%";
+    kv.appendChild(kb);
+    cell("KV cache", fmtPct(e.kv_pct), e.kv_tokens ? "of " + fmtCount(e.kv_tokens) + " tokens" : "", kv);
+    cell("First token", e.ttft_p50 != null ? e.ttft_p50.toFixed(2) + " s" : "—",
+      e.ttft_p95 != null ? "p95 " + e.ttft_p95.toFixed(2) + " s, last minute" : "no requests in the last minute");
+    cell("Per token", e.itl_ms != null ? Math.round(e.itl_ms) + " ms" : "—", e.e2e_avg != null ? e.e2e_avg.toFixed(1) + " s per request" : "");
+    const hit = e.prefix_hit_pct != null ? e.prefix_hit_pct : (e.prefix_queries ? (100 * (e.prefix_hits || 0)) / e.prefix_queries : null);
+    cell("Prefix cache", fmtPct(hit), e.prefix_hit_pct != null ? "hits, last minute" : e.prefix_queries ? "hits since start" : "");
+    cell("Served", fmtCount(e.requests_ok) + " requests",
+      (e.preemptions ? fmtCount(e.preemptions) + " preempted · " : "") + fmtCount(e.gen_total) + " tokens out");
+    row.appendChild(grid);
+    return row;
+  }
+
+  function rackUnit(n) {
+    const sys = n.system || {};
+    const gpus = n.gpus || [];
+    const hist = n.history || {};
+    const down = n.ok === false;
+    const age = n.sampled_at ? Date.now() / 1000 - n.sampled_at : 0;
+    const u = rkEl("article", "rk-unit" + (down ? " down" : ""));
+
+    // the faceplate: LED, name, role, what the box is, where the numbers come from
+    const face = rkEl("div", "rk-face");
+    face.appendChild(rkEl("span", "rk-led" + (down ? " err" : age > 20 ? " warn" : "")));
+    const id = rkEl("div", "rk-id");
+    const l1 = rkEl("div", "rk-line");
+    l1.appendChild(rkEl("span", "rk-name", n.name || "?"));
+    if (n.role) l1.appendChild(rkEl("span", "rk-role", n.role));
+    const bad = gpus.flatMap((g) => g.throttle || []).filter((r) => BAD_THROTTLE.includes(r));
+    if (bad.length) l1.appendChild(rkEl("span", "rk-role bad", "throttled: " + [...new Set(bad)].join(", ")));
+    id.appendChild(l1);
+    const gname = gpus.length ? gpus[0].name.replace(/^NVIDIA (GeForce )?/, "") + (gpus.length > 1 ? " ×" + gpus.length : "") : null;
+    const spec = [sys.product, gname, sys.cpu_model,
+      n.mem && n.mem.total ? fmtGiB(n.mem.total) + (sys.unified_memory ? " unified" : " RAM") : null].filter(Boolean).join(" · ");
+    id.appendChild(rkEl("div", "rk-spec", down ? (n.error || "not answering") : spec));
+    face.appendChild(id);
+    face.appendChild(rkEl("div", "rk-vents"));
+    const meta = rkEl("div", "rk-meta");
+    meta.appendChild(rkEl("span", null, [sys.hostname && sys.hostname !== n.name ? sys.hostname : null, sys.os, sys.uptime_s ? "up " + fmtUp(sys.uptime_s) : null].filter(Boolean).join(" · ")));
+    meta.appendChild(rkEl("span", "rk-src", [n.monitor ? "via " + n.monitor : null, n.latency_ms != null ? n.latency_ms + " ms" : null,
+      age > 20 ? Math.round(age) + " s old" : null].filter(Boolean).join(" · ")));
+    face.appendChild(meta);
+    u.appendChild(face);
+    if (down) return u;
+
+    const body = rkEl("div", "rk-body");
+    // GPU
+    {
+      const util = avg(gpus.map((g) => g.util).filter((v) => v != null));
+      const g = gpus[0] || {};
+      const m = rkMeter("GPU", gpus.length ? fmtPct(util) : "—");
+      m.appendChild(rkSpark(hist.gpu, 100));
+      const sub = [];
+      if (g.sm_clock != null) sub.push(g.sm_clock + (g.sm_clock_max ? " / " + g.sm_clock_max : "") + " MHz");
+      if (g.pstate) sub.push(g.pstate);
+      if (g.mem_total) sub.push("VRAM " + fmtGiB(g.mem_used) + " / " + fmtGiB(g.mem_total));
+      m.appendChild(rkEl("div", "rk-sub", gpus.length ? sub.join(" · ") : (n.gpu_error || "no GPU on this node")));
+      body.appendChild(m);
+    }
+    // memory: on unified memory, what the GPU processes hold is part of this bar
+    {
+      const mem = n.mem || {};
+      const m = rkMeter(sys.unified_memory ? "Unified memory" : "Memory", mem.total ? fmtGiB(mem.used) + " / " + fmtGiB(mem.total) : "—");
+      const bar = rkEl("div", "rk-stack");
+      if (mem.total) {
+        const gp = Math.min(mem.gpu_procs || 0, mem.used || 0);
+        const seg = (cls, v, title) => { const b = rkEl("b", cls); b.style.width = ((100 * v) / mem.total).toFixed(2) + "%"; b.title = title; bar.appendChild(b); };
+        if (gp) seg("gpu", gp, "GPU processes " + fmtGiB(gp));
+        seg("used", Math.max(0, (mem.used || 0) - gp), "everything else in use");
+      }
+      m.appendChild(bar);
+      m.appendChild(rkSpark(hist.mem, mem.total ? mem.total / 1e9 : null, "mem"));
+      const sub = [];
+      if (mem.gpu_procs) sub.push("GPU processes " + fmtGiB(mem.gpu_procs));
+      if (mem.available != null) sub.push(fmtGiB(mem.available) + " free");
+      if (mem.swap_used) sub.push("swap " + fmtGiB(mem.swap_used));
+      m.appendChild(rkEl("div", "rk-sub", sub.join(" · ")));
+      body.appendChild(m);
+    }
+    // CPU: every core as its own bar
+    {
+      const c = n.cpu || {};
+      const m = rkMeter("CPU" + (sys.cores ? " · " + sys.cores + " cores" : ""), fmtPct(c.pct));
+      const cores = c.cores_pct || [];
+      if (cores.length) {
+        const strip = rkEl("div", "rk-cores");
+        strip.style.gridTemplateColumns = "repeat(" + cores.length + ",1fr)";
+        cores.forEach((v, i) => { const b = rkEl("i"); b.style.height = Math.max(5, v || 0) + "%"; b.title = "core " + i + ": " + fmtPct(v); strip.appendChild(b); });
+        m.appendChild(strip);
+      } else {
+        m.appendChild(rkSpark(hist.cpu, 100));
+      }
+      m.appendChild(rkEl("div", "rk-sub", c.load ? "load " + c.load.map((x) => x.toFixed(2)).join(" · ") : ""));
+      body.appendChild(m);
+    }
+    // power and heat
+    {
+      const watts = gpus.map((g) => g.power_w).filter((v) => v != null);
+      const m = rkMeter("Power · heat", watts.length ? Math.round(watts.reduce((a, b) => a + b, 0)) + " W" : "—");
+      m.appendChild(rkSpark(hist.power, null, "warm", 60));
+      const temps = rkEl("div", "rk-temps");
+      const t = n.temps || {};
+      for (const [k, label] of [["gpu", "GPU"], ["soc", "SoC"], ["cpu", "CPU"], ["nvme", "NVMe"], ["nic", "NIC"]]) {
+        if (t[k] == null) continue;
+        const s = rkEl("span", t[k] >= 90 ? "hot" : t[k] >= 80 ? "warm" : "");
+        s.appendChild(rkEl("b", null, label));
+        s.appendChild(document.createTextNode(" " + Math.round(t[k]) + "°C"));
+        temps.appendChild(s);
+      }
+      m.appendChild(temps);
+      body.appendChild(m);
+    }
+    u.appendChild(body);
+
+    for (const e of n.engines || []) u.appendChild(rkEngine(e, hist));
+    if (n.engineNote) u.appendChild(rkEl("div", "rk-row rk-note", n.engineNote));
+
+    // links and disk
+    const links = (n.net || []).filter((x) => x.up !== false);
+    const disks = n.disks || [];
+    if (links.length || disks.length) {
+      const row = rkEl("div", "rk-row");
+      for (const x of links) {
+        const c = rkEl("span", "rk-chip " + x.kind);
+        c.title = x.iface + (x.ip ? "  " + x.ip : "");
+        c.appendChild(rkEl("b", null, x.kind));
+        const speed = x.speed_mbps ? (x.speed_mbps >= 1000 ? x.speed_mbps / 1000 + "G" : x.speed_mbps + "M") + " " : "";
+        c.appendChild(document.createTextNode(" " + speed + "↓ " + fmtRate(x.rx_bps) + "  ↑ " + fmtRate(x.tx_bps)));
+        row.appendChild(c);
+      }
+      for (const d of disks) {
+        const c = rkEl("span", "rk-chip disk");
+        c.appendChild(rkEl("b", null, "disk " + d.mount));
+        c.appendChild(document.createTextNode(" " + (d.used / 1e12).toFixed(1) + " / " + (d.total / 1e12).toFixed(1) + " TB "));
+        const bar = rkEl("span", "rk-mini");
+        const fill = rkEl("i");
+        fill.style.width = ((100 * d.used) / d.total).toFixed(1) + "%";
+        bar.appendChild(fill);
+        c.appendChild(bar);
+        row.appendChild(c);
+      }
+      u.appendChild(row);
+    }
+
+    // containers, folded; the ones holding GPU memory are marked
+    const ctrs = n.containers || [];
+    if (ctrs.length || n.containers_error) {
+      const det = rkEl("details", "rk-ctrs");
+      const running = ctrs.filter((c) => c.state === "running");
+      const gpuHolders = [...new Set(gpus.flatMap((g) => (g.procs || []).map((p) => p.container)).filter(Boolean))];
+      det.appendChild(rkEl("summary", null, n.containers_error ? "containers: " + n.containers_error
+        : running.length + " containers running" + (ctrs.length > running.length ? " · " + (ctrs.length - running.length) + " stopped" : "")
+          + (gpuHolders.length ? " · on the GPU: " + gpuHolders.join(", ") : "")));
+      if (ctrs.length) {
+        const tbl = rkEl("div", "rk-table");
+        for (const c of ctrs) {
+          const r = rkEl("div", "rk-tr" + (c.state === "running" ? "" : " off"));
+          r.appendChild(rkEl("span", "d"));
+          r.appendChild(rkEl("span", "nm", c.name + (gpuHolders.includes(c.name) ? "  ◆ GPU" : "")));
+          r.appendChild(rkEl("span", "im", c.image || ""));
+          r.appendChild(rkEl("span", "st", c.status || c.state || ""));
+          r.appendChild(rkEl("span", "num", c.cpu_cores != null ? c.cpu_cores.toFixed(2) + " cores" : ""));
+          r.appendChild(rkEl("span", "num", c.mem != null ? fmtGiB(c.mem) : ""));
+          tbl.appendChild(r);
+        }
+        det.appendChild(tbl);
+      }
+      det.open = !!state.rkOpen[n.name];
+      det.addEventListener("toggle", () => { state.rkOpen[n.name] = det.open; });
+      u.appendChild(det);
+    }
+    return u;
+  }
+
+  // The agents worker's GPU and model, from the agents poll, in the shape of
+  // a monitor node so it draws as one more unit.
+  function workerUnit() {
+    const fm = state.fastModel, w = state.workerStats || {};
+    if (!fm || !(fm.gpu || fm.up)) return null;
     const g = fm.gpu;
-    const key = "worker-gpu";
-    (state.hist[key] = state.hist[key] || []).push(g.util || 0);
-    state.hist[key] = state.hist[key].slice(-44);
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML =
-      '<div style="display:flex;align-items:flex-start;gap:10px">' +
-      '<div style="display:flex;flex-direction:column;gap:2px"><span class="mono" style="font-size:15px;font-weight:600"></span>' +
-      '<span class="spec" style="font-size:11.5px;color:var(--faint)"></span></div>' +
-      '<div style="flex:1"></div><span class="pill"><span class="d"></span><span class="pt"></span></span></div>' +
-      '<div style="display:flex;flex-direction:column;gap:6px">' +
-      '<div style="display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:var(--muted)">GPU utilization</span>' +
-      '<span class="mono" style="font-size:19px;font-weight:600"></span></div>' +
-      '<svg viewBox="0 0 100 26" preserveAspectRatio="none" style="width:100%;height:44px;display:block"><polyline fill="none" stroke="var(--accent)" stroke-width="1.1" vector-effect="non-scaling-stroke"/></svg></div>' +
-      '<div style="display:flex;flex-direction:column;gap:5px">' +
-      '<div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--muted)">VRAM</span><span class="mono v"></span></div>' +
-      '<div class="bar5"><div></div></div></div>' +
-      '<div class="stat-grid">' +
-      '<div><span class="kv-label">Temp</span><span class="v"></span></div>' +
-      '<div><span class="kv-label">Model</span><span class="v"></span></div>' +
-      '<div><span class="kv-label">Requests</span><span class="v"></span></div>' +
-      '<div><span class="kv-label">Output</span><span class="v"></span></div></div>';
-    card.querySelector(".mono").textContent = (fm.label || "agent worker").split(" on ").slice(-1)[0] + " \u00b7 " + g.name.replace("NVIDIA GeForce ", "");
-    card.querySelector(".spec").textContent = fm.label || "";
-    card.querySelector(".pt").textContent = fm.up ? "serving " + (fm.model || "") : "model down";
-    if (!fm.up) card.querySelector(".pill").style.opacity = ".6";
-    card.querySelectorAll(".mono")[1].textContent = g.util + "%";
-    card.querySelector("polyline").setAttribute("points", sparkline(state.hist[key]));
-    card.querySelector(".mono.v").textContent = (g.mem_used_mb / 1024).toFixed(1) + " / " + (g.mem_total_mb / 1024).toFixed(1) + " GB";
-    card.querySelector(".bar5>div").style.width = (g.mem_used_mb / g.mem_total_mb) * 100 + "%";
-    const vs = card.querySelectorAll(".stat-grid .v");
-    vs[0].textContent = g.temp + "\u00b0C";
-    vs[1].textContent = fm.model || "\u2014";
-    vs[2].textContent = fm.up ? (fm.running || 0) + " run \u00b7 " + (fm.waiting || 0) + " wait" : "\u2014";
-    vs[3].textContent = fm.gen_tps != null ? fm.gen_tps + " tok/s" : "\u2014";
-    return card;
+    return {
+      name: (fm.label || "agent worker").split(" on ").slice(-1)[0],
+      role: "agents", ok: true, monitor: "the agents poll (ssh)",
+      system: { hostname: w.host || null },
+      gpus: g ? [{ name: g.name, util: g.util, temp: g.temp, mem_used: g.mem_used_mb * 1048576, mem_total: g.mem_total_mb * 1048576, procs: [] }] : [],
+      mem: w.mem_total_gb ? { total: w.mem_total_gb * GiB, used: w.mem_used_gb * GiB } : null,
+      cpu: w.load1 != null ? { load: [w.load1] } : null,
+      temps: g ? { gpu: g.temp } : {},
+      engines: fm.up ? [{ kind: "vllm", models: fm.model ? [fm.model] : [], ok: true, running: fm.running, waiting: fm.waiting,
+        kv_pct: fm.kv_pct, gen_tps: fm.gen_tps, prompt_tps: fm.prompt_tps, requests_ok: fm.requests_total, gen_total: fm.gen_total,
+        prefix_hits: fm.prefix_hits, prefix_queries: fm.prefix_queries }] : [],
+      history: { gpu: state.hist.wgpu, gen_tps: state.hist.wgen },
+      engineNote: fm.up ? null : "model server not reachable from the worker" + (fm.error ? ": " + fm.error : ""),
+    };
   }
 
-  function placeWorkerGpuCard() {
-    const cards = $("node-cards");
-    if (!cards) return;
-    const old = cards.querySelector("[data-worker-gpu]");
-    if (old) old.remove();
-    if (state.telemetryHasWorker) return;
-    const c = workerGpuCard();
-    if (c) { c.dataset.workerGpu = "1"; cards.appendChild(c); }
+  function rkSummary(nodes) {
+    const box = $("cluster-summary");
+    box.textContent = "";
+    box.hidden = !nodes.length;
+    if (!nodes.length) return;
+    const up = nodes.filter((n) => n.ok !== false);
+    const gpus = up.flatMap((n) => n.gpus || []);
+    const util = avg(gpus.map((g) => g.util).filter((v) => v != null));
+    const memT = up.reduce((a, n) => a + ((n.mem || {}).total || 0), 0);
+    const memU = up.reduce((a, n) => a + ((n.mem || {}).used || 0), 0);
+    const watts = gpus.map((g) => g.power_w).filter((v) => v != null);
+    const engines = up.flatMap((n) => n.engines || []).filter((e) => e.ok !== false);
+    const tps = engines.map((e) => e.gen_tps).filter((v) => v != null);
+    const fabric = up.flatMap((n) => n.net || []).filter((x) => x.kind === "fabric");
+    const cell = (label, v, s) => {
+      const c = rkEl("div");
+      c.appendChild(rkEl("span", "rk-k", label));
+      c.appendChild(rkEl("span", "v", v));
+      c.appendChild(rkEl("span", "s", s));
+      box.appendChild(c);
+    };
+    cell("Nodes", up.length + " / " + nodes.length, up.length === nodes.length ? "all reporting" : nodes.length - up.length + " not answering");
+    cell("GPU", fmtPct(util), gpus.length + " GPU" + (gpus.length === 1 ? "" : "s") + ", average");
+    cell("Memory", memT ? Math.round(memU / GiB) + "/" + Math.round(memT / GiB) + " GiB" : "—", memT ? fmtPct((100 * memU) / memT) + " in use" : "");
+    cell("Power", watts.length ? Math.round(watts.reduce((a, b) => a + b, 0)) + " W" : "—", "GPUs, now");
+    cell("Output", tps.length ? tps.reduce((a, b) => a + b, 0).toFixed(1) + " tok/s" : "—",
+      engines.length ? engines.length + " engine" + (engines.length === 1 ? "" : "s") + " · " + engines.reduce((a, e) => a + (e.running || 0), 0) + " running" : "no engine");
+    if (fabric.length) cell("Fabric", fmtRate(fabric.reduce((a, x) => a + (x.rx_bps || 0) + (x.tx_bps || 0), 0) / 2), "between nodes");
   }
 
-  let agentsObsTick = 0;
+  function renderClusterSide(d) {
+    const side = $("side-nodes");
+    side.textContent = "";
+    const nodes = ((d && d.nodes) || []).slice();
+    const w = workerUnit();
+    if (w) nodes.push(w);
+    let healthy = 0;
+    for (const n of nodes) {
+      const util = avg((n.gpus || []).map((g) => g.util).filter((v) => v != null));
+      if (n.ok !== false) healthy++;
+      const mini = rkEl("div", "node-mini");
+      const row = rkEl("div", "row");
+      const nm = rkEl("span", "mono", n.name);
+      nm.style.color = "var(--muted)";
+      row.appendChild(nm);
+      row.appendChild(rkEl("b", "mono", n.ok === false ? "down" : util != null ? Math.round(util) + "%" : "—"));
+      mini.appendChild(row);
+      const bar = rkEl("div", "bar");
+      const f = rkEl("div");
+      f.style.width = (util || 0) + "%";
+      bar.appendChild(f);
+      mini.appendChild(bar);
+      side.appendChild(mini);
+    }
+    const hEl = $("side-health");
+    if (!d || !d.configured) hEl.innerHTML = '<span class="dot" style="background:var(--faint);animation:none"></span>no monitor';
+    else if (healthy === nodes.length && healthy) hEl.innerHTML = '<span class="dot"></span>healthy';
+    else hEl.innerHTML = '<span class="dot err"></span>' + healthy + "/" + nodes.length;
+  }
+  $("side-nodes").onclick = () => go("cluster");
+
+  function renderCluster(d) {
+    const nodes = (d && d.nodes) || [];
+    const mons = (d && d.monitors) || [];
+    const configured = d ? d.configured : 0;
+    $("cluster-sub").textContent = configured
+      ? nodes.length + " node" + (nodes.length === 1 ? "" : "s") + " · " + mons.map((m) => m.cluster && m.cluster !== m.name ? m.name + " (" + m.cluster + ")" : m.name).join(", ")
+      : "every node, GPU, engine and container, from one rack monitor";
+    const failing = mons.filter((m) => !m.ok);
+    $("cluster-poll").innerHTML = !configured ? '<span class="dot" style="background:var(--faint);animation:none"></span>no monitor'
+      : failing.length ? '<span class="dot err"></span>' + failing.length + " monitor" + (failing.length === 1 ? "" : "s") + " failing"
+      : '<span class="dot"></span>live · 5 s';
+    const note = $("cluster-note");
+    note.textContent = "";
+    for (const m of failing) {
+      const e = rkEl("div", "rk-alert");
+      e.appendChild(rkEl("b", null, m.name));
+      e.appendChild(document.createTextNode(" (" + m.url + "): " + (m.error || "not answering")));
+      note.appendChild(e);
+    }
+    const all = nodes.slice();
+    const w = workerUnit();
+    if (w) all.push(w);
+    rkSummary(all);
+    const units = $("node-cards");
+    units.textContent = "";
+    for (const n of all) units.appendChild(rackUnit(n));
+    if (!configured && !state.monPanelShown) { state.monPanelShown = true; renderMonitorsPanel(true); }
+  }
+
+  // ---- monitors: add, find, toggle, remove ----
+  async function monPost(payload) {
+    const r = await fetch("/api/monitors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    let d = {};
+    try { d = await r.json(); } catch (e) {}
+    return Object.assign({ status: r.status }, d);
+  }
+
+  async function renderMonitorsPanel(open) {
+    const box = $("cluster-monitors");
+    if (open === false) { box.hidden = true; return; }
+    box.hidden = false;
+    let list = [];
+    try { list = (await (await fetch("/api/monitors")).json()).monitors || []; } catch (e) {}
+    box.textContent = "";
+    const card = rkEl("div", "card rk-mons");
+    const head = rkEl("div", "skill-head");
+    const title = rkEl("div", "skill-id");
+    title.appendChild(rkEl("b", null, "Monitors"));
+    title.appendChild(rkEl("span", "src mono", list.length ? list.length + " configured" : "none yet"));
+    head.appendChild(title);
+    const close = rkEl("button", "ghost-btn", "close");
+    close.type = "button";
+    close.onclick = () => { box.hidden = true; };
+    head.appendChild(close);
+    card.appendChild(head);
+
+    for (const m of list) {
+      const row = rkEl("div", "rk-monrow");
+      const st = m.status || {};
+      row.appendChild(rkEl("span", "rk-led" + (!m.enabled ? " off" : st.ok ? "" : st.ok === false ? " err" : " warn")));
+      const id = rkEl("div", "rk-monid");
+      id.appendChild(rkEl("b", "mono", m.name));
+      id.appendChild(rkEl("span", "mono", m.url + (m.has_token ? "" : " · no token")));
+      id.appendChild(rkEl("span", "rk-sub", !m.enabled ? "disabled" : st.ok ? (st.nodes || 0) + " nodes · " + st.ms + " ms · rack-monitor " + (st.version || "") : st.error || "checking…"));
+      row.appendChild(id);
+      const act = async (payload) => { const r = await monPost(payload); if (r.error) alert(r.error); renderMonitorsPanel(true); pollCluster(true); };
+      const tok = rkEl("button", "ghost-btn", "token");
+      tok.type = "button";
+      tok.onclick = () => {
+        const f = rkEl("form", "rk-inline");
+        const inp = rkEl("input");
+        inp.type = "password"; inp.placeholder = "new token (rack monitor token)"; inp.autocomplete = "off";
+        const ok = rkEl("button", "solid-btn", "save");
+        f.append(inp, ok);
+        f.onsubmit = (ev) => { ev.preventDefault(); act({ action: "update", name: m.name, token: inp.value.trim() }); };
+        id.appendChild(f);
+        inp.focus();
+      };
+      const tg = rkEl("button", "ghost-btn", m.enabled ? "disable" : "enable");
+      tg.type = "button";
+      tg.onclick = () => act({ action: "toggle", name: m.name });
+      const rm = rkEl("button", "ghost-btn", "remove");
+      rm.type = "button";
+      rm.onclick = () => { if (confirm("Remove monitor " + m.name + "? The rack keeps running; this console stops reading it.")) act({ action: "remove", name: m.name }); };
+      row.append(tok, tg, rm);
+      card.appendChild(row);
+    }
+
+    // add
+    const form = rkEl("form", "rk-add");
+    const url = rkEl("input", "mono");
+    url.placeholder = "http://100.90.164.11:9177";
+    url.autocomplete = "off"; url.spellcheck = false;
+    const tok = rkEl("input", "mono");
+    tok.type = "password"; tok.placeholder = "token"; tok.autocomplete = "off";
+    const name = rkEl("input");
+    name.placeholder = "name (optional)";
+    const add = rkEl("button", "solid-btn", "Connect");
+    const find = rkEl("button", "ghost-btn", "Find on this network");
+    find.type = "button";
+    const lbl = (t, inp) => { const l = rkEl("label"); l.appendChild(rkEl("span", "rk-k", t)); l.appendChild(inp); return l; };
+    form.append(lbl("Endpoint", url), lbl("Token", tok), lbl("Name", name));
+    const btns = rkEl("div", "rk-btns");
+    btns.append(add, find);
+    form.appendChild(btns);
+    const hint = rkEl("div", "hint");
+    hint.innerHTML = "On the head node, <code>rack monitor up</code> starts a monitor on every node and prints the endpoint; <code>rack monitor token</code> prints the token. Pasting <code>http://rack:TOKEN@host:9177</code> into Endpoint fills both. Any other Linux box: <code>python3 rackmon.py serve</code> from dgx-spark-serve's <code>monitor/</code>.";
+    const out = rkEl("div", "rk-out");
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      out.textContent = "checking " + (url.value.trim() || "…");
+      add.disabled = true;
+      const payload = { action: "add", url: url.value.trim(), token: tok.value.trim(), name: name.value.trim() };
+      const r = await monPost(payload);
+      add.disabled = false;
+      if (r.ok) {
+        // the units appearing below is the confirmation; the panel steps aside
+        state.cfg.monitors = (r.monitors || []).length;
+        tok.value = "";
+        $("cluster-monitors").hidden = true;
+        pollCluster(true);
+        return;
+      }
+      out.textContent = "";
+      out.appendChild(rkEl("span", "rk-bad", (r.stage === "auth" ? "Reached it, but " : "") + (r.error || "failed")));
+      if (r.status === 422) {
+        const force = rkEl("button", "ghost-btn", "save anyway");
+        force.type = "button";
+        force.onclick = async () => { const f = await monPost(Object.assign({}, payload, { force: true })); if (f.ok) { renderMonitorsPanel(true); pollCluster(true); } else { out.textContent = f.error || "failed"; } };
+        out.appendChild(force);
+      }
+    };
+    find.onclick = async () => {
+      out.textContent = "asking this machine, known hosts and tailnet peers on :9177…";
+      find.disabled = true;
+      const r = await monPost({ action: "discover" });
+      find.disabled = false;
+      out.textContent = "";
+      const found = r.found || [];
+      if (!found.length) {
+        out.textContent = "No monitor answered (" + (r.hosts_probed || 0) + " hosts, " + (r.ms || 0) + " ms). Run rack monitor up on the head node. On macOS, allow ByteBunker under System Settings › Privacy & Security › Local Network.";
+        return;
+      }
+      for (const f of found) {
+        const line = rkEl("div", "rk-found");
+        line.appendChild(rkEl("b", "mono", f.name || f.host));
+        line.appendChild(rkEl("span", "mono", f.url));
+        line.appendChild(rkEl("span", "rk-sub", (f.cluster ? f.cluster + " · " : "") + (f.role || "") + (f.peers ? " · covers " + (f.peers + 1) + " nodes" : "")));
+        if (f.configured) line.appendChild(rkEl("span", "rk-sub", "already added"));
+        else {
+          const use = rkEl("button", "ghost-btn", "use");
+          use.type = "button";
+          use.onclick = () => { url.value = f.url; if (!name.value) name.value = f.cluster || ""; tok.focus(); };
+          line.appendChild(use);
+        }
+        out.appendChild(line);
+      }
+    };
+    card.append(form, hint, out);
+    box.appendChild(card);
+    if (!list.length) url.focus();
+  }
+  $("cluster-monitors-btn").onclick = () => renderMonitorsPanel($("cluster-monitors").hidden);
+
+  let agentsObsTick = 0, clusterBusy = false;
+  async function pollCluster(force) {
+    if (clusterBusy && !force) return;
+    clusterBusy = true;
+    try {
+      if (force || (agentsObsTick++ % 2) === 0) pollAgentsObs();      // every 10 s alongside
+      const onScreen = state.screen === "cluster";
+      let d = null;
+      try { d = await (await fetch("/api/cluster?history=" + (onScreen ? 150 : 0))).json(); } catch (e) { d = null; }
+      if (d && !onScreen && state.cluster && state.cluster.nodes) {
+        // keep the last full history for when the screen opens again
+        for (const n of d.nodes || []) { const old = state.cluster.nodes.find((x) => x.name === n.name); if (old && old.history) n.history = old.history; }
+      }
+      state.cluster = d;
+      renderClusterSide(d);
+      if (onScreen) renderCluster(d);
+    } finally {
+      clusterBusy = false;
+    }
+  }
+
   async function pollAgentsObs() {
     const box = $("agents-obs");
     if (!box) return;
     let d = {};
     try { d = await (await fetch("/api/agents/stats")).json(); } catch (e) { d = { ok: false, error: e.message }; }
     state.fastModel = d.fast_model || null;
-    placeWorkerGpuCard();
+    state.workerStats = d.ok ? d : null;
+    const fm = state.fastModel;
+    if (fm && fm.gpu) { (state.hist.wgpu = state.hist.wgpu || []).push(fm.gpu.util); state.hist.wgpu = state.hist.wgpu.slice(-150); }
+    if (fm && fm.up) { (state.hist.wgen = state.hist.wgen || []).push(fm.gen_tps); state.hist.wgen = state.hist.wgen.slice(-150); }
     box.textContent = "";
+    if (!d.enabled && !d.ok) { renderClusterSide(state.cluster); return; }
     const card = document.createElement("div");
     card.className = "card";
     const title = document.createElement("div");
     title.style.cssText = "display:flex;align-items:baseline;gap:10px";
     title.innerHTML = "<span class='mono' style='font-size:15px;font-weight:600'>agents</span><span class='spec' style='font-size:11.5px;color:var(--faint)'></span><div style='flex:1'></div><span class='pill'><span class='d'></span><span class='pt'></span></span>";
-    title.querySelector(".spec").textContent = d.host ? (d.host + (d.isolated ? " \u00b7 isolated worker" : " \u00b7 NOT isolated")) : "";
-    title.querySelector(".pt").textContent = !d.enabled ? "disabled" : (d.ok ? ((d.containers || []).length ? "working" : "idle") : "unreachable");
+    title.querySelector(".spec").textContent = d.host ? (d.host + (d.isolated ? " · isolated worker" : " · NOT isolated")) : "";
+    title.querySelector(".pt").textContent = d.ok ? ((d.containers || []).length ? "working" : "idle") : "unreachable";
     if (!d.ok) title.querySelector(".pill").style.opacity = ".6";
     card.appendChild(title);
-    if (!d.enabled) {
-      const n = document.createElement("div"); n.className = "hint"; n.textContent = "Agents are disabled in config.json."; card.appendChild(n);
-      box.appendChild(card); return;
-    }
     if (!d.ok) {
       const n = document.createElement("div"); n.className = "hint"; n.textContent = "Worker not reachable: " + (d.error || ""); card.appendChild(n);
-      box.appendChild(card); return;
+      box.appendChild(card);
+      renderClusterSide(state.cluster);
+      return;
     }
     const day = d.day || {};
     const stat = (label, value, sub) => {
@@ -3088,152 +3541,14 @@
     const grid = document.createElement("div");
     grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px";
     grid.appendChild(stat("containers", String((d.containers || []).length), (d.containers || []).slice(0, 4).join(", ") || "none running"));
-    grid.appendChild(stat("masters", d.masters == null ? "\u2014" : String(d.masters), d.masters ? "goal in progress" : "no goal running"));
-    grid.appendChild(stat("live agents", String((d.live || []).length), (d.live || []).slice(0, 3).join(", ") || "\u2014"));
-    grid.appendChild(stat("spawns \u00b7 24h", String(day.n || 0), (day.ok || 0) + " ok \u00b7 " + (day.unverified || 0) + " unverified \u00b7 " + (day.failed || 0) + " failed"));
-    grid.appendChild(stat("tokens \u00b7 24h", (day.tokens || 0) >= 1000 ? Math.round((day.tokens || 0) / 1000) + "k" : String(day.tokens || 0), Object.keys(day.roles || {}).length ? Object.entries(day.roles).map(([r, n]) => n + " " + r).join(", ").slice(0, 60) : ""));
-    if (d.mem_total_gb) grid.appendChild(stat("worker", d.mem_used_gb + " / " + d.mem_total_gb + " GB", "load " + (d.load1 != null ? d.load1 : "\u2014")));
+    grid.appendChild(stat("masters", d.masters == null ? "—" : String(d.masters), d.masters ? "goal in progress" : "no goal running"));
+    grid.appendChild(stat("live agents", String((d.live || []).length), (d.live || []).slice(0, 3).join(", ") || "—"));
+    grid.appendChild(stat("spawns · 24h", String(day.n || 0), (day.ok || 0) + " ok · " + (day.unverified || 0) + " unverified · " + (day.failed || 0) + " failed"));
+    grid.appendChild(stat("tokens · 24h", (day.tokens || 0) >= 1000 ? Math.round((day.tokens || 0) / 1000) + "k" : String(day.tokens || 0), Object.keys(day.roles || {}).length ? Object.entries(day.roles).map(([r, n]) => n + " " + r).join(", ").slice(0, 60) : ""));
     card.appendChild(grid);
     box.appendChild(card);
-
-    // the worker's own model (a small, fast engine next to the agents)
-    const fm = d.fast_model;
-    if (fm && (fm.up || fm.gpu || fm.error) && !state.telemetryHasWorker) {
-      const c2 = document.createElement("div");
-      c2.className = "card";
-      const t2 = document.createElement("div");
-      t2.style.cssText = "display:flex;align-items:baseline;gap:10px";
-      t2.innerHTML = "<span class='mono' style='font-size:15px;font-weight:600'></span><span class='spec' style='font-size:11.5px;color:var(--faint)'></span><div style='flex:1'></div><span class='pill'><span class='d'></span><span class='pt'></span></span>";
-      t2.querySelector(".mono").textContent = fm.model || "worker model";
-      t2.querySelector(".spec").textContent = (fm.label || "") + (fm.gpu ? " \u00b7 " + fm.gpu.name : "");
-      t2.querySelector(".pt").textContent = fm.up ? ((fm.running || 0) + (fm.waiting || 0) ? "serving" : "idle") : "down";
-      if (!fm.up) t2.querySelector(".pill").style.opacity = ".6";
-      c2.appendChild(t2);
-      const g2 = document.createElement("div");
-      g2.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px";
-      if (fm.gpu) {
-        g2.appendChild(stat("gpu", fm.gpu.util + " %", fm.gpu.temp + " \u00b0C"));
-        g2.appendChild(stat("vram", (fm.gpu.mem_used_mb / 1024).toFixed(1) + " / " + (fm.gpu.mem_total_mb / 1024).toFixed(1) + " GB", ""));
-      }
-      if (fm.up) {
-        g2.appendChild(stat("requests", (fm.running || 0) + " running", (fm.waiting || 0) + " waiting \u00b7 " + (fm.requests_total || 0) + " served"));
-        g2.appendChild(stat("kv cache", (fm.kv_pct != null ? fm.kv_pct : 0) + " %", fm.prefix_queries ? "prefix hits " + Math.round(100 * fm.prefix_hits / fm.prefix_queries) + " %" : ""));
-        g2.appendChild(stat("output", fm.gen_tps != null ? fm.gen_tps + " tok/s" : "\u2014", "prompt " + (fm.prompt_tps != null ? fm.prompt_tps + " tok/s" : "\u2014")));
-        g2.appendChild(stat("tokens total", (fm.gen_total || 0) >= 1000 ? Math.round(fm.gen_total / 1000) + "k out" : Math.round(fm.gen_total || 0) + " out", (fm.prompt_total || 0) >= 1000 ? Math.round(fm.prompt_total / 1000) + "k in" : Math.round(fm.prompt_total || 0) + " in"));
-      } else {
-        const n = document.createElement("div"); n.className = "hint"; n.textContent = "Model server not reachable from the worker: " + (fm.error || ""); c2.appendChild(n);
-      }
-      c2.appendChild(g2);
-      box.appendChild(c2);
-    }
-  }
-
-  async function pollTelemetry() {
-    if ((agentsObsTick++ % 2) === 0) pollAgentsObs();   // every 10 s alongside telemetry
-    if (!state.cfg.telemetry) {
-      $("side-health").innerHTML = '<span class="dot" style="background:var(--faint);animation:none"></span>no telemetry';
-      $("cluster-poll").textContent = "prometheus not configured";
-      $("cluster-note").innerHTML = '<div class="empty-state" style="margin-top:14px"><b>Telemetry off</b><span>Set prometheus_url or sparkdash_url in config.json to light this screen up with real numbers.</span></div>';
-      return;
-    }
-    let t = { nodes: [] };
-    try { t = await (await fetch("/api/telemetry")).json(); } catch (e) {}
-    const side = $("side-nodes");
-    side.textContent = "";
-    const cards = $("node-cards");
-    cards.textContent = "";
-    // when sparkDash lists the agent worker as a unit, its card comes from there
-    state.telemetryHasWorker = (t.nodes || []).some((n) => n.kind === "host");
-    let healthy = 0;
-    for (const n of t.nodes) {
-      if (n.util != null || n.mem_used_gb != null) healthy++;
-      const util = n.util != null ? Math.round(n.util) : null;
-      (state.hist[n.name] = state.hist[n.name] || []).push(util || 0);
-      state.hist[n.name] = state.hist[n.name].slice(-44);
-
-      const mini = document.createElement("div");
-      mini.className = "node-mini";
-      mini.innerHTML = '<div class="row"><span class="mono" style="color:var(--muted)"></span><b class="mono"></b></div><div class="bar"><div></div></div>';
-      mini.querySelector("span").textContent = n.name;
-      mini.querySelector("b").textContent = util != null ? util + "%" : "—";
-      mini.querySelector(".bar>div").style.width = (util || 0) + "%";
-      side.appendChild(mini);
-
-      // spec line comes from config.json (operator-declared) or is omitted —
-      // the console never invents hardware
-      const spec = (state.cfg.nodes.find((c) => c.name === n.name) || {}).spec || "";
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML =
-        '<div style="display:flex;align-items:flex-start;gap:10px">' +
-        '<div style="display:flex;flex-direction:column;gap:2px"><span class="mono" style="font-size:15px;font-weight:600"></span>' +
-        (spec ? '<span class="spec" style="font-size:11.5px;color:var(--faint)"></span>' : '') +
-        '<div style="flex:1"></div><span class="pill"><span class="d"></span>reporting</span></div>' +
-        '<div style="display:flex;flex-direction:column;gap:6px">' +
-        '<div style="display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:var(--muted)">GPU utilization</span>' +
-        '<span class="mono" style="font-size:19px;font-weight:600"></span></div>' +
-        '<svg viewBox="0 0 100 26" preserveAspectRatio="none" style="width:100%;height:44px;display:block"><polyline fill="none" stroke="var(--accent)" stroke-width="1.1" vector-effect="non-scaling-stroke"/></svg></div>' +
-        '<div style="display:flex;flex-direction:column;gap:5px">' +
-        '<div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--muted)">Unified memory</span><span class="mono 0"></span></div>' +
-        '<div class="bar5"><div></div></div></div>' +
-        '<div class="stat-grid">' +
-        '<div><span class="kv-label">Temp</span><span class="v"></span></div>' +
-        '<div><span class="kv-label">Power</span><span class="v"></span></div>' +
-        '<div><span class="kv-label">CPU</span><span class="v"></span></div>' +
-        '<div><span class="kv-label">Uptime</span><span class="v"></span></div></div>';
-      card.querySelector(".mono").textContent = n.name;
-      if (spec) card.querySelector(".spec").textContent = spec;
-      else if (n.hardware || n.role) { const sp = document.createElement("span"); sp.className = "spec"; sp.style.cssText = "font-size:11.5px;color:var(--faint)"; sp.textContent = [n.hardware, n.role].filter(Boolean).join(" \u00b7 "); card.querySelector(".mono").parentNode.appendChild(sp); }
-      if (n.online === false) { const pill = card.querySelector(".pill"); pill.style.opacity = ".6"; pill.lastChild.textContent = "offline"; }
-      else if (n.throttle && n.throttle !== "ok") { card.querySelector(".pill").lastChild.textContent = "throttled: " + n.throttle; }
-      const memLabelEl = card.querySelector(".bar5").previousElementSibling.firstElementChild;
-      if (n.mem_label) memLabelEl.textContent = n.mem_label;
-      card.querySelectorAll(".mono")[1].textContent = util != null ? util + "%" : "—";
-      card.querySelector("polyline").setAttribute("points", sparkline(state.hist[n.name]));
-      const memLine = card.querySelectorAll(".mono")[2];
-      memLine.textContent = (n.mem_used_gb != null && n.mem_total_gb)
-        ? n.mem_used_gb + " / " + n.mem_total_gb + " GB" : "—";
-      card.querySelector(".bar5>div").style.width =
-        (n.mem_used_gb != null && n.mem_total_gb)
-          ? (n.mem_used_gb / n.mem_total_gb) * 100 + "%" : "0";
-      const vs = card.querySelectorAll(".stat-grid .v");
-      vs[0].textContent = n.temp != null ? Math.round(n.temp) + "°C" : "—";
-      vs[1].textContent = n.power != null ? Math.round(n.power) + " W" : "—";
-      vs[2].textContent = n.cpu != null ? Math.round(n.cpu) + "%" : "—";
-      vs[3].textContent = fmtUp(n.uptime_s);
-      if (n.llm) {
-        const l = n.llm;
-        const line = document.createElement("div");
-        line.className = "mono";
-        line.style.cssText = "font-size:11.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;margin-top:6px";
-        const bits = ["serving " + (l.model || "?") + (l.backend ? " (" + l.backend + ")" : "")];
-        if (l.tps != null) bits.push(Math.round(l.tps) + " tok/s out");
-        if (l.kv != null) bits.push("KV " + Math.round(l.kv * (l.kv <= 1 ? 100 : 1)) + "%");
-        if (l.running != null) bits.push((l.running || 0) + " run \u00b7 " + (l.waiting || 0) + " wait");
-        if (l.ttft_p95 != null) bits.push("TTFT p95 " + l.ttft_p95.toFixed(1) + " s");
-        if (l.prefix_hit != null) bits.push("prefix hit " + Math.round(l.prefix_hit * 100) + "%");
-        if (l.context) bits.push((l.context / 1024).toFixed(0) + "k ctx");
-        for (const b of bits) { const sp = document.createElement("span"); sp.textContent = b; line.appendChild(sp); }
-        card.appendChild(line);
-      }
-      cards.appendChild(card);
-    }
-    placeWorkerGpuCard();
-    if (state.fastModel && state.fastModel.gpu) {
-      const g = state.fastModel.gpu;
-      const mini = document.createElement("div");
-      mini.className = "node-mini";
-      mini.innerHTML = '<div class="row"><span class="mono" style="color:var(--muted)"></span><b class="mono"></b></div><div class="bar"><div></div></div>';
-      mini.querySelector("span").textContent = g.name.replace("NVIDIA GeForce ", "");
-      mini.querySelector("b").textContent = g.util + "%";
-      mini.querySelector(".bar>div").style.width = (g.util || 0) + "%";
-      side.appendChild(mini);
-    }
-    $("side-health").innerHTML = healthy === t.nodes.length && healthy > 0
-      ? '<span class="dot"></span>healthy'
-      : '<span class="dot err"></span>' + healthy + "/" + t.nodes.length;
-    $("cluster-poll").innerHTML = '<span class="dot"></span>polling 5s' + (t.source === "sparkdash" ? " \u00b7 sparkDash" : "");
-
+    renderClusterSide(state.cluster);
+    if (state.screen === "cluster") renderCluster(state.cluster);
   }
 
   /* ---------------- usage ---------------- */
@@ -3702,14 +4017,15 @@
     $("who-host").textContent = state.cfg.identity.host || "";
     $("avatar").textContent = (state.cfg.identity.user || "B")[0].toUpperCase();
     updateFirstRun();
-    if (state.cfg.nodes.length) $("cluster-sub").textContent = state.cfg.nodes.length + " nodes configured";
     if (state.cfg.video) { $("nav-video").hidden = false; vidRefresh(); }
     if (state.cfg.netcheck) $("netcheck-card").hidden = false;
     await loadModels();
     if (state.cfg.mcp) loadTools();
     loadSkills();
-    pollTelemetry();
-    setInterval(pollTelemetry, 5000);
+    pollCluster();
+    setInterval(pollCluster, 5000);
+    const deep = location.hash.slice(1);
+    if (deep && screens.includes(deep) && deep !== state.screen) go(deep);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);
   })();
 })();

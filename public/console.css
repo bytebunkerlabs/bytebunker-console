@@ -384,3 +384,113 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .netcheck-verdict{font-size:12.5px}
 .netcheck-verdict.good{color:var(--ok)}
 .netcheck-verdict.bad{color:var(--err)}
+
+/* ---------- Cluster: every node as a rack unit ---------- */
+/* cells wrap and stretch to fill the last row; their right and bottom
+   rules sit under the container's clip on the outer edges */
+.rk-summary{display:flex;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;margin:4px 0 14px}
+.rk-summary[hidden],.netcheck[hidden]{display:none}
+.rk-summary>div{flex:1 1 150px;margin:0 -1px -1px 0;border-right:1px solid var(--soft);border-bottom:1px solid var(--soft);padding:12px 15px;display:flex;flex-direction:column;gap:3px;min-width:0}
+.rk-summary .v{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:20px;font-weight:600;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rk-summary .s{font-size:11.5px;color:var(--muted)}
+.rk-units{display:flex;flex-direction:column;gap:14px}
+.rk-unit{border:1px solid var(--border);border-radius:14px;background:var(--surface);overflow:hidden}
+.rk-unit.down{opacity:.75}
+.rk-face{display:flex;align-items:center;gap:13px;padding:11px 16px;background:var(--side);border-bottom:1px solid var(--border);min-width:0}
+.rk-led{flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 20%,transparent);animation:bbp 2.4s ease-in-out infinite}
+.rk-led.warn{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 22%,transparent)}
+.rk-led.err{background:var(--err);box-shadow:0 0 0 3px color-mix(in srgb,var(--err) 22%,transparent);animation:none}
+.rk-led.off{background:var(--faint);box-shadow:none;animation:none}
+.rk-id{display:flex;flex-direction:column;gap:3px;min-width:0;flex:0 1 auto}
+.rk-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rk-name{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:15px;font-weight:600}
+.rk-role{font-size:10px;letter-spacing:.09em;text-transform:uppercase;padding:2px 8px;border-radius:999px;background:var(--chip);color:var(--muted);font-weight:500}
+.rk-role.bad{background:color-mix(in srgb,var(--err) 14%,transparent);color:var(--err);text-transform:none;letter-spacing:0}
+.rk-spec{font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* the faceplate's vent slots: decoration that reads as hardware */
+.rk-vents{flex:1 1 40px;min-width:24px;height:18px;margin:0 6px;border-radius:4px;opacity:.55;
+  background:repeating-linear-gradient(90deg,var(--track) 0 2px,transparent 2px 7px);
+  -webkit-mask:linear-gradient(90deg,transparent,#000 18%,#000 82%,transparent);mask:linear-gradient(90deg,transparent,#000 18%,#000 82%,transparent)}
+.rk-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px;font-size:11px;color:var(--muted);text-align:right;min-width:0}
+.rk-meta .rk-src{color:var(--faint)}
+.rk-body{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.rk-meter{padding:14px 16px 13px;display:flex;flex-direction:column;gap:7px;border-right:1px solid var(--soft);min-width:0}
+.rk-meter:last-child{border-right:0}
+.rk-k{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rk-big{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:21px;font-weight:600;line-height:1.1;white-space:nowrap}
+.rk-mid{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:15.5px;font-weight:600;line-height:1.2;white-space:nowrap}
+.rk-sub{font-size:11.5px;color:var(--muted);font-family:'Geist Mono',ui-monospace,Menlo,monospace;line-height:1.45;overflow-wrap:anywhere}
+.rk-spark{width:100%;height:34px;display:block;overflow:visible}
+.rk-spark .line{fill:none;stroke:var(--accent);stroke-width:1.3}
+.rk-spark .fill{fill:color-mix(in srgb,var(--accent) 13%,transparent);stroke:none}
+.rk-spark.warm .line{stroke:var(--warn)}
+.rk-spark.warm .fill{fill:color-mix(in srgb,var(--warn) 12%,transparent)}
+.rk-spark.mem .line{stroke:var(--fg);stroke-width:1.1;opacity:.7}
+.rk-spark.mem .fill{display:none}
+.rk-spark.empty{height:34px;background:repeating-linear-gradient(90deg,var(--soft) 0 6px,transparent 6px 10px) bottom/100% 1px no-repeat}
+.rk-stack{height:6px;border-radius:6px;background:var(--track);overflow:hidden;display:flex}
+.rk-stack>b{display:block;height:100%;transition:width .8s linear}
+.rk-stack>b.gpu{background:var(--accent)}
+.rk-stack>b.used{background:var(--fg);opacity:.55}
+.rk-stack>b.kv{background:var(--accent)}
+.rk-cores{display:grid;gap:2px;height:34px;align-items:end}
+.rk-cores i{display:block;border-radius:2px 2px 1px 1px;background:var(--accent);opacity:.85;min-height:2px;transition:height .8s linear}
+.rk-temps{display:flex;flex-wrap:wrap;gap:4px 10px;font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--muted)}
+.rk-temps b{font-family:'Geist',system-ui,sans-serif;font-weight:500;color:var(--faint);font-size:10.5px;letter-spacing:.04em}
+.rk-temps .warm{color:var(--warn)}
+.rk-temps .hot{color:var(--err);font-weight:600}
+.rk-engine{border-top:1px solid var(--soft);padding:12px 16px 14px;display:flex;flex-direction:column;gap:11px}
+.rk-ehead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.rk-kind{font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:6px;background:var(--fg);color:var(--bg)}
+.rk-model{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:13.5px;font-weight:600;overflow-wrap:anywhere}
+.rk-emeta{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--faint)}
+.rk-state{margin-left:auto;font-size:11px;font-weight:500;padding:2px 9px;border-radius:999px;background:var(--chip);color:var(--muted)}
+.rk-state.busy{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok)}
+.rk-state.err{background:color-mix(in srgb,var(--err) 14%,transparent);color:var(--err)}
+.rk-egrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:12px 16px}
+.rk-cell{display:flex;flex-direction:column;gap:4px;min-width:0}
+.rk-cell .rk-spark{height:26px}
+.rk-row{border-top:1px solid var(--soft);padding:10px 16px;display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.rk-note{font-size:12px;color:var(--muted)}
+.rk-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;background:var(--chip);font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--muted);white-space:nowrap}
+.rk-chip b{font-family:'Geist',system-ui,sans-serif;font-weight:600;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--fg)}
+.rk-chip.fabric b{color:var(--accent)}
+.rk-chip.tailnet b{color:var(--warn)}
+.rk-mini{display:inline-block;width:44px;height:4px;border-radius:4px;background:var(--track);overflow:hidden;vertical-align:middle}
+.rk-mini i{display:block;height:100%;background:var(--fg);opacity:.6}
+.rk-ctrs{border-top:1px solid var(--soft)}
+.rk-ctrs>summary{cursor:pointer;padding:10px 16px;font-size:12px;color:var(--muted);list-style:none;display:flex;align-items:center;gap:8px}
+.rk-ctrs>summary::-webkit-details-marker{display:none}
+.rk-ctrs>summary::before{content:"";width:6px;height:6px;border-right:1.4px solid var(--faint);border-bottom:1.4px solid var(--faint);transform:rotate(-45deg);transition:transform .15s}
+.rk-ctrs[open]>summary::before{transform:rotate(45deg)}
+.rk-ctrs>summary:hover{color:var(--fg)}
+.rk-table{padding:0 16px 12px;display:flex;flex-direction:column}
+.rk-tr{display:grid;grid-template-columns:10px minmax(120px,1.3fr) minmax(120px,1.6fr) minmax(90px,1fr) 80px 76px;gap:10px;align-items:center;padding:5px 0;border-top:1px dashed var(--soft);font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11.5px}
+.rk-tr .d{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.rk-tr.off{color:var(--faint)}
+.rk-tr.off .d{background:var(--track)}
+.rk-tr .nm{color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rk-tr .im,.rk-tr .st{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rk-tr .num{text-align:right;color:var(--muted)}
+.rk-alert{border:1px solid color-mix(in srgb,var(--err) 35%,var(--border));background:color-mix(in srgb,var(--err) 7%,var(--surface));color:var(--fg);border-radius:12px;padding:10px 14px;font-size:12.5px;margin:4px 0 12px;overflow-wrap:anywhere}
+.rk-alert b{font-family:'Geist Mono',ui-monospace,Menlo,monospace}
+.rk-mons{margin:4px 0 14px;gap:12px}
+.rk-monrow{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--soft)}
+.rk-monid{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.rk-monid>span{font-size:11.5px;color:var(--muted);overflow-wrap:anywhere}
+.rk-inline{display:flex;gap:8px;margin-top:6px}
+.rk-inline input,.rk-add input{border:1px solid var(--border);border-radius:8px;padding:7px 10px;background:var(--bg);font-size:12.5px;min-width:0;width:100%}
+.rk-inline input:focus,.rk-add input:focus{border-color:var(--fg)}
+.rk-add{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1.4fr) minmax(0,1fr) auto;gap:10px;align-items:end;border-top:1px solid var(--soft);padding-top:12px}
+.rk-add label{display:flex;flex-direction:column;gap:5px;min-width:0}
+.rk-btns{display:flex;gap:8px}
+.rk-out{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
+.rk-out:empty{display:none}
+.rk-bad{color:var(--err)}
+.rk-found{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:6px 0;border-top:1px dashed var(--soft)}
+.rk-found .mono{font-size:12px}
+#side-nodes{cursor:pointer}
+@media (max-width:1180px){.rk-body{grid-template-columns:repeat(2,minmax(0,1fr))}.rk-meter:nth-child(2){border-right:0}.rk-meter:nth-child(-n+2){border-bottom:1px solid var(--soft)}}
+@media (max-width:760px){.rk-summary .v{font-size:17px}.rk-body{grid-template-columns:1fr}.rk-meter{border-right:0;border-bottom:1px solid var(--soft)}.rk-meter:last-child{border-bottom:0}.rk-vents{display:none}.rk-face{flex-wrap:wrap}.rk-meta{align-items:flex-start;text-align:left}.rk-add{grid-template-columns:1fr}.rk-tr{grid-template-columns:10px 1fr 70px 70px}.rk-tr .im,.rk-tr .st{display:none}}
+.rk-mons .hint{font-size:12px;color:var(--muted);line-height:1.65}
+.rk-mons code{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11.5px;background:var(--code);border:1px solid var(--soft);border-radius:5px;padding:1px 5px}
