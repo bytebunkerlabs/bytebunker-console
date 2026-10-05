@@ -35,7 +35,9 @@ API:
   DELETE /api/video/<id>     drop a job and its stored output
 """
 import argparse
+import getpass
 import json
+import platform
 import sys
 import os
 import re
@@ -90,7 +92,7 @@ DEFAULT_CONFIG = {
     "prometheus_url": "",
     "h3_url": "",
     "netcheck_ssh": "",
-    "identity": {"user": "mo@bunker", "host": "local"},
+    "identity": None,           # who and where, shown in the sidebar: this machine's user and name
     "frontier_rates_per_mtok": {"input": 3.0, "output": 15.0},
     # Safe by default: the harness launcher is inert until you enable it and
     # point dir/ssh at a dedicated worker host (see agents.py).
@@ -171,8 +173,17 @@ def caps_for(model_id):
     return dict(CAPS_FALLBACK)
 
 
+def _default_identity():
+    try:
+        user = getpass.getuser()
+    except Exception:   # noqa: BLE001 - no USER and no passwd entry
+        user = "you"
+    return {"user": user, "host": (platform.node() or "this machine").split(".")[0]}
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
+    cfg["identity"] = _default_identity()
     path = CONFIG_PATH
     if os.path.exists(path):
         with open(path) as f:
@@ -201,8 +212,20 @@ def _plugin_state():
     return CFG.setdefault("plugins", {})
 
 
+# What the user adds lands in the data folder unless config names a writable
+# folder: never in the app's own skills/ and plugins/, which are read-only
+# inside the app and replaced by every update.
+USER_SKILLS = os.path.join(DATA, "skills")
+USER_PLUGINS = os.path.join(DATA, "plugins")
+
+
+def _with_user_dir(dirs, user_dir):
+    seen = {os.path.abspath(os.path.expanduser(d)) for d in dirs}
+    return list(dirs) + ([user_dir] if os.path.abspath(user_dir) not in seen else [])
+
+
 def discover_plugins():
-    dirs = [BUILTIN_PLUGINS] + list(CFG.get("plugins_dirs") or [])
+    dirs = [BUILTIN_PLUGINS] + _with_user_dir(CFG.get("plugins_dirs") or [], USER_PLUGINS)
     found, warnings = skillmod.discover_plugins(dirs)
     return found, warnings
 
@@ -220,7 +243,7 @@ def skill_roots():
     for name, p in sorted(enabled_plugins().items()):
         if p.skills_dir:
             roots.append((p.skills_dir, "plugin:" + name))
-    for d in (CFG.get("skills_dirs") or []):
+    for d in _with_user_dir(CFG.get("skills_dirs") or [], USER_SKILLS):
         roots.append((d, d))
     roots.append((BUILTIN_SKILLS, "built-in"))
     return roots
@@ -231,15 +254,15 @@ def skill_catalog():
 
 
 def user_skills_dir():
-    """Where a skill created in the UI is written: the first configured
-    skills dir (on a deployed console that is the harness mirror), else the
-    repo's own skills/."""
+    """Where a skill created in the UI is written: the first writable
+    configured skills dir (on a deployed console that is the harness
+    mirror), else <data>/skills."""
     for d in (CFG.get("skills_dirs") or []):
         d = os.path.expanduser(d)
         if os.path.isdir(d) and os.access(d, os.W_OK):
             return d
-    os.makedirs(BUILTIN_SKILLS, exist_ok=True)
-    return BUILTIN_SKILLS
+    os.makedirs(USER_SKILLS, exist_ok=True)
+    return USER_SKILLS
 
 
 def plugins_install_dir():
@@ -247,8 +270,8 @@ def plugins_install_dir():
         d = os.path.expanduser(d)
         if os.path.isdir(d) and os.access(d, os.W_OK):
             return d
-    os.makedirs(BUILTIN_PLUGINS, exist_ok=True)
-    return BUILTIN_PLUGINS
+    os.makedirs(USER_PLUGINS, exist_ok=True)
+    return USER_PLUGINS
 
 
 # ------------------------------------------------------------------ rack --
@@ -830,10 +853,11 @@ def usage_summary():
     rates = CFG.get("frontier_rates_per_mtok", {})
     saved = (tot_in / 1e6) * float(rates.get("input", 0)) + \
             (tot_out / 1e6) * float(rates.get("output", 0))
-    # the agent plane's tokens live on the worker, not in this ledger
-    agents = agentmod.agent_usage(CFG)
+    # the agent plane's tokens live on the worker, not in this ledger; they
+    # arrive later (an event) when the worker is slow or away
+    agents = agentmod.agent_usage(CFG, on_update=lambda: BUS.publish("usage", "agents"))
     agents_saved = 0.0
-    if agents and not agents.get("error"):
+    if agents and not agents.get("error") and not agents.get("pending"):
         a_in = agents.get("slave_prompt", 0) + agents.get("master_prompt", 0)
         a_out = agents.get("slave_completion", 0) + agents.get("master_completion", 0)
         # older spawn records carry only a total: price it as input (conservative)

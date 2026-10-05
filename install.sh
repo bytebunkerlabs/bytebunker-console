@@ -2,20 +2,21 @@
 # ByteBunker one-command install.
 #
 #   curl -fsSL https://raw.githubusercontent.com/bytebunkerlabs/bytebunker-console/main/install.sh | bash
-#   ./install.sh --upstream http://172.16.25.186:4000/v1 --key sk-... --with-harness
+#   ./install.sh --upstream http://192.0.2.10:8000/v1 --key KEY
 #
-# Installs the console (stdlib Python, no pip) as a background service on
-# macOS (launchd) or Linux (systemd --user), writes config.json, and can
-# place the agent harness next to it so the Agents screen works in local
-# mode. Re-running updates in place. Nothing needs sudo.
+# Installs the console (stdlib Python 3.9+, no pip) as a background service
+# on macOS (launchd) or Linux (systemd --user) and writes config.json.
+# --upstream adds a model server as the first gateway; without it, the
+# Gateways screen finds the servers on your network. Agents run on a
+# separate worker, connected from the Agents screen, never on this machine.
+# Re-running updates in place. Nothing needs sudo.
 set -euo pipefail
 
 DIR="${BYTEBUNKER_DIR:-$HOME/bytebunker}"
 PORT=8765; BIND=127.0.0.1
 UPSTREAM=""; KEY=""
-WITH_HARNESS=0; NO_SERVICE=0
+NO_SERVICE=0
 CONSOLE_REPO="${CONSOLE_REPO:-https://github.com/bytebunkerlabs/bytebunker-console.git}"
-HARNESS_REPO="${HARNESS_REPO:-git@github.com:bytebunkerlabs/bytebunker-harness.git}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -24,9 +25,12 @@ while [ $# -gt 0 ]; do
     --bind) BIND="$2"; shift 2;;
     --upstream) UPSTREAM="$2"; shift 2;;
     --key) KEY="$2"; shift 2;;
-    --with-harness) WITH_HARNESS=1; shift;;
+    --with-harness)
+      echo "!! --with-harness is gone: agents run on a separate worker, never on the console's machine."
+      echo "   Install without it, then connect a worker on the Agents screen."
+      exit 2;;
     --no-service) NO_SERVICE=1; shift;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0;;
     *) echo "unknown option: $1"; exit 2;;
   esac
 done
@@ -35,7 +39,7 @@ say() { printf '\033[1;36m==\033[0m %s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "!! need $1"; exit 1; }; }
 need git; need python3
 PYV=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || { echo "!! python3 >= 3.10 required (have $PYV)"; exit 1; }
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' || { echo "!! python3 >= 3.9 required (have $PYV)"; exit 1; }
 
 mkdir -p "$DIR"
 # ---------------------------------------------------------------- console
@@ -55,42 +59,31 @@ fi
 C="$DIR/console"
 mkdir -p "$C/data"
 
-# ---------------------------------------------------------------- harness
-if [ "$WITH_HARNESS" = 1 ]; then
-  if [ -d "$DIR/harness/.git" ]; then
-    say "updating harness"; git -C "$DIR/harness" pull --ff-only -q || true
-  else
-    say "cloning harness into $DIR/harness (needs access to the repo)"
-    git clone -q "$HARNESS_REPO" "$DIR/harness" || { echo "!! could not clone the harness; continuing without it"; WITH_HARNESS=0; }
-  fi
-  if [ "$WITH_HARNESS" = 1 ]; then
-    command -v uv >/dev/null 2>&1 || { say "installing uv"; curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }
-    (cd "$DIR/harness" && uv sync -q) || echo "   (uv sync failed; run it by hand in $DIR/harness)"
-    [ -f "$DIR/harness/config/config.yaml" ] || cp "$DIR/harness/config/config.example.yaml" "$DIR/harness/config/config.yaml" 2>/dev/null || true
-  fi
-fi
-
 # ---------------------------------------------------------------- config
-python3 - "$C" "$PORT" "$BIND" "$UPSTREAM" "$KEY" "$WITH_HARNESS" "$DIR" <<'PY'
+python3 - "$C" "$PORT" "$BIND" "$UPSTREAM" "$KEY" <<'PY'
 import json, os, sys
-c, port, bind, up, key, harness, root = sys.argv[1:8]
+c, port, bind, up, key = sys.argv[1:6]
 path = os.path.join(c, "config.json")
 cfg = json.load(open(os.path.join(c, "config.json.example")))
 if os.path.exists(path):
-    cfg.update(json.load(open(path)))
+    existing = json.load(open(path))
+    if "gateways" not in existing:
+        cfg.pop("gateways", None)      # an older config: the server turns its upstream_url into a gateway
+    cfg.update(existing)
 cfg["port"] = int(port); cfg["bind"] = bind
-if up: cfg["upstream_url"] = up
-if key: cfg["upstream_key"] = key
+if up:
+    url = up.rstrip("/")
+    url = url if "://" in url else "http://" + url
+    url = url if url.endswith("/v1") else url + "/v1"
+    gws = [g for g in (cfg.get("gateways") or []) if g.get("url", "").rstrip("/") != url]
+    cfg["gateways"] = [{"name": "upstream", "url": url, "key": key, "enabled": True}] + gws
 cfg.setdefault("skills_dirs", []); cfg.setdefault("plugins_dirs", [])
-if harness == "1":
-    a = cfg.setdefault("agents", {})
-    a.update(enabled=True, ssh="", dir=os.path.join(root, "harness"), python="uv run",
-             script="scripts/run_master.py")
-    a.setdefault("master_name", "Sultan")
-    sd = os.path.join(root, "harness", "skills")
-    if sd not in cfg["skills_dirs"]:
-        cfg["skills_dirs"].append(sd)
-json.dump(cfg, open(path, "w"), indent=2)
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o600)                    # gateway keys live here
+os.replace(tmp, path)
 print("   config:", path)
 PY
 
@@ -143,17 +136,18 @@ UN
   loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes' || echo "   tip: sudo loginctl enable-linger $USER  (keeps it running when you log out)"
 fi
 
-sleep 2
-if curl -fs -m 5 "$URL/api/models" >/dev/null 2>&1; then
+if [ "$NO_SERVICE" = 1 ]; then
+  :
+elif sleep 2 && curl -fs -m 5 "$URL/api/models" >/dev/null 2>&1; then
   say "console is up at $URL"
 else
-  say "console installed; it answers at $URL once your upstream_url is reachable (edit $C/config.json)"
+  say "console installed at $URL; it did not answer yet (see $C/data/console.log)"
 fi
 cat <<TXT
 
 Next:
-  1. Open $URL. The Models screen lists what your gateway serves.
-  2. Recipes screen: deploy a model (vLLM on a CUDA GPU, Ollama on Windows, vLLM on DGX Spark) and register it in litellm.
-  3. Agents screen: name your master and write its standing orders; goals run on the harness ($( [ "$WITH_HARNESS" = 1 ] && echo "local mode, $DIR/harness" || echo "add --with-harness, or point agents.ssh at a worker host" )).
-  4. Skills screen: create skills in the UI; they are shared with the agents.
+  1. Open $URL (on another machine: ssh -L $PORT:127.0.0.1:$PORT this-host, then the same URL).
+  2. Gateways: add your model servers, or let it find them on your network.
+  3. Cluster: add a rack monitor (rack monitor up on the rack prints its address).
+  4. Agents: connect a separate worker to run goals there.
 TXT

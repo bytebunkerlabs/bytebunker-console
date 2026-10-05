@@ -17,7 +17,7 @@ import os
 import threading
 import time
 
-TOPICS = ("sessions", "runs", "output", "jobs", "cluster", "gateways", "models", "agents", "deploy",
+TOPICS = ("sessions", "runs", "output", "jobs", "usage", "cluster", "gateways", "models", "agents", "deploy",
           "approvals", "config", "mcp", "system")
 
 

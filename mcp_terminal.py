@@ -7,11 +7,12 @@ added like any other server (panel → Tools · MCP → "terminal" preset), or i
 config.json:
 
   "mcp_servers": {
-    "terminal": {"command": "python3", "args": ["mcp_terminal.py", "~/rack"]}
+    "terminal": {"command": "python3", "args": ["mcp_terminal.py", "~/projects"]}
   }
 
 The optional argument is the starting directory. The working directory then
-follows the model's own `cd`s from call to call, like a real terminal.
+follows the model's own `cd`s from call to call, like a real terminal. The
+shell is zsh or bash on macOS and Linux, PowerShell on Windows.
 
 Trust model, plainly: this is a shell running as the console's user, with
 that user's files, keys and network. There is no sandbox here — the timeout
@@ -19,8 +20,10 @@ and the output cap are about keeping the model loop alive, not about safety.
 Enable it because you want the model to have a terminal; disable it (one
 click in the panel) when you don't.
 """
+import base64
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -34,16 +37,22 @@ STATE = {"cwd": os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~")}
 if not os.path.isdir(STATE["cwd"]):
     STATE["cwd"] = os.path.expanduser("~")
 
-SHELL = shutil.which("zsh") or shutil.which("bash") or "/bin/sh"
+WINDOWS = os.name == "nt"
+if WINDOWS:
+    SHELL = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
+else:
+    SHELL = shutil.which("zsh") or shutil.which("bash") or "/bin/sh"
+OS_NAME = {"Darwin": "macOS", "Linux": "Linux", "Windows": "Windows"}.get(platform.system(), platform.system())
+SHELL_NAME = "PowerShell" if WINDOWS else os.path.basename(SHELL)
 
 TOOLS = [{
     "name": "run",
     "description": (
-        "Run a shell command on the console host (macOS, %s) and return its exit "
-        "code, stdout and stderr. The working directory persists between calls, so "
-        "`cd` works. Non-interactive: nothing can answer a prompt, so pass -y / "
-        "--no-input style flags. Default timeout 60 s (timeout_s up to 600). Output "
-        "beyond %d characters is elided in the middle." % (os.path.basename(SHELL), OUTPUT_CAP)
+        "Run a %s command on the console host (%s) and return its exit code, stdout "
+        "and stderr. The working directory persists between calls, so `cd` works. "
+        "Non-interactive: nothing can answer a prompt, so pass -y / --no-input style "
+        "flags. Default timeout 60 s (timeout_s up to 600). Output beyond %d characters "
+        "is elided in the middle." % (SHELL_NAME, OS_NAME, OUTPUT_CAP)
     ),
     "inputSchema": {
         "type": "object",
@@ -74,13 +83,23 @@ def run(args):
         timeout = DEFAULT_TIMEOUT
     timeout = max(1, min(MAX_TIMEOUT, timeout))
     # The wrapper runs the command, then prints the shell's final directory
-    # after a NUL marker, so a `cd` in this call is where the next one starts.
-    script = "%s\n__rc=$?\nprintf '\\n<<__BB_CWD__>>%%s' \"$PWD\"\nexit $__rc" % cmd
+    # after a marker, so a `cd` in this call is where the next one starts.
+    if WINDOWS:
+        # -EncodedCommand: no quoting rules to get wrong on the way in
+        script = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n%s\n$__ok = $?\n"
+                  "$__rc = if ($__ok) { 0 } elseif ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { $LASTEXITCODE } else { 1 }\n"
+                  "[Console]::Out.Write(\"`n<<__BB_CWD__>>\" + (Get-Location).ProviderPath)\nexit $__rc" % cmd)
+        argv = [SHELL, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                base64.b64encode(script.encode("utf-16-le")).decode("ascii")]
+        extra = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0), "encoding": "utf-8"}
+    else:
+        script = "%s\n__rc=$?\nprintf '\\n<<__BB_CWD__>>%%s' \"$PWD\"\nexit $__rc" % cmd
+        argv = [SHELL, "-c", script]
+        extra = {"start_new_session": True}
     try:
         p = subprocess.run(
-            [SHELL, "-c", script], cwd=STATE["cwd"], capture_output=True,
-            text=True, errors="replace", timeout=timeout, start_new_session=True,
-            stdin=subprocess.DEVNULL,
+            argv, cwd=STATE["cwd"], capture_output=True, text=True, errors="replace",
+            timeout=timeout, stdin=subprocess.DEVNULL, **extra
         )
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or b"")

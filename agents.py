@@ -15,7 +15,7 @@ Config (config.json):
 
     "agents": {
       "enabled": false,               // master switch; false = inert
-      "ssh": "leagueofash",           // agent host over SSH; "" = run locally (NOT isolated)
+      "ssh": "agents-worker",         // agent host over SSH; "" = run locally (NOT isolated)
       "dir": "~/bytebunker-harness",  // the harness checkout on that host
       "python": "uv run",             // launcher; "uv run" or e.g. "python3"
       "script": "scripts/run_master.py"
@@ -508,32 +508,58 @@ out["models"] = models
 print(json.dumps(out))
 """
 
-_usage_cache = {"at": 0, "val": None}
+_usage_cache = {"at": 0, "val": None, "busy": False}
+_usage_lock = threading.Lock()
 
 
-def agent_usage(CFG, max_age=60):
+def agent_usage(CFG, max_age=60, on_update=None):
     """Agent-plane token usage for the Usage screen: the worker's spawn
     ledger (per slave) plus every goal's master trace (master rounds and
     skeptic panels), last 14 days, keyed by day like the console's own
-    ledger. One ssh per minute at most."""
-    import json as _json, time as _time
-    now = _time.time()
+    ledger.
+
+    Never waits for the worker (an offline one held the Usage screen for
+    8 s): returns what is known now, with "as_of" and "stale" when it is old,
+    or {"pending": True} before the first answer, and asks the worker in the
+    background, one ssh at a time. on_update() runs when its answer lands."""
     a = agent_cfg(CFG)
     if not a.get("enabled"):
         return None
-    if _usage_cache["val"] is not None and now - _usage_cache["at"] < max_age:
-        return _usage_cache["val"]
+    now = time.time()
+    with _usage_lock:
+        val, at = _usage_cache["val"], _usage_cache["at"]
+        stale = val is None or now - at >= max_age
+        if stale and not _usage_cache["busy"]:
+            _usage_cache["busy"] = True
+            threading.Thread(target=_refresh_usage, args=(dict(a), on_update), name="agent-usage",
+                             daemon=True).start()
+    if val is None:
+        return {"pending": True}
+    out = dict(val)
+    out["as_of"] = round(at, 3)
+    if stale:
+        out["stale"] = True
+    return out
+
+
+def _refresh_usage(a, on_update):
+    import json as _json
     ssh = (a.get("ssh") or "").strip()
     py = _USAGE_PY.replace("~/bytebunker-harness", (a.get("dir") or "~/bytebunker-harness"))
     cmd = (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
            if ssh else ["python3", "-c", py])
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip().splitlines()
-        val = _json.loads(out[-1]) if out else None
+        val = _json.loads(out[-1]) if out else {"error": "the worker returned nothing"}
     except Exception as e:   # noqa: BLE001
         val = {"error": str(e)[:120]}
-    _usage_cache.update(at=now, val=val)
-    return val
+    with _usage_lock:
+        _usage_cache.update(at=time.time(), val=val, busy=False)
+    if on_update:
+        try:
+            on_update()
+        except Exception:   # noqa: BLE001
+            pass
 
 
 _stats_cache = {"at": 0, "val": None}

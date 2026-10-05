@@ -53,6 +53,9 @@
   /* ---------------- nav ---------------- */
   const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
   function go(s) {
+    // a screen whose nav entry is hidden (not set up here) is not reachable by link
+    const nav = document.querySelector(`[data-nav="${s}"]`);
+    if (!screens.includes(s) || (nav && nav.hidden)) s = "playground";
     state.screen = s;
     // the screen lives in the URL hash: a reload stays put, a link can open one
     try { if (location.hash.slice(1) !== s) history.replaceState(null, "", s === "playground" ? location.pathname + location.search : "#" + s); } catch (e) {}
@@ -1518,7 +1521,7 @@
   function onLive(topic, fn) { (live.handlers[topic] = live.handlers[topic] || []).push(fn); }
   function startLive() {
     if (live.es || typeof EventSource === "undefined") return;
-    const topics = ["jobs", "sessions", "runs"];
+    const topics = ["jobs", "sessions", "runs", "usage"];
     const es = new EventSource("/api/events?topics=" + topics.join(","));
     live.es = es;
     const fire = (topic, evt) => { for (const fn of live.handlers[topic] || []) { try { fn(evt); } catch (e) { console.error(e); } } };
@@ -1529,6 +1532,7 @@
   }
   onLive("jobs", () => { if (state.screen === "jobs") renderJobs(true); });
   onLive("sessions", () => { if (state.screen === "sessions") renderSessions(); });
+  onLive("usage", () => { if (state.screen === "usage") renderUsage(); });
   onLive("runs", (e) => {
     // a goal started elsewhere (another tab, a job, bb) shows up here
     if (state.screen === "agents" && !state.streaming && e.type === "started" && (e.data || {}).kind === "agents") attachAgentRun();
@@ -2046,7 +2050,7 @@
     }
     // add by address
     const add = document.createElement("div"); add.className = "card"; add.style.gap = "8px";
-    add.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Add a gateway</b><span class="src mono">an IP and port is enough: 172.16.25.83:8001 becomes http://172.16.25.83:8001/v1</span></div></div>';
+    add.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Add a gateway</b><span class="src mono">an IP and port is enough: 192.0.2.10:8000 becomes http://192.0.2.10:8000/v1</span></div></div>';
     const url = inputEl("host:port, or a full http://host:port/v1"), nm = inputEl("name (optional)"), key = inputEl("API key (optional)"); key.type = "password";
     const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
     const btn = document.createElement("button"); btn.type = "button"; btn.className = "solid-btn"; btn.textContent = "Add"; const note = document.createElement("span"); note.className = "hint";
@@ -3504,7 +3508,7 @@
     // add
     const form = rkEl("form", "rk-add");
     const url = rkEl("input", "mono");
-    url.placeholder = "http://100.90.164.11:9177";
+    url.placeholder = "http://192.0.2.10:9177";
     url.autocomplete = "off"; url.spellcheck = false;
     const tok = rkEl("input", "mono");
     tok.type = "password"; tok.placeholder = "token"; tok.autocomplete = "off";
@@ -3666,13 +3670,18 @@
     mk("Tokens generated", tot >= 1e6 ? (tot / 1e6).toFixed(1) + " M" : tot.toLocaleString(), "completion tokens, 14 days");
     mk("Median throughput", u.median_tok_s ? u.median_tok_s.toFixed(1) : "—", "tok/s per request");
     mk("Requests", u.requests != null ? String(u.requests) : "—", "through this console");
-    const ag = u.agents && !u.agents.error ? u.agents : null;
+    const ag = u.agents && !u.agents.error && !u.agents.pending ? u.agents : null;
     const fmtTok = (n) => (n || 0) >= 1e6 ? ((n || 0) / 1e6).toFixed(1) + " M" : (n || 0).toLocaleString();
     if (ag) mk("Agent tokens", fmtTok(ag.total), (ag.goals || 0) + " goals \u00b7 " + (ag.slaves || 0) + " agents \u00b7 " + (ag.master_rounds || 0) + " master rounds, 14 days");
     mk("Frontier-API equivalent", "$" + (u.frontier_saved_usd || 0).toFixed(2), ag ? "chat $" + (u.chat_saved_usd || 0).toFixed(2) + " + agents $" + (ag.frontier_saved_usd || 0).toFixed(2) : "not spent, at configured rates");
     box.appendChild(cards);
-    if (u.agents && u.agents.error) {
-      const n = document.createElement("div"); n.className = "hint"; n.textContent = "Agent usage not available: " + u.agents.error; box.appendChild(n);
+    if (u.agents && (u.agents.error || u.agents.pending || u.agents.stale)) {
+      // the worker's numbers come later; the event stream re-renders this when they do
+      const n = document.createElement("div"); n.className = "hint";
+      n.textContent = u.agents.pending ? "Agent usage: asking the worker\u2026"
+        : u.agents.error ? "Agent usage not available: " + u.agents.error
+        : "Agent usage as of " + new Date(u.agents.as_of * 1000).toLocaleTimeString() + "; refreshing from the worker\u2026";
+      box.appendChild(n);
     }
 
     const days = u.days || {};

@@ -73,13 +73,16 @@ Windows.
 ## Install
 
 One command, no sudo, no pip: installs the console as a background service
-(launchd on macOS, systemd user unit on Linux), writes `config.json`, and can
-place the agent harness next to it.
+(launchd on macOS, systemd user unit on Linux) and writes `config.json`.
+Python 3.9 or newer.
 
 ```
 curl -fsSL https://raw.githubusercontent.com/bytebunkerlabs/bytebunker-console/main/install.sh | bash -s -- \
-  --upstream http://<gateway>:4000/v1 --key <litellm-key>            # add --with-harness for agents in local mode
+  --upstream http://<model-server>:8000/v1 --key <key>     # optional: the Gateways screen can find it instead
 ```
+
+Agents run on a separate worker, connected from the Agents screen; they are
+never installed on the console's machine.
 
 Then open http://127.0.0.1:8765. See `docs/ARCHITECTURE.md` for how the console,
 the harness, the gateway and the engines fit, `docs/RUNBOOK.md` to reproduce the

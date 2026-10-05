@@ -2,14 +2,8 @@
   "bind": "127.0.0.1",
   "port": 8765,
 
-  "upstream_url": "http://127.0.0.1:4000/v1",
-  "upstream_key": "bb-local",
-
-  "monitors": [
-    { "name": "rack", "url": "http://spark-1:9177", "token": "", "enabled": false }
-  ],
-
-  "identity": { "user": "mo@bunker", "host": "tailnet" },
+  "gateways": [],
+  "monitors": [],
 
   "frontier_rates_per_mtok": { "input": 3.0, "output": 15.0 },
 
@@ -18,7 +12,7 @@
 
   "agents": {
     "enabled": false,
-    "ssh": "leagueofash",
+    "ssh": "",
     "dir": "~/bytebunker-harness",
     "python": "uv run",
     "script": "scripts/run_master.py",

@@ -5,7 +5,7 @@ github.com/bytebunkerlabs/dgx-spark-serve): one URL and one token that
 answer for every node behind it. Any Linux box can run the same file bare
 (`python3 rackmon.py serve`). config.json keeps a list:
 
-    "monitors": [{"name": "rack", "url": "http://100.90.164.11:9177",
+    "monitors": [{"name": "rack", "url": "http://192.0.2.10:9177",
                   "token": "...", "enabled": true}]
 
 The console fetches each monitor's /v1/cluster server-side, so the token
