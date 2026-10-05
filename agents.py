@@ -559,8 +559,13 @@ def stats(CFG, max_age=8):
     else:
         cmd = ["python3", "-c", py]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip().splitlines()
-        val = _json.loads(out[-1]) if out else {}
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        out = p.stdout.strip().splitlines()
+        if not out:
+            # nothing came back: an unreachable worker, not an idle one
+            err = (p.stderr or "").strip().splitlines()
+            raise RuntimeError(err[-1] if err else "no answer (exit %d)" % p.returncode)
+        val = _json.loads(out[-1])
         val.update(ok=True, enabled=True, host=st["host"], isolated=st["isolated"])
         fm = val.get("fast_model") or {}
         fm["label"] = a.get("worker_model_label") or "worker model"
