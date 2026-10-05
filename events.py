@@ -9,7 +9,7 @@ resumes exactly where it stopped (Last-Event-ID), and a client that fell
 further behind than the ring is told to reload ("reset").
 
     bus.publish("sessions", "updated", {"id": ...})
-    bus.publish("runs", "line", {"text": ...}, run=run_id)
+    bus.publish("output", "out", {"line": ...}, run=run_id)
 """
 import collections
 import json
@@ -17,7 +17,7 @@ import os
 import threading
 import time
 
-TOPICS = ("sessions", "runs", "jobs", "cluster", "gateways", "models", "agents", "deploy",
+TOPICS = ("sessions", "runs", "output", "jobs", "cluster", "gateways", "models", "agents", "deploy",
           "approvals", "config", "mcp", "system")
 
 
@@ -56,15 +56,26 @@ class EventBus:
         with self.cond:
             return self.ring[0]["seq"] if self.ring else self.seq + 1
 
-    def since(self, after, topics=None, run=None):
+    def scan(self, after, topics=None, run=None):
         """Events with seq > after (from the ring), filtered. Returns
-        (events, gap) where gap means some events after `after` already
-        left the ring and the caller should reload its state."""
+        (events, gap, head): gap means some events after `after` already left
+        the ring and the caller should reload its state; head is the newest
+        seq, which a follower waits on next, so events it filtered out never
+        wake it again."""
         with self.cond:
             gap = bool(self.ring) and after < self.ring[0]["seq"] - 1
-            out = [e for e in self.ring if e["seq"] > after
-                   and (not topics or e["topic"] in topics)
-                   and (run is None or e.get("run") == run)]
+            out = []
+            for e in reversed(self.ring):          # newest first; stop at the cursor
+                if e["seq"] <= after:
+                    break
+                if (not topics or e["topic"] in topics) and (run is None or e.get("run") == run):
+                    out.append(e)
+            head = self.seq
+        out.reverse()
+        return out, gap, head
+
+    def since(self, after, topics=None, run=None):
+        out, gap, _ = self.scan(after, topics, run)
         return out, gap
 
     def wait(self, after, timeout):

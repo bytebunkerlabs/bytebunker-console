@@ -14,6 +14,16 @@ import unittest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
+class HttpError(Exception):
+    def __init__(self, status, raw):
+        super().__init__("HTTP %d: %s" % (status, raw[:300]))
+        self.status = status
+        try:
+            self.body = json.loads(raw or b"null")
+        except ValueError:
+            self.body = raw
+
+
 class Server:
     """python -c 'import server; server.serve(port=0).serve_forever()' on a temp folder."""
 
@@ -62,13 +72,20 @@ class Server:
         except ValueError:
             return r.status, raw
 
-    def sse(self, path, headers=None, until=None, timeout=10):
+    def sse(self, path, headers=None, until=None, timeout=10, method="GET", body=None):
         """Read SSE frames until until(frames) is true or timeout. Returns frames."""
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         h = {"Host": "127.0.0.1:%d" % self.port}
+        if body is not None:
+            h["Content-Type"] = "application/json"
+            body = json.dumps(body)
         h.update(headers or {})
-        c.request("GET", path, headers=h)
+        c.request(method, path, body=body, headers=h)
         r = c.getresponse()
+        if r.status != 200:
+            raw = r.read()
+            c.close()
+            raise HttpError(r.status, raw)
         frames, cur = [], {}
         deadline = time.time() + timeout
         try:

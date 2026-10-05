@@ -33,7 +33,8 @@
     activeSkills: [],       // skills attached to the current chat (names)
     skillBodies: {},        // name -> body, fetched lazily and cached
     plugins: [],            // plugin list from /api/plugins
-    agentAbort: null,       // AbortController for a live agent run
+    agentAbort: null,       // AbortController for a live agent run's stream
+    agentRun: null,         // the server's id for that run: Stop cancels it there
     agentDetail: null,      // {kind:"run"|"slave", id} shown in the right-hand pane
     hist: {},               // the agents worker's GPU and output traces (monitor nodes bring their own)
   };
@@ -1508,6 +1509,31 @@
     box.appendChild(t);
   }
 
+  /* ---------------- live events ---------------- */
+  // One stream per tab. The server says what changed (jobs, sessions, runs)
+  // and each screen refreshes only its own list. EventSource reconnects by
+  // itself and resumes after the last event it saw (Last-Event-ID); "reset"
+  // means it fell too far behind and everything should reload.
+  const live = { handlers: {}, es: null };
+  function onLive(topic, fn) { (live.handlers[topic] = live.handlers[topic] || []).push(fn); }
+  function startLive() {
+    if (live.es || typeof EventSource === "undefined") return;
+    const topics = ["jobs", "sessions", "runs"];
+    const es = new EventSource("/api/events?topics=" + topics.join(","));
+    live.es = es;
+    const fire = (topic, evt) => { for (const fn of live.handlers[topic] || []) { try { fn(evt); } catch (e) { console.error(e); } } };
+    for (const t of topics) {
+      es.addEventListener(t, (e) => { let evt; try { evt = JSON.parse(e.data); } catch (x) { return; } fire(t, evt); });
+    }
+    es.addEventListener("reset", () => { for (const t of topics) fire(t, { type: "reset" }); });
+  }
+  onLive("jobs", () => { if (state.screen === "jobs") renderJobs(true); });
+  onLive("sessions", () => { if (state.screen === "sessions") renderSessions(); });
+  onLive("runs", (e) => {
+    // a goal started elsewhere (another tab, a job, bb) shows up here
+    if (state.screen === "agents" && !state.streaming && e.type === "started" && (e.data || {}).kind === "agents") attachAgentRun();
+  });
+
   /* ---------------- models ---------------- */
   async function loadModels() {
     let data = { data: [] };
@@ -2094,7 +2120,7 @@
   }
 
   /* ---------------- scheduled jobs ---------------- */
-  let jobsTimer = null, jobsSelected = null;
+  let jobsTimer = null, jobsSelected = null, jobsDetail = "runs";   // jobsDetail: "runs" or "edit"
   function fmtWhen(ts) { if (!ts) return "\u2014"; const d = new Date(ts * 1000); return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }); }
   function jobForm(existing) {
     const j = existing || {};
@@ -2133,7 +2159,7 @@
     const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = existing ? "Save changes" : "Create job";
     const note = document.createElement("span"); note.className = "hint";
     row.appendChild(save); row.appendChild(note); form.appendChild(row); card.appendChild(form);
-    tgl.onclick = () => { if (existing) { renderJobs(); } else { form.hidden = !form.hidden; } };
+    tgl.onclick = () => { if (existing) { jobsDetail = "runs"; renderJobs(); } else { form.hidden = !form.hidden; } };
     save.onclick = async () => {
       save.disabled = true; note.textContent = "saving\u2026";
       const job = { id: j.id, name: name.value.trim(), kind: kind.value, prompt: prompt.value, enabled: j.enabled !== false,
@@ -2142,45 +2168,56 @@
       try {
         const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", job }) });
         const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
-        jobsSelected = d.job.id; renderJobs();
+        jobsSelected = d.job.id; jobsDetail = "runs"; renderJobs();
       } catch (e) { note.textContent = e.message; save.disabled = false; }
     };
     return card;
   }
-  async function renderJobs() {
-    let d = { jobs: [], running: null };
-    try { d = await (await fetch("/api/jobs")).json(); } catch (e) {}
-    const left = $("jobs-left"); left.textContent = "";
+  // listOnly: what changed is the jobs, not the screen. The new-job form and
+  // an open edit form stay as they are (a refresh used to wipe them mid-typing).
+  async function renderJobs(listOnly) {
+    let d = { jobs: [], running: {} };
+    try { d = await (await fetch("/api/jobs")).json(); } catch (e) { if (listOnly) return; }
+    const running = d.running || {};
+    const left = $("jobs-left");
+    if (listOnly && left.querySelector(".job-new")) {
+      left.querySelectorAll(".job-item").forEach((e) => e.remove());
+    } else {
+      left.textContent = "";
+      const f = jobForm(null); f.classList.add("job-new"); left.appendChild(f);
+    }
     const on = d.jobs.filter((j) => j.enabled).length;
-    $("jobs-sub").textContent = d.jobs.length + " jobs \u00b7 " + on + " enabled" + (d.running ? " \u00b7 running " + d.running : "");
-    left.appendChild(jobForm(null));
-    if (!d.jobs.length) { const e = document.createElement("div"); e.className = "hint"; e.textContent = "No jobs yet. A morning summary of the trace log, a nightly CVE sweep for your products, a weekly report written to a file: anything you would ask in the Playground, on a timer."; left.appendChild(e); }
+    const nrun = Object.keys(running).length;
+    $("jobs-sub").textContent = d.jobs.length + " jobs \u00b7 " + on + " enabled" + (nrun ? " \u00b7 " + nrun + " running" : "");
+    if (!d.jobs.length) { const e = document.createElement("div"); e.className = "hint job-item"; e.textContent = "No jobs yet. A morning summary of the trace log, a nightly CVE sweep for your products, a weekly report written to a file: anything you would ask in the Playground, on a timer."; left.appendChild(e); }
     for (const j of d.jobs) {
-      const card = document.createElement("div"); card.className = "card" + (jobsSelected === j.id ? " skill-card on" : ""); card.style.gap = "8px"; card.style.cursor = "pointer";
+      const card = document.createElement("div"); card.className = "card job-item" + (jobsSelected === j.id ? " skill-card on" : ""); card.style.gap = "8px"; card.style.cursor = "pointer";
       const head = document.createElement("div"); head.className = "skill-head";
       head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div><span class="src mono" style="text-align:right"></span>';
       head.querySelector("b").textContent = (j.enabled ? "" : "\u23f8 ") + j.name;
       head.querySelectorAll(".src")[0].textContent = j.kind + " \u00b7 " + j.schedule_text + (j.model && j.kind === "chat" ? " \u00b7 " + j.model : "") + (j.created_by && j.created_by !== "you" ? " \u00b7 filed by " + j.created_by : "");
-      head.querySelectorAll(".src")[1].textContent = (j.enabled && j.next_run ? "next " + fmtWhen(j.next_run) : "paused") + (d.running === j.id ? " \u00b7 RUNNING" : "");
+      head.querySelectorAll(".src")[1].textContent = (j.enabled && j.next_run ? "next " + fmtWhen(j.next_run) : "paused") + (running[j.id] ? " \u00b7 " + (running[j.id].state === "queued" ? "QUEUED" : "RUNNING") : "");
       const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = j.prompt.length > 220 ? j.prompt.slice(0, 220) + "\u2026" : j.prompt;
       const last = document.createElement("div"); last.className = "skill-tags mono";
       last.textContent = j.last ? ("last " + fmtWhen(j.last.ts) + " \u00b7 " + (j.last.ok ? "ok" : "failed") + " \u00b7 " + Math.round((j.last.ms || 0) / 1000) + " s" + (j.last.tokens ? " \u00b7 " + j.last.tokens + " tok" : "") + " \u00b7 " + (j.runs || 0) + " runs") : "never run";
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = (e) => { e.stopPropagation(); fn(); }; acts.appendChild(b); };
-      const post = async (payload) => { try { const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const x = await r.json(); if (x.error) alert(x.error); } catch (e) { alert(e.message); } renderJobs(); };
+      const post = async (payload) => { try { const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const x = await r.json(); if (x.error) alert(x.error); } catch (e) { alert(e.message); } renderJobs(true); };
       mk("run now", "solid-btn", () => post({ action: "run_now", id: j.id }));
       mk(j.enabled ? "pause" : "resume", "ghost-btn", () => post({ action: "toggle", id: j.id }));
-      mk("edit", "ghost-btn", () => { const pane = $("jobs-detail"); pane.textContent = ""; pane.appendChild(jobForm(j)); });
+      mk("edit", "ghost-btn", () => { jobsDetail = "edit"; const pane = $("jobs-detail"); pane.textContent = ""; pane.appendChild(jobForm(j)); });
       mk("delete", "rate-btn bad", () => { if (confirm("Delete job \"" + j.name + "\" and its history?")) post({ action: "delete", id: j.id }); });
       card.appendChild(head); card.appendChild(desc); card.appendChild(last); card.appendChild(acts);
       card.onclick = () => { jobsSelected = j.id; showJobRuns(j); };
       left.appendChild(card);
     }
-    if (jobsSelected) { const j = d.jobs.find((x) => x.id === jobsSelected); if (j) showJobRuns(j); }
+    if (jobsSelected && jobsDetail === "runs") { const j = d.jobs.find((x) => x.id === jobsSelected); if (j) showJobRuns(j); }
+    // the event stream refreshes this as jobs change; the timer is a fallback
     clearInterval(jobsTimer);
-    jobsTimer = setInterval(() => { if (state.screen === "jobs") renderJobs(); else clearInterval(jobsTimer); }, 15000);
+    jobsTimer = setInterval(() => { if (state.screen === "jobs") renderJobs(true); else clearInterval(jobsTimer); }, 60000);
   }
   async function showJobRuns(j) {
+    jobsDetail = "runs";
     const pane = $("jobs-detail"); pane.textContent = "";
     const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>';
     h.querySelector("b").textContent = j.name; h.querySelector(".src").textContent = j.kind + " \u00b7 " + j.schedule_text; pane.appendChild(h);
@@ -2190,7 +2227,7 @@
     for (const r of d.runs) {
       const c = document.createElement("div"); c.className = "card"; c.style.gap = "6px";
       const top = document.createElement("div"); top.className = "skill-tags mono";
-      top.textContent = fmtWhen(r.ts) + " \u00b7 " + r.trigger + " \u00b7 " + (r.ok ? "ok" : "FAILED") + " \u00b7 " + Math.round((r.ms || 0) / 1000) + " s" + (r.hops ? " \u00b7 " + r.hops + " hops" : "") + (r.tokens ? " \u00b7 " + r.tokens + " tok" : "");
+      top.textContent = fmtWhen(r.ts) + " \u00b7 " + r.trigger + " \u00b7 " + (r.missed ? "MISSED" : (r.ok ? "ok" : "FAILED") + " \u00b7 " + Math.round((r.ms || 0) / 1000) + " s") + (r.hops ? " \u00b7 " + r.hops + " hops" : "") + (r.tokens ? " \u00b7 " + r.tokens + " tok" : "");
       c.appendChild(top);
       const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap"; pre.style.maxHeight = "420px";
       pre.textContent = r.error ? ("error: " + r.error) : (r.output || "(no output)");
@@ -2638,7 +2675,8 @@
     }
 
     $("agent-run").disabled = !d.enabled || state.streaming;
-    $("agent-launch-note").textContent = d.enabled ? "" : "enable agents in config.json first";
+    $("agent-launch-note").textContent = d.enabled ? "" : "connect a worker first";
+    if (d.enabled && !state.streaming) attachAgentRun();
 
     renderAgentSlaves();
 
@@ -2867,25 +2905,48 @@
   async function runAgent() {
     const goal = $("agent-goal").value.trim();
     if (!goal || state.streaming) return;
+    await followAgentRun((signal) => fetch("/api/agents", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal }), signal,
+    }));
+  }
+
+  // A goal runs on the server, not in this tab: closing or reloading the tab
+  // leaves it going, and opening the Agents screen again re-attaches to it.
+  async function attachAgentRun() {
+    if (state.streaming) return;
+    let d = { runs: [] };
+    try { d = await (await fetch("/api/runs?kind=agents&limit=5")).json(); } catch (e) { return; }
+    const live = (d.runs || []).find((r) => r.state === "running" || r.state === "queued");
+    if (!live || state.streaming) return;
+    await followAgentRun((signal) => fetch("/api/runs/" + encodeURIComponent(live.id) + "/events?format=data", { signal }),
+                         "following the goal already running: " + (live.title || live.id));
+  }
+
+  async function followAgentRun(open, banner) {
     const out = $("agent-stream");
     out.hidden = false; out.textContent = "";
     state.streaming = true;
+    state.agentRun = null;
     $("agent-run").disabled = true;
     $("agent-stop").hidden = false;
+    $("agent-stop").disabled = false;
     const ctl = new AbortController();
     state.agentAbort = ctl;
     const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
+    if (banner) append("\u2014 " + banner + " \u2014");
     const liveTimer = setInterval(() => {
       if (state.screen !== "agents") return;
       renderAgentSlaves();
       if (state.agentDetail && state.agentDetail.kind === "slave") openSlaveDetail(state.agentDetail.id, true);
     }, 5000);
+    let attachTo = null;
     try {
-      const r = await fetch("/api/agents", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal }), signal: ctl.signal,
-      });
-      if (!r.ok) { append("error: " + upstreamText(await r.text())); }
+      const r = await open(ctl.signal);
+      if (r.status === 409) {
+        const x = await r.json().catch(() => ({}));
+        if (x.run) attachTo = x.run; else append("error: " + (x.error || "busy"));
+      } else if (!r.ok) { append("error: " + upstreamText(await r.text())); }
       else {
         const reader = r.body.getReader();
         const dec = new TextDecoder();
@@ -2899,6 +2960,7 @@
           for (const ln of parts) {
             if (!ln.startsWith("data:")) continue;
             let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+            if (o.run) { state.agentRun = o.run; continue; }
             if (o.phase === "start") append("— launching on " + o.host + " (" + o.mode + (o.isolated ? ", isolated" : ", NOT isolated") + ") —");
             else if (o.job) { append("\u2014 job filed: " + o.job.name + " \u2014"); }
             else if (o.phase === "done") append("— finished: " + (o.killed ? o.killed : "exit " + o.exit) + " —");
@@ -2913,10 +2975,26 @@
       clearInterval(liveTimer);
       state.streaming = false;
       state.agentAbort = null;
+      state.agentRun = null;
       $("agent-run").disabled = false;
       $("agent-stop").hidden = true;
-      renderAgents();
+      if (!attachTo) renderAgents();
     }
+    if (attachTo) {
+      await followAgentRun((signal) => fetch("/api/runs/" + encodeURIComponent(attachTo) + "/events?format=data", { signal }),
+                           "a goal is already running; one runs at a time. Following it");
+    }
+  }
+
+  async function stopAgentRun() {
+    // the goal runs on the server: stop it there; the stream ends when the worker has stopped it
+    if (state.agentRun) {
+      $("agent-stop").disabled = true;
+      try {
+        await fetch("/api/runs/" + encodeURIComponent(state.agentRun) + "/cancel",
+                    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      } catch (e) { $("agent-stop").disabled = false; }
+    } else if (state.agentAbort) state.agentAbort.abort();
   }
 
   function renderServers(status, cfg) {
@@ -3706,7 +3784,7 @@
 
   $("export-all").onclick = () => openOut("/api/export");
   $("agent-run").onclick = runAgent;
-  $("agent-stop").onclick = () => { if (state.agentAbort) state.agentAbort.abort(); };
+  $("agent-stop").onclick = stopAgentRun;
   $("master-save").onclick = saveMaster;
   $("export-good").onclick = () => openOut("/api/export?rated=up");
   $("new-chat").onclick = newChat;
@@ -4040,6 +4118,7 @@
     loadSkills();
     pollCluster();
     setInterval(pollCluster, 5000);
+    startLive();
     const deep = location.hash.slice(1);
     if (deep && screens.includes(deep) && deep !== state.screen) go(deep);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);

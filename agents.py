@@ -28,6 +28,7 @@ import os
 import shlex
 import subprocess
 import threading
+import time
 
 
 class AgentConfigError(Exception):
@@ -662,7 +663,8 @@ def kill_slave(CFG, slave_id):
 def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
     """Run cmd, calling on_line(text) for each stdout line. Returns
     (exit_code, killed). Merges stderr into stdout so a crash is visible.
-    A watchdog thread enforces the timeout and honours stop_event."""
+    A watchdog thread enforces the timeout and honours stop_event, which is
+    only read: a run's cancel event can be passed as it is."""
     # stdin stays open for the life of the run: over ssh the remote sidecar
     # reads it, and closing it is how a stop reaches the remote process group
     proc = subprocess.Popen(
@@ -670,12 +672,19 @@ def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
         text=True, bufsize=1, stdin=subprocess.PIPE,
     )
     killed = {"v": False}
+    ended = threading.Event()
 
     def watchdog():
-        if stop_event.wait(timeout_s):
-            killed["v"] = "stopped"
-        else:
-            killed["v"] = "timeout"
+        deadline = time.time() + timeout_s
+        while True:
+            if ended.is_set():
+                return
+            if stop_event.wait(max(0.0, min(1.0, deadline - time.time()))):
+                killed["v"] = "stopped"
+                break
+            if time.time() >= deadline:
+                killed["v"] = "timeout"
+                break
         try:
             try:
                 proc.stdin.close()          # remote: sidecar kills the group
@@ -705,5 +714,5 @@ def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
         except Exception:
             pass
         code = proc.wait()
-        stop_event.set()      # release the watchdog if the process ended on its own
+        ended.set()           # release the watchdog if the process ended on its own
     return code, killed["v"]

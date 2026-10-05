@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -114,6 +115,9 @@ def next_run(job, after=None):
         return None
 
 
+_JID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 class JobStore:
     def __init__(self, data_dir):
         self.data_dir = data_dir
@@ -168,6 +172,8 @@ class JobStore:
         if not prompt:
             raise ValueError("the job needs a prompt (chat) or a goal (agent)")
         name = str(spec.get("name") or prompt[:40]).strip()[:80]
+        if spec.get("id") and not _JID.match(str(spec["id"])):
+            raise ValueError("a job id is letters, digits, - and _ (64 at most)")
         job = {
             "id": spec.get("id") or ("job-" + uuid.uuid4().hex[:8]),
             "name": name, "kind": kind, "prompt": prompt, "schedule": sched,
@@ -200,9 +206,15 @@ class JobStore:
         return job
 
     def delete(self, jid):
+        """The job and its history: the screen says both go."""
         with self._lock:
             self.jobs = [j for j in self.jobs if j["id"] != jid]
             self._save()
+            if _JID.match(jid or ""):
+                try:
+                    os.remove(os.path.join(self.runs_dir, jid + ".jsonl"))
+                except OSError:
+                    pass
 
     def set_enabled(self, jid, on):
         with self._lock:
@@ -213,14 +225,29 @@ class JobStore:
 
     def record_run(self, jid, rec):
         with self._lock:
-            for j in self.jobs:
-                if j["id"] == jid:
-                    j["last_run"] = rec["ts"]; j["runs"] = j.get("runs", 0) + 1
+            job = next((j for j in self.jobs if j["id"] == jid), None)
+            if job is None:
+                return                   # deleted while it ran: its history went with it
+            job["last_run"] = rec["ts"]; job["runs"] = job.get("runs", 0) + 1
             self._save()
+            self._append(jid, rec)
+
+    def record_miss(self, jid, rec):
+        """A scheduled minute that passed while the job's last run was still
+        going: kept in its history, but not a run."""
+        with self._lock:
+            if any(j["id"] == jid for j in self.jobs):
+                self._append(jid, dict(rec, missed=True))
+
+    def _append(self, jid, rec):
+        if not _JID.match(jid or ""):
+            return
         with open(os.path.join(self.runs_dir, jid + ".jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def runs(self, jid, limit=30):
+        if not _JID.match(jid or ""):
+            return []
         try:
             with open(os.path.join(self.runs_dir, jid + ".jsonl"), encoding="utf-8") as f:
                 lines = f.readlines()
@@ -235,7 +262,7 @@ class JobStore:
         return out[::-1]
 
     def last_run(self, jid):
-        r = self.runs(jid, 1)
+        r = [x for x in self.runs(jid, 10) if not x.get("missed")]
         if not r:
             return None
         x = dict(r[0]); x["output"] = (x.get("output") or "")[:200]
@@ -243,14 +270,16 @@ class JobStore:
 
 
 class Scheduler(threading.Thread):
-    """Ticks every 20 s; runs each due job once per matching minute. One job
-    at a time: the engine is shared with everything else on the rack."""
+    """Ticks every 20 s and hands each due job to launch(job, trigger), which
+    starts it as a run and returns at once: a long job never makes another
+    job miss its minute. A job whose last run is still going is not started
+    twice (launch raises an exception carrying .run); for a cron job that
+    minute is recorded as missed."""
 
-    def __init__(self, store, runner, log=lambda *a: None):
+    def __init__(self, store, launch, log=lambda *a: None):
         super().__init__(daemon=True, name="jobs")
-        self.store, self.runner, self.log = store, runner, log
+        self.store, self.launch, self.log = store, launch, log
         self._fired = {}          # job id → minute it last fired
-        self.running = None
 
     def due(self, job, now):
         if not job.get("enabled", True):
@@ -269,29 +298,27 @@ class Scheduler(threading.Thread):
             return False
         return cron_matches(c, time.localtime(now))
 
+    def tick(self, now):
+        for job in list(self.store.jobs):
+            if not self.due(job, now):
+                continue
+            self._fired[job["id"]] = int(now) // 60
+            try:
+                self.launch(job, "schedule")
+            except Exception as e:   # noqa: BLE001
+                going = getattr(e, "run", None)
+                if going is None:
+                    self.log("jobs: could not start %s: %s" % (job["id"], e))
+                elif (job.get("schedule") or {}).get("kind") != "interval":
+                    self.store.record_miss(job["id"], {
+                        "ts": now, "trigger": "schedule", "kind": job.get("kind"), "ok": False, "ms": 0, "output": "",
+                        "error": "missed: the run started %s was still going" % time.strftime(
+                            "%H:%M", time.localtime(getattr(going, "started", now)))})
+
     def run(self):
         while True:
             try:
-                now = time.time()
-                for job in list(self.store.jobs):
-                    if self.due(job, now):
-                        self._fired[job["id"]] = int(now) // 60
-                        self.run_job(job, "schedule")
+                self.tick(time.time())
             except Exception as e:   # noqa: BLE001 - the scheduler must outlive any job
                 self.log("jobs: tick failed: %s" % e)
             time.sleep(20)
-
-    def run_job(self, job, trigger):
-        self.running = job["id"]
-        t0 = time.time()
-        rec = {"ts": t0, "trigger": trigger, "kind": job["kind"], "ok": False, "ms": 0, "output": "", "error": None}
-        try:
-            out = self.runner(job)
-            rec.update(ok=True, output=str(out.get("output") or "")[:40000], hops=out.get("hops"), tokens=out.get("tokens"),
-                       model=out.get("model"), gateway=out.get("gateway"))
-        except Exception as e:   # noqa: BLE001
-            rec["error"] = str(e)[:1000]
-        rec["ms"] = int((time.time() - t0) * 1000)
-        self.store.record_run(job["id"], rec)
-        self.running = None
-        return rec

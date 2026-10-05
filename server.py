@@ -433,24 +433,84 @@ def last_used_model():
     return ""
 
 
-def run_job(job):
-    """One run. chat: a bounded tool loop against the gateway, like the
-    Playground does but server-side. agent: a harness goal. Returns
-    {output, hops, tokens}."""
+AGENT_SLOT = threading.Lock()   # one goal at a time: the harness keys a goal's state by its directory
+
+
+def agent_goal(run, emit, goal, via="app"):
+    """One goal on the agents worker, its lines streamed through emit. Shared
+    by the Agents screen and agent-kind jobs. Returns (result, lines)."""
+    cmd = agentmod.build_command(CFG, goal)              # AgentConfigError when not set up
+    st = agentmod.status(CFG)
+    cwd = None if st["mode"] == "ssh" else os.path.expanduser((CFG.get("agents") or {}).get("dir") or ".")
+    if not AGENT_SLOT.acquire(blocking=False):
+        msg = "another agents goal is running; they run one at a time"
+        emit({"error": msg})
+        emit({"phase": "done", "exit": None, "killed": "busy"})
+        return {"ok": False, "error": msg}, []
+    started = time.time()
+    captured = []   # full master output, stored so a past run can be reopened
+    try:
+        emit({"phase": "start", "id": run.id, "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
+
+        def on_line(text):
+            if text.startswith("BB_RUN "):
+                # the harness names the goal it started (its directory on the worker)
+                try:
+                    run.meta["goal_id"] = str(json.loads(text[7:]).get("goal_id") or "")[:80]
+                except (ValueError, AttributeError):
+                    pass
+                return
+            if len(captured) < 4000:
+                captured.append(text)
+            # The master files recurring work by printing one structured line;
+            # the agent plane has no other way to reach the console, by design.
+            if text.startswith("BB_JOB "):
+                try:
+                    spec = json.loads(text[7:])
+                    spec["created_by"] = "agents:" + str(spec.get("created_by") or "sultan")[:30]
+                    job = JOBS.upsert(spec)
+                    TRACE.log("job", action="filed_by_agent", id=job["id"], name=job["name"], run=run.id,
+                              schedule=job["schedule"], job_kind=job["kind"], by=spec["created_by"])
+                    BUS.publish("jobs", "saved", {"id": job["id"], "by": spec["created_by"]})
+                    emit({"job": {"id": job["id"], "name": job["name"], "schedule": job["schedule"], "kind": job["kind"]}})
+                    emit({"line": "%s> \U0001f5d3 filed job \"%s\" (%s) \u2014 see the Jobs screen" % (
+                        (CFG.get("agents") or {}).get("master_name") or "Master", job["name"], jobmod.describe_schedule(job))})
+                except (ValueError, KeyError) as e:
+                    emit({"line": "console: could not file the job the master asked for: %s" % str(e)[:160]})
+                return
+            emit({"line": text})
+
+        try:
+            code, killed = agentmod.run_streaming(cmd, cwd, on_line, run.cancel_event,
+                                                  timeout_s=agent_run_timeout(CFG))
+        except FileNotFoundError as e:
+            emit({"error": "could not launch the harness: %s" % e})
+            code, killed = -1, "error"
+        except Exception as e:   # noqa: BLE001 - report anything to the client
+            emit({"error": str(e)[:300]})
+            code, killed = -1, "error"
+        emit({"phase": "done", "exit": code, "killed": killed})
+        TRACE.log("agent_run", id=run.id, goal=goal[:8000], host=st["host"], mode=st["mode"],
+                  isolated=st["isolated"], exit=code, killed=killed or False, via=via,
+                  lines=len(captured), output=captured, ms=int((time.time() - started) * 1000))
+        return ({"ok": code == 0, "exit": code, "killed": killed or False, "lines": len(captured),
+                 "error": None if code == 0 else "the harness exited %s%s" % (code, " (%s)" % killed if killed else "")},
+                captured)
+    finally:
+        AGENT_SLOT.release()
+
+
+def run_job(job, run):
+    """One run of a job, inside its run. chat: a bounded tool loop against the
+    gateway, like the Playground does but server-side. agent: a harness goal.
+    Returns {output, hops, tokens}; raises when the job failed."""
+    emit = lambda obj: RUNS.emit(run, "out", obj)   # noqa: E731
     if job.get("kind") == "agent":
-        st = agentmod.status(CFG)
-        if not st.get("enabled"):
-            raise RuntimeError("agents are disabled in config.json")
-        cmd, cwd = agentmod.build_command(CFG, job["prompt"])
-        lines = []
-        stop = threading.Event()
-        code, killed = agentmod.run_streaming(cmd, cwd, lambda t: lines.append(t), stop,
-                                             timeout_s=agent_run_timeout(CFG))
-        TRACE.log("agent_run", id="job-" + job["id"], goal=job["prompt"][:8000], host=st["host"], mode=st["mode"],
-                  isolated=st["isolated"], exit=code, killed=killed or False, lines=len(lines), output=lines[-400:],
-                  via="job")
-        if code != 0:
-            raise RuntimeError("harness exited %s%s\n%s" % (code, " (" + killed + ")" if killed else "", "\n".join(lines[-20:])))
+        if not agentmod.status(CFG).get("enabled"):
+            raise RuntimeError("agents are not set up: connect a worker on the Agents screen")
+        res, lines = agent_goal(run, emit, job["prompt"], via="job:" + job["id"])
+        if not res.get("ok"):
+            raise RuntimeError((res.get("error") or "failed") + ("\n" + "\n".join(lines[-20:]) if lines else ""))
         return {"output": "\n".join(lines), "hops": None, "tokens": None}
 
     model = job.get("model") or ""
@@ -482,20 +542,31 @@ def run_job(job):
             tools = mcp_host().openai_tools() or None
         except Exception:   # noqa: BLE001
             tools = None
+    emit({"line": "%s on %s%s" % (model, job_gw["name"], " \u00b7 %d tools" % len(tools) if tools else "")})
     total_tokens = 0
     hops = 0
     for hop in range(max(1, int(job.get("max_hops") or 12))):
+        if run.cancelled:
+            raise RuntimeError("cancelled")
         payload = {"model": model, "messages": msgs, "max_tokens": 8000, "temperature": 0.3}
         if caps.get("ctk"):
             payload["chat_template_kwargs"] = dict(caps["ctk"])
         if tools:
             payload["tools"] = tools
         req = upstream_request("/chat/completions", payload, "POST", gateway=job_gw)
+        t0 = time.time()
         with urllib.request.urlopen(req, timeout=900) as r:
             resp = json.loads(r.read().decode("utf-8", "replace"))
-        TRACE.log("chat", status=200, request=trace_safe(payload), response=resp, purpose="job", job=job["id"])
+        TRACE.log("chat", status=200, request=trace_safe(payload), response=resp, purpose="job", job=job["id"],
+                  run=run.id, ms=int((time.time() - t0) * 1000))
         usage = resp.get("usage") or {}
         total_tokens += int(usage.get("total_tokens") or 0)
+        if usage.get("completion_tokens"):
+            # the Usage screen counts every turn, the Playground's and the jobs'
+            append_usage({"model": model, "gateway": job_gw["name"], "source": "job", "job": job["id"],
+                          "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                          "completion_tokens": int(usage.get("completion_tokens") or 0),
+                          "ttft_s": None, "decode_tok_s": None, "estimated": False})
         choice = (resp.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         calls = msg.get("tool_calls") or []
@@ -513,16 +584,68 @@ def run_job(job):
                 args = json.loads(fn.get("arguments") or "{}")
             except ValueError:
                 args = {}
+            emit({"line": "hop %d: %s" % (hops, fn.get("name") or "?")})
             text, is_err = mcp_host().call(fn.get("name") or "", args)
-            TRACE.log("tool", name=fn.get("name"), args=args, result=str(text)[:4000], is_error=bool(is_err), purpose="job", job=job["id"])
+            TRACE.log("tool", name=fn.get("name"), args=args, result=str(text)[:4000], is_error=bool(is_err), purpose="job",
+                      job=job["id"], run=run.id)
             msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": str(text)[:20000]})
     return {"output": "(stopped after %d tool hops without a final answer)" % hops, "hops": hops, "tokens": total_tokens}
+
+
+_JOB_SLOTS = None
+
+
+def job_slots():
+    """Jobs share the engine with everything else: one at a time unless
+    config says otherwise (jobs_parallel, 1..8). A job waits for a slot,
+    queued; it is never skipped for want of one."""
+    global _JOB_SLOTS
+    if _JOB_SLOTS is None:
+        _JOB_SLOTS = threading.Semaphore(max(1, min(8, _int(CFG.get("jobs_parallel"), 1))))
+    return _JOB_SLOTS
+
+
+def launch_job(job, trigger):
+    """Start one run of a job and return it at once. A job whose last run is
+    still going is not started again: runsmod.Busy."""
+    def target(run):
+        RUNS.set_state(run, "queued")
+        slots = job_slots()
+        while not slots.acquire(timeout=1):
+            if run.cancelled:
+                return {"ok": False, "error": "cancelled before it started"}
+        try:
+            RUNS.set_state(run, "running")
+            t0 = time.time()
+            BUS.publish("jobs", "started", {"id": job["id"], "run": run.id, "trigger": trigger})
+            rec = {"ts": t0, "trigger": trigger, "kind": job["kind"], "ok": False, "ms": 0, "output": "",
+                   "error": None, "run": run.id}
+            try:
+                out = run_job(job, run)
+                rec.update(ok=True, output=str(out.get("output") or "")[:40000], hops=out.get("hops"),
+                           tokens=out.get("tokens"), model=out.get("model"), gateway=out.get("gateway"))
+            except Exception as e:   # noqa: BLE001 - a job's failure is its record, not the server's
+                rec["error"] = str(e)[:1000]
+            rec["ms"] = int((time.time() - t0) * 1000)
+            JOBS.record_run(job["id"], rec)
+            BUS.publish("jobs", "finished", {"id": job["id"], "run": run.id, "ok": rec["ok"]})
+            return {"ok": rec["ok"], "error": (rec["error"] or "")[:300] or None, "ms": rec["ms"],
+                    "tokens": rec.get("tokens")}
+        finally:
+            slots.release()
+    return RUNS.start("job", trigger, target, title=job["name"], meta={"job": job["id"], "trigger": trigger},
+                      key="job:" + job["id"])
+
+
+def running_jobs():
+    """{job id: {"run", "state"}} for jobs with a run going."""
+    return {r.meta.get("job"): {"run": r.id, "state": r.state} for r in RUNS.active("job")}
 
 
 def start_scheduler():
     global SCHED
     if SCHED is None:
-        SCHED = jobmod.Scheduler(JOBS, run_job, log=print)
+        SCHED = jobmod.Scheduler(JOBS, launch_job, log=print)
         SCHED.start()
     return SCHED
 
@@ -993,30 +1116,33 @@ class Handler(BaseHTTPRequestHandler):
         behind the ring gets a "reset" event and should reload its state."""
         topics = set(t for t in ",".join(q.get("topics") or []).split(",") if t) or None
         # a reconnecting browser sends Last-Event-ID; it wins over the URL's after=
-        after = _int(self.headers.get("Last-Event-ID") or (q.get("after") or [""])[0], BUS.seq)
+        pos = _int(self.headers.get("Last-Event-ID") or (q.get("after") or [""])[0], BUS.seq)
         self._sse_start()
         try:
             while True:
-                evts, gap = BUS.since(after, topics)
+                evts, gap, head = BUS.scan(pos, topics)
                 if gap:
-                    after = BUS.seq
-                    self.wfile.write(b"id: %d\nevent: reset\ndata: {}\n\n" % after)
-                    evts = [e for e in evts if e["seq"] > after]
+                    self.wfile.write(b"id: %d\nevent: reset\ndata: {}\n\n" % head)
+                    evts = []
                 for e in evts:
                     self.wfile.write(eventsmod.sse_frame(e))
-                    after = e["seq"]
+                pos = head
                 self.wfile.flush()
                 if STOPPING.is_set():
                     return
-                if not BUS.wait(after, 15):
+                if not BUS.wait(pos, 15):
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
         except OSError:
             return
 
-    def _run_events(self, rid, after=0):
-        """GET /api/runs/<id>/events?after=N: one run from its start (or from
-        N), then live until it finishes. Any client can attach, any time."""
+    def _stream_run(self, rid, after=0, legacy=False, cancel_on_leave=False):
+        """A run as SSE: everything from its start (or after N) from its file,
+        then live until it finishes. Any client can attach, any time.
+        legacy: the data: frames the app's screens read ({"line"}, {"phase"},
+        {"error"}), for the routes that start a run and stream it in one
+        request. cancel_on_leave: the run ends with this viewer (a log tail)
+        instead of going on without it (a deploy, a goal)."""
         if not re.match(r"^[A-Za-z0-9_-]{1,80}$", rid or ""):
             self._json({"error": "bad run id"}, 400)
             return
@@ -1026,28 +1152,69 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "no such run"}, 404)
             return
         self._sse_start()
+        saw_done = [False]
 
-        def send(evts, after):
+        def frames(e):
+            if not legacy:
+                return [eventsmod.sse_frame(e)]
+            d = e.get("data") or {}
+            if e["topic"] == "output" and e["type"] == "out":
+                saw_done[0] = saw_done[0] or d.get("phase") == "done"
+                objs = [d]
+            elif e["topic"] == "runs" and e["type"] == "started":
+                objs = [{"run": rid, "kind": d.get("kind")}]
+            elif e["topic"] == "runs" and e["type"] == "finished" and not saw_done[0]:
+                # the work raised before reporting its own end
+                objs = ([{"error": d["error"]}] if d.get("error") else []) + [
+                    {"phase": "done", "exit": None, "killed": False if d.get("state") == "done" else d.get("state")}]
+            else:
+                objs = []
+            return [("data: " + json.dumps(o) + "\n\n").encode() for o in objs]
+
+        def send(evts, sent):
             for e in evts:
-                if e["seq"] > after:
-                    self.wfile.write(eventsmod.sse_frame(e))
-                    after = e["seq"]
+                if e["seq"] > sent:
+                    for f in frames(e):
+                        self.wfile.write(f)
+                    sent = e["seq"]
             self.wfile.flush()
-            return after
+            return sent
 
         try:
-            after = send(past, after)
+            sent = send(past, after)
+            pos = max(sent, after)
             while run is not None and not run.done_event.is_set() and not STOPPING.is_set():
-                BUS.wait(after, 15)
-                evts, gap = BUS.since(after, run=rid)
+                woke = BUS.wait(pos, 15)
+                evts, gap, pos = BUS.scan(sent, run=rid)
                 if gap:                                # fell out of the ring: the run's file has it all
-                    evts = BUS.run_events(rid, after)
-                if not evts:
+                    evts = BUS.run_events(rid, sent)
+                if not woke:
                     self.wfile.write(b": keepalive\n\n")
-                after = send(evts, after)
-            send(BUS.run_events(rid, after), after)    # through the finish event
+                sent = send(evts, sent)
+            send(BUS.run_events(rid, sent), sent)      # through the finish event
         except OSError:
+            if cancel_on_leave and run is not None:
+                RUNS.cancel(rid)
+
+    def _client(self):
+        """Who started this: "app" unless a client says otherwise (bb sends cli)."""
+        c = (self.headers.get("X-BB-Client") or "app").strip().lower()
+        return c if re.match(r"^[a-z][a-z0-9-]{0,15}$", c) else "app"
+
+    def _run_streamed(self, kind, title, work, meta=None, key=None, detach=True):
+        """Start work(run, emit) as a server-owned run and stream it to this
+        client in the frames the app's screens read. With detach (deploys,
+        goals, installs) the run goes on when this client leaves and stops
+        only through POST /api/runs/<id>/cancel; without (log tails) it ends
+        with its viewer. A run with the same key still going: 409 and its id,
+        so the client can attach to it instead."""
+        try:
+            run = RUNS.start(kind, self._client(), lambda run: work(run, lambda obj: RUNS.emit(run, "out", obj)),
+                             title=title, meta=meta, key=key)
+        except runsmod.Busy as e:
+            self._json({"error": str(e), "run": e.run.id}, 409)
             return
+        self._stream_run(run.id, legacy=True, cancel_on_leave=not detach)
 
     def _export(self, q):
         """Training data as JSONL: ?from=YYYY-MM-DD&to=...&model=substr
@@ -1277,8 +1444,10 @@ class Handler(BaseHTTPRequestHandler):
                                              kind=(q.get("kind") or [None])[0]),
                         "seq": BUS.seq})
         elif path.startswith("/api/runs/") and path.endswith("/events"):
+            # ?format=data: the frames the app's screens read, to re-attach to a run
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            self._run_events(path[len("/api/runs/"):-len("/events")], _int((q.get("after") or [""])[0], 0))
+            self._stream_run(path[len("/api/runs/"):-len("/events")], _int((q.get("after") or [""])[0], 0),
+                             legacy=(q.get("format") or [""])[0] == "data")
         elif path.startswith("/api/archive/"):
             self._archive_get(path[len("/api/archive/"):])
         elif path == "/api/agents":
@@ -1358,7 +1527,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         elif path == "/api/jobs":
-            self._json({"jobs": JOBS.list(), "running": SCHED.running if SCHED else None})
+            self._json({"jobs": JOBS.list(), "running": running_jobs()})
         elif path == "/api/jobs/runs":
             jid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
             self._json({"id": jid, "runs": JOBS.runs(jid, 30)})
@@ -1471,10 +1640,16 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "save":
                     job = JOBS.upsert(body.get("job") or body)
                     TRACE.log("job", action="save", id=job["id"], name=job["name"], schedule=job["schedule"], job_kind=job["kind"])
+                    BUS.publish("jobs", "saved", {"id": job["id"]})
                     self._json({"ok": True, "job": job, "jobs": JOBS.list()})
                 elif action == "delete":
-                    JOBS.delete(str(body.get("id") or ""))
-                    TRACE.log("job", action="delete", id=body.get("id"))
+                    jid = str(body.get("id") or "")
+                    going = running_jobs().get(jid)
+                    if going:
+                        RUNS.cancel(going["run"])
+                    JOBS.delete(jid)
+                    TRACE.log("job", action="delete", id=jid)
+                    BUS.publish("jobs", "deleted", {"id": jid})
                     self._json({"ok": True, "jobs": JOBS.list()})
                 elif action == "toggle":
                     j = JOBS.get(str(body.get("id") or ""))
@@ -1482,17 +1657,19 @@ class Handler(BaseHTTPRequestHandler):
                         self._json({"error": "no such job"}, 404)
                         return
                     JOBS.set_enabled(j["id"], not j.get("enabled", True))
+                    BUS.publish("jobs", "toggled", {"id": j["id"]})
                     self._json({"ok": True, "jobs": JOBS.list()})
                 elif action == "run_now":
                     j = JOBS.get(str(body.get("id") or ""))
                     if not j:
                         self._json({"error": "no such job"}, 404)
                         return
-                    if SCHED and SCHED.running:
-                        self._json({"error": "a job is already running (%s); try again when it finishes" % SCHED.running}, 409)
+                    try:
+                        run = launch_job(j, "manual")
+                    except runsmod.Busy as e:
+                        self._json({"error": "this job is already running", "run": e.run.id}, 409)
                         return
-                    threading.Thread(target=lambda: start_scheduler().run_job(j, "manual"), daemon=True).start()
-                    self._json({"ok": True, "started": j["id"]})
+                    self._json({"ok": True, "started": j["id"], "run": run.id})
                 else:
                     self._json({"error": "unknown action"}, 400)
             except ValueError as e:
@@ -1643,83 +1820,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         goal = body.get("goal") or ""
         try:
-            cmd = agentmod.build_command(CFG, goal)
+            agentmod.build_command(CFG, goal)        # a setup problem is a 400, not a failed run
         except agentmod.AgentConfigError as e:
             self._json({"error": str(e)}, 400)
             return
-        st = agentmod.status(CFG)
-        cwd = None if st["mode"] == "ssh" else os.path.expanduser((CFG.get("agents") or {}).get("dir") or ".")
-        started = time.time()
-        rid = TRACE.new_id()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.close_connection = True
-        self.end_headers()
-        stop = threading.Event()
-        lines = [0]
-        captured = []   # full master output, stored so a past run can be reopened
-        wlock = threading.Lock()   # emitter and heartbeat share one socket
-
-        def emit(obj):
-            try:
-                with wlock:
-                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
-                    self.wfile.flush()
-            except OSError:
-                stop.set()   # client went away — stop the run
-
-        emit({"phase": "start", "id": rid, "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
-
-        # A run that prints nothing for minutes would never notice its client
-        # left (a dropped connection only shows up on the next write). An SSE
-        # comment every 10 s is invisible to the client's parser and makes the
-        # write fail promptly, which sets `stop` and kills the remote run.
-        def heartbeat():
-            while not stop.wait(5):
-                try:
-                    with wlock:
-                        self.wfile.write(b": keepalive\n\n")
-                        self.wfile.flush()
-                except OSError:
-                    stop.set()
-        threading.Thread(target=heartbeat, daemon=True).start()
-
-        def on_line(text):
-            lines[0] += 1
-            if len(captured) < 4000:
-                captured.append(text)
-            # The master files recurring work by printing one structured line;
-            # the agent plane has no other way to reach the console, by design.
-            if text.startswith("BB_JOB "):
-                try:
-                    spec = json.loads(text[7:])
-                    spec["created_by"] = "agents:" + str(spec.get("created_by") or "sultan")[:30]
-                    job = JOBS.upsert(spec)
-                    TRACE.log("job", action="filed_by_agent", id=job["id"], name=job["name"], run=rid,
-                              schedule=job["schedule"], job_kind=job["kind"], by=spec["created_by"])
-                    emit({"job": {"id": job["id"], "name": job["name"], "schedule": job["schedule"], "kind": job["kind"]}})
-                    emit({"line": "%s> \U0001f5d3 filed job \"%s\" (%s) — see the Jobs screen" % (
-                        (CFG.get("agents") or {}).get("master_name") or "Master", job["name"], jobmod.describe_schedule(job))})
-                except (ValueError, KeyError) as e:
-                    emit({"line": "console: could not file the job the master asked for: %s" % str(e)[:160]})
-                return
-            emit({"line": text})
-
-        try:
-            code, killed = agentmod.run_streaming(cmd, cwd, on_line, stop,
-                                                  timeout_s=agent_run_timeout(CFG))
-        except FileNotFoundError as e:
-            emit({"error": "could not launch the harness: %s" % e})
-            code, killed = -1, "error"
-        except Exception as e:   # noqa: BLE001 - report anything to the client
-            emit({"error": str(e)[:300]})
-            code, killed = -1, "error"
-        emit({"phase": "done", "exit": code, "killed": killed})
-        TRACE.log("agent_run", id=rid, goal=goal[:8000], host=st["host"], mode=st["mode"],
-                  isolated=st["isolated"], exit=code, killed=killed or False,
-                  lines=lines[0], output=captured, ms=int((time.time() - started) * 1000))
+        self._run_streamed("agents", goal.strip()[:120] or "agents goal",
+                           lambda run, emit: agent_goal(run, emit, goal)[0], key="agents")
 
     def _rack(self, body):
         """show <recipe>: the recipe's .env; up/down/logs/bench: run rack and
@@ -1754,37 +1860,30 @@ class Handler(BaseHTTPRequestHandler):
         if action == "logs":
             args = ["logs"]
         _rack_cache["at"] = 0                      # status changes after this
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")      # the stream has no length: closing is how the client learns it ended
-        self.end_headers()
-        self.close_connection = True
-        wlock = threading.Lock()
-        stop = threading.Event()
 
-        def emit(obj):
+        def work(run, emit):
+            emit({"phase": "start", "host": r["ssh"], "cmd": "rack " + " ".join(args)})
+            captured = []
+
+            def on_line(text):
+                if len(captured) < 2000:
+                    captured.append(text)
+                emit({"line": text})
             try:
-                with wlock:
-                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
-                    self.wfile.flush()
-            except OSError:
-                stop.set()
-        emit({"phase": "start", "host": r["ssh"], "cmd": "rack " + " ".join(args)})
-        captured = []
-
-        def on_line(text):
-            if len(captured) < 2000:
-                captured.append(text)
-            emit({"line": text})
-        try:
-            code, killed = agentmod.run_streaming(rack_cmd(args), ROOT, on_line, stop, timeout_s=3600)
-        except Exception as e:   # noqa: BLE001
-            emit({"error": str(e)})
-            code, killed = -1, "error"
-        emit({"phase": "done", "exit": code, "killed": killed})
-        TRACE.log("rack", action=action, recipe=recipe, host=r["ssh"], exit=code,
-                  killed=killed or False, output=captured[-200:])
+                code, killed = agentmod.run_streaming(rack_cmd(args), ROOT, on_line, run.cancel_event, timeout_s=3600)
+            except Exception as e:   # noqa: BLE001
+                emit({"error": str(e)})
+                code, killed = -1, "error"
+            emit({"phase": "done", "exit": code, "killed": killed})
+            TRACE.log("rack", action=action, recipe=recipe, host=r["ssh"], exit=code, run=run.id,
+                      killed=killed or False, output=captured[-200:])
+            return {"ok": code == 0, "exit": code, "killed": killed or False,
+                    "error": None if code == 0 else "rack %s exited %s" % (action, code)}
+        # a deploy goes on without its viewer; a log tail or a status read does not
+        viewing = action in ("logs", "status")
+        self._run_streamed("rack", "rack " + " ".join(args), work,
+                           meta={"action": action, "recipe": recipe, "host": r["ssh"]},
+                           key=None if viewing else "rack:" + r["ssh"], detach=not viewing)
 
     def _recipes(self, body):
         """render: the exact files a recipe would run; deploy: run its script
@@ -1836,37 +1935,27 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "this recipe is manual (no ssh target) — run the printed steps yourself"}, 400)
             return
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "bash -c " + _shlex.quote(script)]
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")      # the stream has no length: closing is how the client learns it ended
-        self.end_headers()
-        self.close_connection = True
-        wlock = threading.Lock()
-        stop = threading.Event()
 
-        def emit(obj):
+        def work(run, emit):
+            emit({"phase": "start", "host": host, "recipe": body.get("id")})
+            captured = []
+
+            def on_line(text):
+                if len(captured) < 2000:
+                    captured.append(text)
+                emit({"line": text})
             try:
-                with wlock:
-                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
-                    self.wfile.flush()
-            except OSError:
-                stop.set()
-        emit({"phase": "start", "host": host, "recipe": body.get("id")})
-        captured = []
-
-        def on_line(text):
-            if len(captured) < 2000:
-                captured.append(text)
-            emit({"line": text})
-        try:
-            code, killed = agentmod.run_streaming(cmd, ROOT, on_line, stop, timeout_s=3600)
-        except Exception as e:   # noqa: BLE001
-            emit({"error": str(e)})
-            code, killed = -1, "error"
-        emit({"phase": "done", "exit": code, "killed": killed})
-        TRACE.log("recipe", action="deploy", id=body.get("id"), host=host, params=rendered["params"],
-                  exit=code, killed=killed or False, output=captured[-200:])
+                code, killed = agentmod.run_streaming(cmd, ROOT, on_line, run.cancel_event, timeout_s=3600)
+            except Exception as e:   # noqa: BLE001
+                emit({"error": str(e)})
+                code, killed = -1, "error"
+            emit({"phase": "done", "exit": code, "killed": killed})
+            TRACE.log("recipe", action="deploy", id=body.get("id"), host=host, params=rendered["params"], run=run.id,
+                      exit=code, killed=killed or False, output=captured[-200:])
+            return {"ok": code == 0, "exit": code, "killed": killed or False,
+                    "error": None if code == 0 else "deploy exited %s" % code}
+        self._run_streamed("deploy", "deploy %s on %s" % (body.get("id"), host), work,
+                           meta={"recipe": body.get("id"), "host": host}, key="deploy:" + host)
 
     def _gateways_admin(self, body):
         if not isinstance(body, dict):
@@ -2276,45 +2365,35 @@ class Handler(BaseHTTPRequestHandler):
         for e in entry.get("env", []):
             if e.get("default") and e["name"] not in env:
                 env[e["name"]] = os.path.expanduser(e["default"]) if str(e["default"]).startswith("~") else e["default"]
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")      # the stream has no length: closing is how the client learns it ended
-        self.end_headers()
-        self.close_connection = True
-        wlock = threading.Lock()
-        stop = threading.Event()
-
-        def emit(obj):
-            try:
-                with wlock:
-                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
-                    self.wfile.flush()
-            except OSError:
-                stop.set()
-        shell_env = catmod.shell_env()
-        emit({"phase": "start", "id": entry["id"], "name": name, "steps": entry.get("install", [])})
-        code = 0
-        for step in entry.get("install", []):
-            emit({"line": "$ " + step})
-            wrapped = ["env", "PATH=" + shell_env["PATH"], "bash", "-c", step]
-            try:
-                code, killed = agentmod.run_streaming(wrapped, ROOT, lambda t: emit({"line": t}), stop, timeout_s=1800)
-            except Exception as e:   # noqa: BLE001
-                emit({"error": str(e)}); code = -1; killed = "error"
-            if code != 0:
-                emit({"phase": "done", "exit": code, "killed": killed, "added": False})
-                TRACE.log("mcp", action="install", name=name, catalog=entry["id"], exit=code, step=step)
-                return
-        servers = CFG.setdefault("mcp_servers", {})
-        servers[name] = {"command": cmd, "args": args, "env": env, "enabled": True, "catalog": entry["id"]}
-        save_config()
-        h = mcp_reload()
-        st = h.status.get(name) or {}
-        emit({"line": "added %s: %s %s" % (name, cmd, " ".join(args))})
-        emit({"line": "server %s: %s" % (name, (str(st.get("tools")) + " tools") if st.get("state") == "ready" else st.get("state", "?") + (" — " + st["error"] if st.get("error") else ""))})
-        emit({"phase": "done", "exit": 0, "killed": False, "added": True, "status": st})
-        TRACE.log("mcp", action="install", name=name, catalog=entry["id"], exit=0, status=st)
+        def work(run, emit):
+            shell_env = catmod.shell_env()
+            emit({"phase": "start", "id": entry["id"], "name": name, "steps": entry.get("install", [])})
+            for step in entry.get("install", []):
+                emit({"line": "$ " + step})
+                wrapped = ["env", "PATH=" + shell_env["PATH"], "bash", "-c", step]
+                try:
+                    code, killed = agentmod.run_streaming(wrapped, ROOT, lambda t: emit({"line": t}), run.cancel_event,
+                                                          timeout_s=1800)
+                except Exception as e:   # noqa: BLE001
+                    emit({"error": str(e)})
+                    code, killed = -1, "error"
+                if code != 0:
+                    emit({"phase": "done", "exit": code, "killed": killed, "added": False})
+                    TRACE.log("mcp", action="install", name=name, catalog=entry["id"], exit=code, step=step, run=run.id)
+                    return {"ok": False, "exit": code, "error": "install step failed: " + step[:200]}
+            servers = CFG.setdefault("mcp_servers", {})
+            servers[name] = {"command": cmd, "args": args, "env": env, "enabled": True, "catalog": entry["id"]}
+            save_config()
+            h = mcp_reload(restart=(name,))
+            st = h.status.get(name) or {}
+            emit({"line": "added %s: %s %s" % (name, cmd, " ".join(args))})
+            emit({"line": "server %s: %s" % (name, (str(st.get("tools")) + " tools") if st.get("state") == "ready"
+                                             else st.get("state", "?") + (" \u2014 " + st["error"] if st.get("error") else ""))})
+            emit({"phase": "done", "exit": 0, "killed": False, "added": True, "status": st})
+            TRACE.log("mcp", action="install", name=name, catalog=entry["id"], exit=0, status=st, run=run.id)
+            return {"ok": True, "added": name}
+        self._run_streamed("mcp-install", "install " + name, work, meta={"catalog": entry["id"], "name": name},
+                           key="mcp-install:" + name)
 
     # ---- streaming chat proxy ----
     RETRY_STRIP = ("reasoning_effort", "top_k", "repetition_penalty", "stream_options")

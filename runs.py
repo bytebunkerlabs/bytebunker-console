@@ -1,11 +1,15 @@
 """Server-owned runs: work that outlives the HTTP request that started it.
 
 A run is anything that takes a while and streams progress: a chat turn, an
-agents goal, a deploy, a job, an MCP install. It runs on its own thread,
-publishes its progress on the event bus (topic "runs", tagged with its id),
-and keeps going when the browser tab that started it closes, reloads or
-sleeps. Any client can attach to it later (replay from its file, then
-follow live) or cancel it.
+agents goal, a deploy, a job, an MCP install. It runs on its own thread and
+keeps going when the browser tab that started it closes, reloads or sleeps.
+Its lifecycle (started, state, cancelling, finished) goes on the event bus
+under topic "runs"; its output under topic "output"; both tagged with its
+id. Any client can attach to it later (replay from its file, then follow
+live) or cancel it.
+
+A target that returns {"ok": False, "error": ...} ends the run in "error"
+without raising, after reporting the failure in its own words.
 
 States: queued, running, waiting_approval, done, error, cancelled, and
 interrupted (a run that was still going when the server stopped).
@@ -19,10 +23,18 @@ import uuid
 FINAL = ("done", "error", "cancelled", "interrupted")
 
 
+class Busy(Exception):
+    """A run with the same key is still going."""
+
+    def __init__(self, run):
+        super().__init__("%s is already running (%s)" % (run.title or run.kind, run.id))
+        self.run = run
+
+
 class Run:
-    def __init__(self, kind, source, title="", meta=None):
+    def __init__(self, kind, source, title="", meta=None, key=None):
         self.id = "%s-%s" % (kind, uuid.uuid4().hex[:12])
-        self.kind, self.source, self.title = kind, source, title
+        self.kind, self.source, self.title, self.key = kind, source, title, key
         self.meta = dict(meta or {})
         self.state = "queued"
         self.started = time.time()
@@ -106,11 +118,17 @@ class RunRegistry:
         return out[:limit]
 
     # ------------------------------------------------------------ running
-    def start(self, kind, source, target, title="", meta=None):
+    def start(self, kind, source, target, title="", meta=None, key=None):
         """Run target(run) on its own thread. target emits progress with
-        registry.emit(run, type, data) and returns a result dict (or raises)."""
-        run = Run(kind, source, title, meta)
+        registry.emit(run, type, data) and returns a result dict (or raises).
+        With a key, a second run with the same key is refused (Busy) while
+        the first is going: two deploys to one rack, two agent goals."""
+        run = Run(kind, source, title, meta, key)
         with self.lock:
+            if key is not None:
+                for r in self.runs.values():
+                    if r.key == key and r.state not in FINAL:
+                        raise Busy(r)
             self.runs[run.id] = run
             self.order.append(run.id)
             while len(self.order) > self.keep:
@@ -129,7 +147,10 @@ class RunRegistry:
             try:
                 res = target(run)
                 run.result = res if isinstance(res, dict) else ({"value": res} if res is not None else None)
-                run.state = "cancelled" if run.cancelled else "done"
+                failed = isinstance(res, dict) and res.get("ok") is False
+                if failed:
+                    run.error = str(res.get("error") or "failed")[:500]
+                run.state = "cancelled" if run.cancelled else ("error" if failed else "done")
             except Exception as e:   # noqa: BLE001 - a run's failure is its result, not the server's
                 run.error = str(e)[:500]
                 run.state = "cancelled" if run.cancelled else "error"
@@ -142,7 +163,9 @@ class RunRegistry:
         return run
 
     def emit(self, run, type_, data=None):
-        return self.bus.publish("runs", type_, data, run=run.id)
+        """Output and progress: topic "output", so the app-wide stream of
+        what changed stays light while a run's own stream has every line."""
+        return self.bus.publish("output", type_, data, run=run.id)
 
     def set_state(self, run, state):
         run.state = state
