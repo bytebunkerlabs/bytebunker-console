@@ -32,7 +32,6 @@ import threading
 import urllib.request
 
 APP = "ByteBunker"
-VERSION = "0.2.0"
 
 
 # ------------------------------------------------------------------ paths --
@@ -42,6 +41,12 @@ def code_root():
     if getattr(sys, "frozen", False):
         return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+if code_root() not in sys.path:
+    sys.path.insert(0, code_root())
+from version import VERSION  # noqa: E402  (the one place the version lives)
+import instance as instancemod  # noqa: E402
 
 
 def home_dir():
@@ -110,42 +115,13 @@ def prepare_home():
 
 
 # --------------------------------------------------------------- instance --
-def instance_path(home):
-    return os.path.join(home, "instance.json")
-
-
+# The server itself holds the data folder's lock and publishes instance.json
+# (instance.py). The launcher only asks whether one is already running.
 def running_instance(home):
-    """URL of a console another launch of this app is already serving, or
-    None. Checked over HTTP, not by pid: on Windows os.kill(pid, 0) would
-    terminate the process it was meant to probe."""
-    try:
-        with open(instance_path(home), encoding="utf-8") as f:
-            info = json.load(f)
-        url = "http://127.0.0.1:%d/" % int(info["port"])
-        with urllib.request.urlopen(url + "api/config", timeout=1.5) as r:
-            if json.loads(r.read().decode("utf-8")).get("desktop"):
-                return url
-    except Exception:   # noqa: BLE001
-        return None
-    return None
-
-
-def claim_instance(home, port):
-    try:
-        with open(instance_path(home), "w", encoding="utf-8") as f:
-            json.dump({"pid": os.getpid(), "port": port, "version": VERSION}, f)
-    except OSError:
-        pass
-
-
-def release_instance(home):
-    try:
-        with open(instance_path(home), encoding="utf-8") as f:
-            if json.load(f).get("pid") != os.getpid():
-                return
-        os.remove(instance_path(home))
-    except (OSError, ValueError):
-        pass
+    """URL of the server already using this app's data folder, or None."""
+    data = os.environ.get("BYTEBUNKER_DATA") or os.path.join(home, "data")
+    found = instancemod.find(data)
+    return found["url"] if found else None
 
 
 # ---------------------------------------------------------------- windows --
@@ -301,20 +277,34 @@ def main(argv=None):
 
     home = prepare_home()
     quiet_subprocesses()
+    try:                                  # 0.2.0 kept this file in the home folder
+        os.remove(os.path.join(home, "instance.json"))
+    except OSError:
+        pass
     existing = running_instance(home)
-    if existing and not headless and port == 0 and not smoke_out:
-        # a second launch: another window on the console that is already up,
-        # not a second server and a second job scheduler on the same data
+    if existing:
+        # one server per data folder in every mode: never a second server and
+        # a second job scheduler on the same files
+        if headless:
+            print("%s is already running on %s (data: %s)" % (APP, existing, home), flush=True)
+            return 0
+        if smoke_out:
+            print("another %s is using %s; the smoke test needs its own BYTEBUNKER_HOME" % (APP, home), file=sys.stderr)
+            return 2
         open_window(existing, home)
         return 0
 
-    root = code_root()
-    if root not in sys.path:
-        sys.path.insert(0, root)
     import server
-    srv = server.serve("127.0.0.1", port)
+    try:
+        srv = server.serve("127.0.0.1", port)
+    except SystemExit as e:               # lost a race with another launch
+        existing = running_instance(home)
+        if existing and not headless and not smoke_out:
+            open_window(existing, home)
+            return 0
+        print(str(e), file=sys.stderr)
+        return 2
     url = "http://127.0.0.1:%d/" % srv.server_address[1]
-    claim_instance(home, srv.server_address[1])
     if headless:
         # launchd and systemd stop services with SIGTERM, and a process started
         # in the background of a non-interactive shell inherits SIGINT ignored:
@@ -338,7 +328,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
-        release_instance(home)
+        server.release_instance()
         try:
             if getattr(server, "_MCP", None) is not None:
                 server._MCP.stop_all()

@@ -12,7 +12,7 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 HERE = SPECPATH
-with open(os.path.join(HERE, "app.py"), encoding="utf-8") as f:
+with open(os.path.join(ROOT, "version.py"), encoding="utf-8") as f:
     VERSION = re.search(r'^VERSION = "([^"]+)"', f.read(), re.M).group(1)
 
 datas = [
@@ -23,7 +23,7 @@ datas = [
 ]
 # the console is imported at run time by the launcher, and the built-in MCP
 # servers by --mcp: name them so the analysis bundles them and their imports
-hidden = ["server", "gateways", "monitors", "jobs", "agents", "recipes", "skills", "traces",
+hidden = ["server", "version", "instance", "gateways", "monitors", "jobs", "agents", "recipes", "skills", "traces",
           "mcp", "mcp_catalog", "mcp_jobs", "mcp_terminal"]
 
 a = Analysis(

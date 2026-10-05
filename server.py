@@ -49,6 +49,8 @@ import mcp_catalog as catmod
 import jobs as jobmod
 import gateways as gwmod
 import monitors as monmod
+import instance as instancemod
+from version import VERSION
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -545,24 +547,29 @@ _MCP_LOCK = threading.Lock()
 
 
 def mcp_host():
+    """The MCP host, created on first use. Servers start in the background:
+    a request never waits for every server to boot, it sees the ones that
+    are ready and "starting" for the rest."""
     global _MCP
     with _MCP_LOCK:
         if _MCP is None:
             from mcp import MCPHost
-            _MCP = MCPHost(effective_mcp_servers())
+            _MCP = MCPHost()
+            _MCP.sync_in_background(effective_mcp_servers())
         return _MCP
 
 
-def mcp_reload():
-    """Tear down every server and start from the current config. Called after
-    any edit so changes take effect without restarting the console."""
-    global _MCP
-    with _MCP_LOCK:
-        if _MCP is not None:
-            _MCP.stop_all()
-        from mcp import MCPHost
-        _MCP = MCPHost(effective_mcp_servers())
-        return _MCP
+def mcp_reload(restart=(), wait=True):
+    """Apply the current config to the running servers. Only what changed is
+    touched: an edited or re-enabled server restarts, a removed or disabled
+    one stops, the rest keep running with their calls in flight. `restart`
+    names servers to restart even when unchanged."""
+    h = mcp_host()
+    if wait:
+        h.sync(effective_mcp_servers(), restart)
+    else:
+        h.sync_in_background(effective_mcp_servers(), restart)
+    return h
 
 
 def save_config():
@@ -1093,6 +1100,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/hello":
+            # how clients (the window, the CLI) confirm they found the right server
+            self._json({"service": "bytebunker", "version": app_version(), "pid": os.getpid(),
+                        "data": DATA, "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
+                        "started": round(STARTED, 3)})
+            return
         if path == "/api/config":
             self._json({
                 "identity": CFG.get("identity", {}),
@@ -1100,7 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
                 "gateways": [g["name"] for g in GW.gateways()],
                 "gateway_urls": {g["name"]: g["url"] for g in GW.gateways()},
                 "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
-                "version": os.environ.get("BYTEBUNKER_VERSION") or "",
+                "version": app_version(),
                 "platform": sys.platform,
                 "monitors": len(MON.list()),
                 "mcp": bool(CFG.get("mcp_servers")),
@@ -1116,7 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:   # noqa: BLE001
                 self._json({"error": str(e), "data": []}, 502)
         elif path == "/api/settings":
-            self._json({"version": os.environ.get("BYTEBUNKER_VERSION") or "", "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
+            self._json({"version": app_version(), "desktop": bool(os.environ.get("BYTEBUNKER_DESKTOP")),
                         "platform": sys.platform, "data_dir": DATA, "config_path": CONFIG_PATH,
                         "home_dir": os.path.dirname(CONFIG_PATH),
                         "uploads_dir": os.path.expanduser(CFG.get("uploads_dir") or os.path.join(DATA, "uploads")),
@@ -2129,13 +2142,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             servers[name]["enabled"] = not servers[name].get("enabled", True)
         elif action == "restart":
-            pass  # config unchanged; the reload below does the work
+            if name and name not in servers:
+                self._json({"error": "no such server"}, 404)
+                return
         else:
             self._json({"error": "unknown action"}, 400)
             return
 
         save_config()
-        h = mcp_reload()
+        # only the server this edit touched restarts; the others keep running
+        h = mcp_reload(restart=(name,) if action == "restart" and name else ())
         self._json({"ok": True, "servers": h.status,
                     "config": CFG.get("mcp_servers", {})})
 
@@ -2297,11 +2313,43 @@ def serve(bind=None, port=None):
             "refusing to bind %s: the console has no auth and is loopback-only "
             "by design. Reach it via SSH tunnel or overlay network." % bind)
     CFG["bind"] = bind
-    srv = ThreadingHTTPServer((bind, int(CFG.get("port", 8765) if port is None else port)), Handler)
+    # one server per data folder: a second one would run a second job
+    # scheduler and write the same sessions and traces
+    global INSTANCE
+    inst = instancemod.Instance(DATA)
+    if not inst.acquire():
+        info = instancemod.read(DATA) or {}
+        raise SystemExit("another ByteBunker server is already using %s%s" % (
+            DATA, (": http://127.0.0.1:%s/ (pid %s)" % (info.get("port"), info.get("pid"))) if info else ""))
+    try:
+        srv = ThreadingHTTPServer((bind, int(CFG.get("port", 8765) if port is None else port)), Handler)
+    except OSError:
+        inst.release()
+        raise
+    INSTANCE = inst
+    inst.publish(srv.server_address[1], version=app_version(), desktop=bool(os.environ.get("BYTEBUNKER_DESKTOP")))
+    import atexit
+    atexit.register(release_instance)
     # the built-in jobs MCP server calls the console back on this port
     os.environ["BB_CONSOLE_PORT"] = str(srv.server_address[1])
     start_scheduler()
+    mcp_host()      # servers start in the background, ready before the first chat
     return srv
+
+
+INSTANCE = None
+STARTED = time.time()
+
+
+def app_version():
+    return os.environ.get("BYTEBUNKER_VERSION") or VERSION
+
+
+def release_instance():
+    global INSTANCE
+    if INSTANCE is not None:
+        INSTANCE.release()
+        INSTANCE = None
 
 
 def main():

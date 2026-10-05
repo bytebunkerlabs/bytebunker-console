@@ -44,8 +44,21 @@ START_TIMEOUT = 25  # server boot + initialize
 CALL_TIMEOUT = 120  # one tools/call
 
 
+class _Waiter:
+    __slots__ = ("event", "msg")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.msg = None
+
+
 class MCPServer:
-    """One stdio MCP server subprocess, spoken to over JSON-RPC 2.0."""
+    """One stdio MCP server subprocess, spoken to over JSON-RPC 2.0.
+
+    One reader thread owns the server's stdout and hands each reply to the
+    request that is waiting for its id, so any number of calls can be in
+    flight at once (the console, a job and the CLI share a server). When the
+    server exits, every pending call fails at once instead of timing out."""
 
     def __init__(self, name, spec):
         self.name = name
@@ -54,45 +67,103 @@ class MCPServer:
         self.tools = []
         self.error = None
         self._id = 0
-        self._lock = threading.Lock()
+        self._wlock = threading.Lock()       # writes to stdin, id allocation
+        self._plock = threading.Lock()       # the pending table
+        self._pending = {}
+        self._reader = None
+        self._dead = None                    # why the server stopped answering
 
     # ---- transport ----
+    def _write(self, msg):
+        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.flush()
+
     def _send(self, method, params=None, want_reply=True):
-        with self._lock:
-            self._id += 1
+        """Write one message. Returns (id, waiter) for requests; the waiter is
+        registered before the write so even an instant reply finds it."""
+        with self._wlock:
             msg = {"jsonrpc": "2.0", "method": method}
             if params is not None:
                 msg["params"] = params
+            rid, w = None, None
             if want_reply:
-                msg["id"] = self._id
-            self.proc.stdin.write(json.dumps(msg) + "\n")
-            self.proc.stdin.flush()
-            return self._id if want_reply else None
-
-    def _read_reply(self, want_id, timeout):
-        """Read lines until the reply with want_id arrives. Notifications and
-        server->client requests we do not implement are skipped."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            line = self.proc.stdout.readline()
-            if not line:
-                raise RuntimeError("server closed its stdout")
-            line = line.strip()
-            if not line:
-                continue
+                self._id += 1
+                rid = self._id
+                msg["id"] = rid
+                w = _Waiter()
+                with self._plock:
+                    if self._dead:
+                        raise RuntimeError(self._dead)
+                    self._pending[rid] = w
             try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # some servers log to stdout; ignore non-JSON
-            if msg.get("id") == want_id:
-                if "error" in msg:
-                    raise RuntimeError(str(msg["error"])[:400])
-                return msg.get("result", {})
-        raise TimeoutError("no reply to request %s in %ss" % (want_id, timeout))
+                self._write(msg)
+            except (OSError, ValueError) as e:
+                if rid is not None:
+                    with self._plock:
+                        self._pending.pop(rid, None)
+                raise RuntimeError("server is not accepting input: %s" % e)
+            return rid, w
+
+    def _read_loop(self):
+        """The only reader of stdout: route replies, answer pings, skip noise."""
+        reason = "server closed its stdout"
+        try:
+            for line in self.proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue      # some servers log to stdout; ignore non-JSON
+                if not isinstance(msg, dict):
+                    continue
+                if "method" in msg:
+                    if "id" in msg:   # a request from the server: we implement ping only
+                        reply = {"jsonrpc": "2.0", "id": msg["id"]}
+                        if msg["method"] == "ping":
+                            reply["result"] = {}
+                        else:
+                            reply["error"] = {"code": -32601, "message": "not supported by this client"}
+                        try:
+                            with self._wlock:
+                                self._write(reply)
+                        except (OSError, ValueError):
+                            pass
+                    continue      # notifications: nothing to do
+                with self._plock:
+                    w = self._pending.pop(msg.get("id"), None)
+                if w is not None:
+                    w.msg = msg
+                    w.event.set()
+        except (OSError, ValueError) as e:
+            reason = "server stdout failed: %s" % e
+        with self._plock:
+            self._dead = reason
+            waiting = list(self._pending.values())
+            self._pending.clear()
+        for w in waiting:
+            w.msg = {"error": reason}
+            w.event.set()
 
     def _rpc(self, method, params=None, timeout=CALL_TIMEOUT):
-        rid = self._send(method, params)
-        return self._read_reply(rid, timeout)
+        rid, w = self._send(method, params)
+        if not w.event.wait(timeout):
+            with self._plock:
+                self._pending.pop(rid, None)
+            try:                          # tell the server to stop working on it
+                self._send("notifications/cancelled", {"requestId": rid, "reason": "timeout"}, want_reply=False)
+            except RuntimeError:
+                pass
+            raise TimeoutError("no reply to request %s in %ss" % (rid, timeout))
+        msg = w.msg or {}
+        if "error" in msg:
+            raise RuntimeError(str(msg["error"])[:400])
+        return msg.get("result", {})
+
+    @property
+    def alive(self):
+        return bool(self.proc) and self.proc.poll() is None and not self._dead
 
     # ---- lifecycle ----
     def start(self):
@@ -135,6 +206,8 @@ class MCPServer:
             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, cwd=here,
             encoding="utf-8", errors="replace",
         )
+        self._reader = threading.Thread(target=self._read_loop, name="mcp-" + self.name, daemon=True)
+        self._reader.start()
         self._rpc("initialize", {
             "protocolVersion": "2025-06-18",
             "capabilities": {},
@@ -145,39 +218,117 @@ class MCPServer:
 
     def stop(self):
         try:
-            if self.proc:
+            if self.proc and self.proc.poll() is None:
                 self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
         except Exception:
             pass
+        for stream in ("stdin", "stdout"):
+            try:
+                getattr(self.proc, stream).close()
+            except Exception:
+                pass
 
-    def call(self, tool, args):
-        return self._rpc("tools/call", {"name": tool, "arguments": args or {}})
+    def call(self, tool, args, timeout=CALL_TIMEOUT):
+        return self._rpc("tools/call", {"name": tool, "arguments": args or {}}, timeout=timeout)
 
 
 class MCPHost:
-    """Owns every configured server; flattens their tools into one namespace."""
+    """Owns every configured server; flattens their tools into one namespace.
 
-    def __init__(self, servers_cfg):
+    Servers start in parallel. sync() applies a new configuration by touching
+    only what changed: an edited, added or re-enabled server (re)starts, a
+    removed or disabled one stops, and every other server keeps running with
+    its calls in flight."""
+
+    def __init__(self, servers_cfg=None):
         self.servers = {}
         self.status = {}
+        self.specs = {}
+        self._lock = threading.Lock()
+        if servers_cfg is not None:
+            self.sync(servers_cfg)
+
+    def sync_in_background(self, servers_cfg, restart=()):
+        """Start or update servers without holding up the caller; status
+        shows "starting" until each one is ready."""
         for name, spec in (servers_cfg or {}).items():
-            if spec.get("enabled") is False:
-                self.status[name] = {"state": "disabled", "tools": 0}
-                continue
-            s = MCPServer(name, spec)
-            try:
-                s.start()
-                self.servers[name] = s
-                self.status[name] = {"state": "ready", "tools": len(s.tools)}
-            except Exception as e:
-                s.stop()
-                self.status[name] = {"state": "error", "tools": 0,
-                                     "error": str(e)[:300]}
+            if spec.get("enabled") is not False and name not in self.servers:
+                self.status.setdefault(name, {"state": "starting", "tools": 0})
+        t = threading.Thread(target=self.sync, args=(servers_cfg, restart), name="mcp-sync", daemon=True)
+        t.start()
+        return t
+
+    @staticmethod
+    def _key(spec):
+        return json.dumps({k: spec.get(k) for k in ("command", "args", "env")}, sort_keys=True)
+
+    def _start_one(self, name, spec):
+        s = MCPServer(name, spec)
+        try:
+            s.start()
+            return name, s, {"state": "ready", "tools": len(s.tools)}
+        except Exception as e:
+            s.stop()
+            return name, None, {"state": "error", "tools": 0, "error": str(e)[:300]}
+
+    def sync(self, servers_cfg, restart=()):
+        """Make the running servers match servers_cfg. Names in `restart` are
+        restarted even when their configuration did not change."""
+        servers_cfg = servers_cfg or {}
+        with self._lock:
+            to_start = []
+            for name in list(self.servers):
+                spec = servers_cfg.get(name)
+                if spec is None or spec.get("enabled") is False or name in restart or \
+                        self._key(spec) != self._key(self.specs.get(name) or {}):
+                    self.servers.pop(name).stop()
+                    self.specs.pop(name, None)
+            for name in list(self.status):
+                if name not in servers_cfg:
+                    self.status.pop(name, None)
+            for name, spec in servers_cfg.items():
+                if spec.get("enabled") is False:
+                    self.status[name] = {"state": "disabled", "tools": 0}
+                    continue
+                if name not in self.servers:
+                    to_start.append((name, spec))
+                    self.status[name] = {"state": "starting", "tools": 0}
+            threads, results = [], []
+            for name, spec in to_start:
+                t = threading.Thread(target=lambda n=name, sp=spec: results.append(self._start_one(n, sp)), daemon=True)
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join()
+            for name, server, st in results:
+                if server is not None:
+                    self.servers[name] = server
+                    self.specs[name] = dict(servers_cfg[name])
+                self.status[name] = st
+        return self.status
+
+    def restart(self, name, servers_cfg):
+        return self.sync(servers_cfg, restart=(name,))
+
+    def tool_annotations(self, flat_name):
+        """MCP tool annotations (readOnlyHint, destructiveHint, …) for approvals."""
+        if SEP not in flat_name:
+            return {}
+        srv, tool = flat_name.split(SEP, 1)
+        s = self.servers.get(srv)
+        for t in (s.tools if s else []):
+            if t.get("name") == tool:
+                return t.get("annotations") or {}
+        return {}
 
     def openai_tools(self, allow=None):
         """Tool definitions in OpenAI function-calling shape."""
         out = []
-        for name, s in self.servers.items():
+        for name, s in list(self.servers.items()):   # a sync may be adding servers right now
             for t in s.tools:
                 flat = name + SEP + t["name"]
                 if allow and flat not in allow:
@@ -202,6 +353,9 @@ class MCPHost:
         s = self.servers.get(srv)
         if not s:
             return "no such MCP server: %s" % srv, True
+        if not s.alive:
+            self.status[srv] = {"state": "error", "tools": 0, "error": s._dead or "server exited"}
+            return "MCP server %s is not running (%s); restart it on the MCP screen" % (srv, s._dead or "exited"), True
         try:
             res = s.call(tool, args)
         except Exception as e:
@@ -220,5 +374,8 @@ class MCPHost:
         return text, bool(res.get("isError"))
 
     def stop_all(self):
-        for s in self.servers.values():
-            s.stop()
+        with self._lock:
+            for s in self.servers.values():
+                s.stop()
+            self.servers.clear()
+            self.specs.clear()
