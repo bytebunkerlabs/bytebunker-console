@@ -3058,7 +3058,7 @@
     };
     cell("Output", e.gen_tps != null ? e.gen_tps.toFixed(1) + " tok/s" : "—",
       "prompt " + (e.prompt_tps != null ? fmtCount(e.prompt_tps) + " tok/s" : "—"), rkSpark(hist.gen_tps, null, null, 10));
-    cell("Requests", (e.running || 0) + " running", (e.waiting || 0) + " waiting");
+    cell("Requests", (e.running || 0) + " running", (e.waiting || 0) + " waiting" + (e.e2e_avg != null ? " · " + e.e2e_avg.toFixed(1) + " s each" : ""));
     const kv = rkEl("div", "rk-stack");
     const kb = rkEl("b", "kv");
     kb.style.width = Math.min(100, e.kv_pct || 0) + "%";
@@ -3066,7 +3066,12 @@
     cell("KV cache", fmtPct(e.kv_pct), e.kv_tokens ? "of " + fmtCount(e.kv_tokens) + " tokens" : "", kv);
     cell("First token", e.ttft_p50 != null ? e.ttft_p50.toFixed(2) + " s" : "—",
       e.ttft_p95 != null ? "p95 " + e.ttft_p95.toFixed(2) + " s, last minute" : "no requests in the last minute");
-    cell("Per token", e.itl_ms != null ? Math.round(e.itl_ms) + " ms" : "—", e.e2e_avg != null ? e.e2e_avg.toFixed(1) + " s per request" : "");
+    // one decode step can emit several tokens (speculative decoding: MTP,
+    // EAGLE), so the step's latency is not a per-token latency
+    const tps = e.tokens_per_step;
+    cell("Decode step", e.itl_ms != null ? Math.round(e.itl_ms) + " ms" : "—",
+      tps ? tps.toFixed(1) + " tokens a step" + (e.spec_accept_pct != null ? " · " + Math.round(e.spec_accept_pct) + "% of drafts kept" : "") + (e.spec_window === "start" ? " (since start)" : "")
+        : e.itl_ms != null ? "one token a step" : "");
     const hit = e.prefix_hit_pct != null ? e.prefix_hit_pct : (e.prefix_queries ? (100 * (e.prefix_hits || 0)) / e.prefix_queries : null);
     cell("Prefix cache", fmtPct(hit), e.prefix_hit_pct != null ? "hits, last minute" : e.prefix_queries ? "hits since start" : "");
     cell("Served", fmtCount(e.requests_ok) + " requests",
