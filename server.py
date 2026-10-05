@@ -58,6 +58,7 @@ import instance as instancemod
 import events as eventsmod
 import runs as runsmod
 import sessions as sessmod
+import upstream as upstreammod
 from version import VERSION
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -168,32 +169,6 @@ def caps_for(model_id):
         merged.update(table[max(hits, key=len)])
         return merged
     return dict(CAPS_FALLBACK)
-
-
-def upstream_message(detail):
-    """The sentence inside an upstream error body.
-
-    A proxy chain wraps errors in envelopes — litellm puts vLLM's message
-    inside {"error": {"message": ...}} and the console used to wrap that
-    again — so the browser ended up rendering 400 characters of escaped JSON.
-    Peel the envelopes; hand back the original text if they don't parse."""
-    obj = detail
-    for _ in range(3):
-        if isinstance(obj, str):
-            try:
-                obj = json.loads(obj)
-            except ValueError:
-                break
-        if isinstance(obj, dict):
-            inner = obj.get("error", obj.get("message", obj.get("detail")))
-            if isinstance(inner, dict):
-                inner = inner.get("message")
-            if not isinstance(inner, str):
-                break
-            obj = inner
-            continue
-        break
-    return obj if isinstance(obj, str) else detail
 
 
 def load_config():
@@ -371,32 +346,7 @@ def save_upload(session, name, data):
             "url": "/api/uploads/%s/%s" % (sess, os.path.basename(path))}
 
 
-def trace_safe(payload):
-    """The request as logged: image data URLs replaced by their size, so a
-    screenshot does not become 300 KB of base64 in every trace line."""
-    try:
-        msgs = payload.get("messages")
-        if not isinstance(msgs, list):
-            return payload
-        out = dict(payload)
-        new_msgs = []
-        for m in msgs:
-            c = m.get("content") if isinstance(m, dict) else None
-            if isinstance(c, list):
-                parts = []
-                for part in c:
-                    if isinstance(part, dict) and part.get("type") == "image_url":
-                        url = str((part.get("image_url") or {}).get("url") or "")
-                        if url.startswith("data:"):
-                            head = url.split(",", 1)[0]
-                            part = {"type": "image_url", "image_url": {"url": "%s,<%d bytes>" % (head, len(url))}}
-                    parts.append(part)
-                m = dict(m, content=parts)
-            new_msgs.append(m)
-        out["messages"] = new_msgs
-        return out
-    except Exception:   # noqa: BLE001 - logging must never break the chat
-        return payload
+trace_safe = upstreammod.trace_safe         # image data URLs logged as their size
 
 
 # ------------------------------------------------------------------ jobs --
@@ -405,12 +355,6 @@ def trace_safe(payload):
 # to the agent harness. The scheduler thread starts with the server.
 JOBS = jobmod.JobStore(DATA)
 SCHED = None
-
-
-def upstream_json(path, payload, timeout=900):
-    req = upstream_request(path, payload, "POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
 
 
 def last_used_model():
@@ -995,27 +939,8 @@ def netcheck(fresh=False):
 
 # ---------------------------------------------------------------- upstream --
 def upstream_request(path, payload=None, method="GET", model=None, gateway=None):
-    """A request to the gateway that serves `model` (or the payload's model;
-    'id@gateway' pins one explicitly). No model → the first enabled gateway.
-    Callers that may retry resolve once and pass `gateway` so a pin holds."""
-    gw = gateway
-    if gw is None:
-        want = model or (payload.get("model") if isinstance(payload, dict) else None)
-        if want:
-            mid, gw = GW.resolve(want)
-            if isinstance(payload, dict) and payload.get("model") != mid:
-                payload["model"] = mid
-        else:
-            gws = GW.gateways()
-            gw = gws[0] if gws else None
-    if gw is None:
-        raise RuntimeError("no gateway configured: add one on the Gateways screen")
-    url = gw["url"].rstrip("/") + path
-    headers = {"Content-Type": "application/json"}
-    if gw.get("key"):
-        headers["Authorization"] = "Bearer " + gw["key"]
-    data = json.dumps(payload).encode() if payload is not None else None
-    return urllib.request.Request(url, data=data, headers=headers, method=method)
+    """A request to the gateway that serves the model (see upstream.request)."""
+    return upstreammod.request(GW, path, payload, method, model, gateway)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2396,52 +2321,26 @@ class Handler(BaseHTTPRequestHandler):
                            key="mcp-install:" + name)
 
     # ---- streaming chat proxy ----
-    RETRY_STRIP = ("reasoning_effort", "top_k", "repetition_penalty", "stream_options")
-
     def _chat(self, payload):
         if not isinstance(payload, dict):
             self._json({"error": "expected object"}, 400)
             return
-        payload["stream"] = True
-        payload.setdefault("stream_options", {"include_usage": True})
-        # who this request belongs to, for the trace — headers, so nothing
+        # who this request belongs to, for the trace: headers, so nothing
         # extra travels upstream
         tid = TRACE.new_id()
         who = {"id": tid, "session": self.headers.get("X-BB-Session"),
                "turn": self.headers.get("X-BB-Turn"),
                "purpose": self.headers.get("X-BB-Purpose") or "chat"}
         started = time.time()
-
-        mid, gw = GW.resolve(payload.get("model") or "")
-        payload["model"] = mid
-        who["gateway"] = gw["name"] if gw else None
-
-        def attempt(p):
-            req = upstream_request("/chat/completions", p, "POST", gateway=gw)
-            return urllib.request.urlopen(req, timeout=600)
-
         try:
-            try:
-                resp = attempt(payload)
-            except urllib.error.HTTPError as e:
-                detail = e.read().decode("utf-8", "replace")
-                # Pure-OpenAI upstreams reject vLLM extras; strip and retry once.
-                if e.code == 400 and any(k in detail for k in self.RETRY_STRIP):
-                    for k in self.RETRY_STRIP:
-                        payload.pop(k, None)
-                    resp = attempt(payload)
-                else:
-                    msg = upstream_message(detail)[:1000]
-                    TRACE.log("chat", status=e.code, request=trace_safe(payload), response=None, error=msg,
-                              ms=int((time.time() - started) * 1000), **who)
-                    self._json({"error": msg}, e.code)
-                    return
-        except Exception as e:
-            TRACE.log("chat", status=502, request=trace_safe(payload), response=None, error=str(e)[:500],
+            resp, gw = upstreammod.open_chat(GW, payload)
+        except upstreammod.UpstreamError as e:
+            who["gateway"] = e.gateway["name"] if e.gateway else None
+            TRACE.log("chat", status=e.status, request=trace_safe(payload), response=None, error=e.message[:1000],
                       ms=int((time.time() - started) * 1000), **who)
-            self._json({"error": str(e)}, 502)
+            self._json({"error": e.message}, e.status)
             return
-
+        who["gateway"] = gw["name"] if gw else None
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -2450,31 +2349,12 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.end_headers()
         cap = StreamCapture()
-        # Forward raw bytes as they arrive — the client parses SSE framing.
-        # (A readline-per-event loop holds each event's terminating blank line
-        # hostage until the NEXT event arrives: the stream renders one token
-        # late, permanently.) read1 returns whatever the socket has.
+
+        def write(chunk):
+            self.wfile.write(chunk)
+            self.wfile.flush()
         try:
-            try:
-                while True:
-                    chunk = resp.read1(65536)
-                    if not chunk:
-                        break
-                    cap.feed(chunk)
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                cap.error = cap.error or "client disconnected"  # user hit Stop, or left
-            except Exception as e:
-                # upstream died mid-stream: without this, the client sees a
-                # clean EOF and silently renders a truncated reply as complete
-                cap.error = "upstream stream failed: " + str(e)[:200]
-                try:
-                    msg = json.dumps({"error": cap.error})
-                    self.wfile.write(("data: " + msg + "\n\n").encode())
-                    self.wfile.flush()
-                except OSError:
-                    pass
+            upstreammod.relay(resp, write, cap)
         finally:
             resp.close()
             TRACE.log("chat", status=200, request=trace_safe(payload), response=cap.result(started),

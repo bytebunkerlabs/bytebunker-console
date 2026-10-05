@@ -18,6 +18,7 @@ script is empty, echoes the last user message). A reply can carry:
   delay                        seconds before the first byte (time to first token)
   stall                        seconds of silence after the first delta (a buffered tool call)
   chunk                        characters per delta (default 4)
+  cut                          close the stream after this many deltas, mid-reply
   usage                        override {"prompt_tokens", "completion_tokens"}
 Streaming honours stream_options.include_usage like vLLM does.
 
@@ -201,8 +202,15 @@ class FakeEngine:
         model = body.get("model")
         size = int(reply.get("chunk") or 4)
         stalled = [False]
+        sent = [0]
+
+        class Cut(Exception):
+            pass
 
         def send(delta=None, finish=None, usage=None, choices=True):
+            if reply.get("cut") is not None and sent[0] >= int(reply["cut"]):
+                raise Cut()
+            sent[0] += 1
             obj = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()), "model": model,
                    "choices": [] if not choices else [{"index": 0, "delta": delta or {}, "finish_reason": finish}]}
             if usage is not None:
@@ -240,7 +248,7 @@ class FakeEngine:
                 self._usage(body, reply)
             handler.wfile.write(b"data: [DONE]\n\n")
             handler.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, Cut):
             pass
         finally:
             with self._lock:

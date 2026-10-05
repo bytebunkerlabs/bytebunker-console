@@ -130,6 +130,7 @@ class StreamCapture:
         self.chunks = 0
         self.first_at = None
         self.error = None
+        self.done = False        # saw [DONE]
 
     def feed(self, chunk):
         self.buf += chunk
@@ -140,6 +141,7 @@ class StreamCapture:
                 continue
             payload = line[5:].strip()
             if payload == b"[DONE]":
+                self.done = True
                 continue
             try:
                 obj = json.loads(payload)
