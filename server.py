@@ -1028,8 +1028,9 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path):
         if path == "/":
             path = "/index.html"
+        root = os.path.realpath(PUBLIC)
         fs = os.path.realpath(os.path.join(PUBLIC, path.lstrip("/")))
-        if not fs.startswith(os.path.realpath(PUBLIC)) or not os.path.isfile(fs):
+        if os.path.commonpath([fs, root]) != root or not os.path.isfile(fs):
             self._json({"error": "not found"}, 404)
             return
         ctype = {
@@ -1037,6 +1038,8 @@ class Handler(BaseHTTPRequestHandler):
             ".css": "text/css",
             ".js": "text/javascript",
             ".svg": "image/svg+xml",
+            ".woff2": "font/woff2",
+            ".txt": "text/plain; charset=utf-8",
         }.get(os.path.splitext(fs)[1], "application/octet-stream")
         with open(fs, "rb") as f:
             body = f.read()

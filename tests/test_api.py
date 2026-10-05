@@ -220,6 +220,34 @@ class ApiTest(unittest.TestCase):
         frames = self.srv.sse("/api/events?after=soon", timeout=2)
         self.assertEqual(frames, [])          # starts at now: nothing new yet, no error
 
+    def test_the_page_loads_nothing_from_the_internet(self):
+        st, html = self.srv.request("GET", "/")
+        self.assertEqual(st, 200)
+        st, css = self.srv.request("GET", "/console.css")
+        for text in (html, css):
+            text = text.decode() if isinstance(text, bytes) else str(text)
+            self.assertNotRegex(text, r"(src|href)=[\"']https?://|url\(['\"]?https?://|@import")
+        c = http.client.HTTPConnection("127.0.0.1", self.srv.port, timeout=10)
+        c.request("GET", "/fonts/Geist-Variable.woff2", headers={"Host": "127.0.0.1:%d" % self.srv.port})
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+        self.assertEqual((r.status, r.getheader("Content-Type")), (200, "font/woff2"))
+        self.assertEqual(body[:4], b"wOF2")
+        # class display rules once overrode the hidden attribute: Video studio, the
+        # first-run card and Stop all showed when the code had hidden them
+        css = css.decode() if isinstance(css, bytes) else str(css)
+        self.assertIn("[hidden]{display:none !important}", css.replace(" ", ""))
+
+    def test_static_files_stay_inside_public(self):
+        for path in ("/../server.py", "/%2e%2e/server.py", "/fonts/../../config.json"):
+            c = http.client.HTTPConnection("127.0.0.1", self.srv.port, timeout=10)
+            c.request("GET", path, headers={"Host": "127.0.0.1:%d" % self.srv.port})
+            r = c.getresponse()
+            r.read()
+            c.close()
+            self.assertEqual(r.status, 404, path)
+
     def test_post_needs_json(self):
         st, _ = self.srv.request("POST", "/api/sessions", None, headers={"Content-Type": "text/plain"})
         self.assertEqual(st, 415)

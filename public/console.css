@@ -1,3 +1,10 @@
+/* Geist and Geist Mono (Vercel, SIL Open Font License 1.1: fonts/OFL.txt),
+   bundled: the app loads nothing from the internet to draw its text */
+@font-face{font-family:'Geist';src:url('fonts/Geist-Variable.woff2') format('woff2');font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:'Geist Mono';src:url('fonts/GeistMono-Variable.woff2') format('woff2');font-weight:100 900;font-style:normal;font-display:swap}
+/* the hidden attribute always hides: a display rule on a class must not show
+   what the code hid (it showed Video studio, the first-run card and Stop) */
+[hidden]{display:none !important}
 /* ByteBunker Console — translated from the Claude Design canvas.
    Palette and metrics are the design's own; light/dark via CSS vars. */
 
@@ -389,7 +396,7 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 /* cells wrap and stretch to fill the last row; their right and bottom
    rules sit under the container's clip on the outer edges */
 .rk-summary{display:flex;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;margin:4px 0 14px}
-.rk-summary[hidden],.netcheck[hidden]{display:none}
+
 .rk-summary>div{flex:1 1 150px;margin:0 -1px -1px 0;border-right:1px solid var(--soft);border-bottom:1px solid var(--soft);padding:12px 15px;display:flex;flex-direction:column;gap:3px;min-width:0}
 .rk-summary .v{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:20px;font-weight:600;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rk-summary .s{font-size:11.5px;color:var(--muted)}
