@@ -385,8 +385,11 @@ WireGuard) works the same way.
 | `agents` | *(disabled)* | harness launcher: `enabled`, `ssh` (worker host; `""` = local, not isolated), `dir` (harness checkout), `python`, `script` |
 | `model_capabilities` | *(built-in table)* | per-model overrides keyed by a substring of the model id: `ctx` (the window the engine *serves*, `--max-model-len`), `tools`, `effort`, `ctk`, `strip_reasoning` |
 
-State lives in `data/` — `sessions.json`, `usage.jsonl` and `archive/`, plain
-files on the host, all gitignored.
+State lives in `data/`: `sessions/` (one file per conversation plus an
+index), `runs/` (each run's event log), `usage.jsonl`, `traces/` and
+`archive/`, plain files on the host, all gitignored. An older `sessions.json`
+is split into `sessions/` on first start and kept as
+`sessions.json.migrated-<time>`.
 
 ---
 

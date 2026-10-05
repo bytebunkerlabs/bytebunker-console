@@ -51,6 +51,19 @@ servers = json.loads(get("/api/tools")[1]).get("servers", {})
 checks.append(("jobs MCP server via --mcp", (servers.get("jobs") or {}).get("state") == "ready"))
 call = post("/api/tool-call", {"name": "jobs__job_list", "arguments": {}})
 checks.append(("jobs tool calls back", call.get("isError") is False))
+hello = json.loads(get("/api/hello")[1])
+checks.append(("hello", hello.get("service") == "bytebunker" and bool(hello.get("pid"))))
+post("/api/sessions", {"id": "s-smoke", "title": "smoke", "updated": int(time.time() * 1000),
+                       "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]})
+rows = json.loads(get("/api/sessions")[1])
+one = json.loads(get("/api/sessions?id=s-smoke")[1])
+checks.append(("sessions: list + one", any(r.get("id") == "s-smoke" and "messages" not in r for r in rows)
+               and len(one.get("messages") or []) == 2))
+with urllib.request.urlopen(BASE + "/api/events?topics=sessions&after=0", timeout=10) as r:
+    frame = b""
+    while not frame.endswith(b"\n\n") or b"data:" not in frame:
+        frame += r.readline()
+checks.append(("event stream", b'"s-smoke"' in frame))
 gws = post("/api/gateways", {"action": "add", "url": "127.0.0.1:9", "name": "unreachable"})
 checks.append(("gateway add + probe", gws.get("ok") is True))
 post("/api/gateways", {"action": "remove", "name": "unreachable"})

@@ -1019,7 +1019,11 @@
               body: JSON.stringify({ name: c.name, arguments: args }),
             })).json();
           } catch (e) { out = { content: "console could not reach the tool: " + e.message, isError: true }; }
-          bot.toolUse[bot.toolUse.length - 1].result = out.content;
+          // the model gets 20k of it and the screen shows 20k: storing all of it
+          // made one session 45 MB, re-sent and rewritten after every turn
+          const full = String(out.content);
+          bot.toolUse[bot.toolUse.length - 1].result = full.length > 65536
+            ? full.slice(0, 65536) + "\n\u2026[stored copy truncated: " + full.length + " characters in total]" : full;
           bot.toolUse[bot.toolUse.length - 1].error = !!out.isError;
           const text = String(out.content).slice(0, 20000);
           hopRec.results.push({ id: c.id, content: text });
@@ -1478,15 +1482,22 @@
         if (s.id === state.session) newChat();
         renderSessions();
       };
-      r.onclick = () => {
+      r.onclick = async () => {
+        // the list is summaries; the messages come with the one session
+        let full = null;
+        try {
+          const res = await fetch("/api/sessions?id=" + encodeURIComponent(s.id));
+          if (res.ok) full = await res.json();
+        } catch (e) {}
+        if (!full) { alert("This session could not be opened: the server did not return it."); renderSessions(); return; }
         state.session = s.id;
-        state.messages = (s.messages || []).map((m) => ({ ...m }));
+        state.messages = (full.messages || []).map((m) => ({ ...m }));
         state.ctxUsed = null;
         state.calib = null;
-        setActiveSkills(s.activeSkills || []);
-        if (s.model && state.models.includes(s.model)) {
-          state.model = s.model;
-          $("model-select").value = s.model;
+        setActiveSkills(full.activeSkills || []);
+        if (full.model && state.models.includes(full.model)) {
+          state.model = full.model;
+          $("model-select").value = full.model;
           servingLine();
         }
         go("playground");

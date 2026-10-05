@@ -16,7 +16,12 @@ API:
   POST /api/chat             proxied streaming /v1/chat/completions (SSE)
   GET  /api/cluster          every node from every rack monitor (?history=N samples)
   GET  /api/monitors         configured monitors  |  POST add/update/toggle/remove/test/discover
-  GET  /api/sessions         list sessions  |  POST save  |  DELETE ?id=
+  GET  /api/sessions         session summaries, newest first; ?id= one session in full
+                             |  POST save  |  DELETE ?id=
+  GET  /api/events           every event as SSE (?topics=a,b&after=N, or Last-Event-ID)
+  GET  /api/runs             runs, newest first (?kind=)  |  /api/runs/<id>/events  SSE replay + live
+  POST /api/runs/<id>/cancel
+  GET  /api/hello            {service, version, pid}: how bb and the app find this server
   POST /api/archive          file away compressed turns  |  GET /api/archive/<name>
   POST /api/rate             thumbs up/down on a turn, into the trace log
   GET  /api/traces           trace log stats  |  GET /api/export?...  training JSONL
@@ -50,6 +55,9 @@ import jobs as jobmod
 import gateways as gwmod
 import monitors as monmod
 import instance as instancemod
+import events as eventsmod
+import runs as runsmod
+import sessions as sessmod
 from version import VERSION
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +71,11 @@ os.makedirs(DATA, exist_ok=True)
 # Every model request, tool run, rating and archive, append-only, forever:
 # data/traces/<day>.jsonl (gzipped after the day ends). See traces.py.
 TRACE = TraceLog(DATA)
+# One ordered stream of everything that happens (GET /api/events), the runs
+# that outlive the request that started them, and one file per session.
+BUS = eventsmod.EventBus(runs_dir=os.path.join(DATA, "runs"))
+RUNS = runsmod.RunRegistry(BUS, os.path.join(DATA, "runs", "index.jsonl"))
+SESSIONS = sessmod.SessionStore(os.path.join(DATA, "sessions"), legacy_path=os.path.join(DATA, "sessions.json"))
 
 DEFAULT_CONFIG = {
     "bind": "127.0.0.1",
@@ -661,24 +674,17 @@ def archive_markdown(rec):
     return "\n".join(out)
 
 
-# ---------------------------------------------------------------- sessions --
-def _sessions_path():
-    return os.path.join(DATA, "sessions.json")
-
-
-def read_sessions():
+def _int(v, default):
     try:
-        with open(_sessions_path()) as f:
-            return json.load(f)
-    except Exception:
-        return []
+        return int(v)
+    except (TypeError, ValueError):
+        return default
 
 
-def write_sessions(sessions):
-    tmp = _sessions_path() + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(sessions, f)
-    os.replace(tmp, _sessions_path())
+# ---------------------------------------------------------------- sessions --
+def read_sessions():
+    """Every session in full, newest first (export only: it reads every file)."""
+    return SESSIONS.all()
 
 
 # ------------------------------------------------------------------- usage --
@@ -971,13 +977,84 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _sse_start(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        self.wfile.write(b"retry: 3000\n\n")
+        self.wfile.flush()
+
+    def _events(self, q):
+        """GET /api/events?topics=a,b&after=N  (or Last-Event-ID): the event
+        stream as SSE. Resumes after a dropped connection; a client that fell
+        behind the ring gets a "reset" event and should reload its state."""
+        topics = set(t for t in ",".join(q.get("topics") or []).split(",") if t) or None
+        # a reconnecting browser sends Last-Event-ID; it wins over the URL's after=
+        after = _int(self.headers.get("Last-Event-ID") or (q.get("after") or [""])[0], BUS.seq)
+        self._sse_start()
+        try:
+            while True:
+                evts, gap = BUS.since(after, topics)
+                if gap:
+                    after = BUS.seq
+                    self.wfile.write(b"id: %d\nevent: reset\ndata: {}\n\n" % after)
+                    evts = [e for e in evts if e["seq"] > after]
+                for e in evts:
+                    self.wfile.write(eventsmod.sse_frame(e))
+                    after = e["seq"]
+                self.wfile.flush()
+                if STOPPING.is_set():
+                    return
+                if not BUS.wait(after, 15):
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+        except OSError:
+            return
+
+    def _run_events(self, rid, after=0):
+        """GET /api/runs/<id>/events?after=N: one run from its start (or from
+        N), then live until it finishes. Any client can attach, any time."""
+        if not re.match(r"^[A-Za-z0-9_-]{1,80}$", rid or ""):
+            self._json({"error": "bad run id"}, 400)
+            return
+        run = RUNS.get(rid)
+        past = BUS.run_events(rid, after)
+        if run is None and not past:
+            self._json({"error": "no such run"}, 404)
+            return
+        self._sse_start()
+
+        def send(evts, after):
+            for e in evts:
+                if e["seq"] > after:
+                    self.wfile.write(eventsmod.sse_frame(e))
+                    after = e["seq"]
+            self.wfile.flush()
+            return after
+
+        try:
+            after = send(past, after)
+            while run is not None and not run.done_event.is_set() and not STOPPING.is_set():
+                BUS.wait(after, 15)
+                evts, gap = BUS.since(after, run=rid)
+                if gap:                                # fell out of the ring: the run's file has it all
+                    evts = BUS.run_events(rid, after)
+                if not evts:
+                    self.wfile.write(b": keepalive\n\n")
+                after = send(evts, after)
+            send(BUS.run_events(rid, after), after)    # through the finish event
+        except OSError:
+            return
+
     def _export(self, q):
         """Training data as JSONL: ?from=YYYY-MM-DD&to=...&model=substr
         &rated=up|any&errors=1&redact=0&source=all|traces|sessions
         &purpose=chat|compress. Streams; there is no telling the size first."""
         one = lambda k, d=None: (q.get(k) or [d])[0]
-        with _LOCK:
-            sessions = read_sessions()
+        sessions = read_sessions()
         gen = export_lines(
             TRACE, sessions, read_archives(),
             day_from=one("from"), day_to=one("to"), model=one("model"),
@@ -1182,7 +1259,26 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"servers": {}, "tools": [], "error": str(e)[:300]})
         elif path == "/api/sessions":
-            self._json(read_sessions())
+            # the list is summaries; one session in full with ?id=
+            sid = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id") or [None])[0]
+            if sid:
+                sess = SESSIONS.get(sid) if sessmod._ID.match(sid) else None
+                if sess is None:
+                    self._json({"error": "no such session"}, 404)
+                else:
+                    self._json(sess)
+            else:
+                self._json(SESSIONS.list())
+        elif path == "/api/events":
+            self._events(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
+        elif path == "/api/runs":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._json({"runs": RUNS.history(limit=max(1, min(1000, _int((q.get("limit") or [""])[0], 100))),
+                                             kind=(q.get("kind") or [None])[0]),
+                        "seq": BUS.seq})
+        elif path.startswith("/api/runs/") and path.endswith("/events"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._run_events(path[len("/api/runs/"):-len("/events")], _int((q.get("after") or [""])[0], 0))
         elif path.startswith("/api/archive/"):
             self._archive_get(path[len("/api/archive/"):])
         elif path == "/api/agents":
@@ -1299,12 +1395,13 @@ class Handler(BaseHTTPRequestHandler):
         self._drain()
         if u.path == "/api/sessions":
             sid = urllib.parse.parse_qs(u.query).get("id", [None])[0]
-            with _LOCK:
-                cur = read_sessions()
-                for gone in cur:
-                    if gone.get("id") == sid:
-                        TRACE.log("session_deleted", session=sid, record=gone)
-                write_sessions([s for s in cur if s.get("id") != sid])
+            if not sid or not sessmod._ID.match(sid):
+                self._json({"error": "bad session id"}, 400)
+                return
+            gone = SESSIONS.delete(sid)
+            if gone is not None:
+                TRACE.log("session_deleted", session=sid, record=gone)
+                BUS.publish("sessions", "deleted", {"id": sid})
             self._json({"ok": True})
         elif u.path.startswith("/api/video/"):
             base = (CFG.get("h3_url") or "").rstrip("/")
@@ -1328,6 +1425,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/video":  # multipart, not JSON — handled whole
             self._video_post()
+            return
+        if path.startswith("/api/runs/") and path.endswith("/cancel"):
+            self._drain()
+            rid = path[len("/api/runs/"):-len("/cancel")]
+            ok = RUNS.cancel(rid)
+            self._json({"ok": ok, "id": rid}, 200 if ok else 409)
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
@@ -1449,12 +1552,12 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
                 return
-            with _LOCK:
-                cur = [x for x in read_sessions() if x.get("id") != body.get("id")]
-                cur.insert(0, body)
-                for old in cur[200:]:   # aged out of the UI, not out of the record
-                    TRACE.log("session_evicted", session=old.get("id"), record=old)
-                write_sessions(cur[:200])
+            try:
+                summary = SESSIONS.put(body)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            BUS.publish("sessions", "updated", summary)
             self._json({"ok": True})
         elif path == "/api/usage-event":
             evt = sanitize_usage(body)
@@ -2339,6 +2442,7 @@ def serve(bind=None, port=None):
 
 INSTANCE = None
 STARTED = time.time()
+STOPPING = threading.Event()
 
 
 def app_version():
@@ -2346,7 +2450,11 @@ def app_version():
 
 
 def release_instance():
+    """The server is going away: end the event streams and free the data folder."""
     global INSTANCE
+    if not STOPPING.is_set():
+        STOPPING.set()
+        BUS.publish("system", "stopping")        # wakes every stream's wait
     if INSTANCE is not None:
         INSTANCE.release()
         INSTANCE = None
@@ -2361,7 +2469,12 @@ def main():
     print("ByteBunker Console on http://%s:%d  gateways: %s  jobs: %d" %
           (args.bind, srv.server_address[1], ", ".join(g["name"] for g in GW.gateways()) or "none",
            len(JOBS.jobs)))
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        release_instance()
 
 
 if __name__ == "__main__":
