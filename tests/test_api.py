@@ -237,7 +237,7 @@ class ApiTest(unittest.TestCase):
         # class display rules once overrode the hidden attribute: Video studio, the
         # first-run card and Stop all showed when the code had hidden them
         css = css.decode() if isinstance(css, bytes) else str(css)
-        self.assertIn("[hidden]{display:none !important}", css.replace(" ", ""))
+        self.assertIn("[hidden]{display:none!important}", css.replace(" ", ""))
 
     def test_static_files_stay_inside_public(self):
         for path in ("/../server.py", "/%2e%2e/server.py", "/fonts/../../config.json"):
