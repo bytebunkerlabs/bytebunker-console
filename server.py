@@ -138,6 +138,9 @@ DEFAULT_CAPS = {
     "inkling": {"tools": True,
                 "effort": ["none", "minimal", "low", "medium", "high", "xhigh"],
                 "strip_reasoning": True, "ctk": {}, "ctx": 262144},
+    # GLM-5.3-Flash on the two-Spark rack: served at 131072 (fp8 KV + MTP,
+    # 2026-10-05). Thinking model; tools yes; prior <think> stripped on resend.
+    "glm": {"ctx": 131072},
 }
 
 
