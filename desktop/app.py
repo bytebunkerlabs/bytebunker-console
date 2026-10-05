@@ -316,6 +316,16 @@ def main(argv=None):
     srv = server.serve("127.0.0.1", port)
     url = "http://127.0.0.1:%d/" % srv.server_address[1]
     claim_instance(home, srv.server_address[1])
+    if headless:
+        # launchd and systemd stop services with SIGTERM, and a process started
+        # in the background of a non-interactive shell inherits SIGINT ignored:
+        # make both end serve_forever through the cleanup below
+        import signal
+
+        def _stop(*_):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
     try:
         if smoke_out:
             threading.Thread(target=srv.serve_forever, name="http", daemon=True).start()
