@@ -181,13 +181,84 @@ def _default_identity():
     return {"user": user, "host": (platform.node() or "this machine").split(".")[0]}
 
 
-def load_config():
+# config.json has one writer, this server. Its shape is versioned: an older
+# file is migrated on start (the original kept beside it), and an edit made
+# by hand while the server runs is picked up before the next change, so a
+# save never undoes an edit it has not seen.
+CONFIG_VERSION = 2
+CONFIG_WARNINGS = []             # shown in the app: what happened to the file and where the original is
+_CFG_STAMP = [None]              # (mtime, size) of config.json as this server last read or wrote it
+_CFG_MIGRATED = []
+
+
+def _stamp(path):
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _set_aside(path, why):
+    """Keep a copy of config.json before it is replaced; returns its name."""
+    kept = "%s.%s-%s" % (path, why, time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        import shutil
+        shutil.copy2(path, kept)
+        os.chmod(kept, 0o600)
+    except OSError:
+        pass
+    return kept
+
+
+def _read_config_file(path):
+    """The file's object, or None when there is no file; ValueError when it is not valid JSON."""
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("it must hold one JSON object")
+    return data
+
+
+def migrate_config(cfg):
+    """Bring a config to CONFIG_VERSION, in order. Returns the steps taken."""
+    steps = []
+    v = cfg.get("config_version") or 1
+    if v < 2:
+        # 2 (0.3): model servers are gateways, not one upstream_url; the
+        # sparkDash era's keys (replaced by rack monitors in 0.2) go
+        gwmod.normalize(cfg)
+        for k in [k for k in cfg if k.startswith("sparkdash") or k in ("telemetry_source", "nodes")]:
+            cfg.pop(k, None)
+        steps.append("2: gateways")
+    cfg["config_version"] = CONFIG_VERSION
+    return steps
+
+
+def _fresh_config(disk):
     cfg = dict(DEFAULT_CONFIG)
     cfg["identity"] = _default_identity()
-    path = CONFIG_PATH
-    if os.path.exists(path):
-        with open(path) as f:
-            cfg.update(json.load(f))
+    cfg.update(disk or {})
+    return cfg
+
+
+def load_config():
+    try:
+        disk = _read_config_file(CONFIG_PATH)
+    except (OSError, ValueError) as e:
+        kept = _set_aside(CONFIG_PATH, "unreadable")
+        CONFIG_WARNINGS.append("config.json could not be read (%s), so the app started with defaults. "
+                               "Your file is kept as %s." % (str(e)[:160], os.path.basename(kept)))
+        disk = None
+    cfg = _fresh_config(disk)
+    if disk is not None and (disk.get("config_version") or 1) < CONFIG_VERSION:
+        _CFG_MIGRATED.extend(migrate_config(cfg))
+    else:
+        cfg["config_version"] = CONFIG_VERSION
+    # an unreadable file is already kept aside: the first save may replace it
+    _CFG_STAMP[0] = _stamp(CONFIG_PATH)
     return cfg
 
 
@@ -677,10 +748,17 @@ def mcp_reload(restart=(), wait=True):
 
 def save_config():
     """Persist CFG back to config.json, preserving formatting sanity. Written
-    atomically so a crash mid-write cannot leave the console unbootable."""
+    atomically so a crash mid-write cannot leave the console unbootable. A
+    file changed on disk since this server last read it (an edit it could
+    not load) is kept aside first, never silently replaced."""
     path = CONFIG_PATH
     tmp = path + ".tmp"
     with _LOCK:
+        st = _stamp(path)
+        if st is not None and st != _CFG_STAMP[0]:
+            kept = _set_aside(path, "replaced")
+            CONFIG_WARNINGS.append("config.json was changed outside the app in a way it could not read; "
+                                   "that version is kept as %s." % os.path.basename(kept))
         with open(tmp, "w") as f:
             json.dump(CFG, f, indent=2)
             f.write("\n")
@@ -689,6 +767,35 @@ def save_config():
         except OSError:
             pass
         os.replace(tmp, path)
+        _CFG_STAMP[0] = _stamp(path)
+
+
+def config_fresh():
+    """Pick up an edit made to config.json while the server runs. Called
+    before anything changes the config, so the change lands on top of the
+    edit. A file that does not parse (half-saved, or a typo) is left for
+    save_config to keep aside. Returns True when it reloaded."""
+    st = _stamp(CONFIG_PATH)
+    if st is None or st == _CFG_STAMP[0]:
+        return False
+    with _LOCK:
+        if _stamp(CONFIG_PATH) == _CFG_STAMP[0]:
+            return False
+        try:
+            disk = _read_config_file(CONFIG_PATH)
+        except (OSError, ValueError):
+            return False
+        fresh = _fresh_config(disk)
+        migrate_config(fresh)
+        for k in [k for k in CFG if k not in fresh]:
+            CFG.pop(k, None)
+        CFG.update(fresh)              # the same dict: every registry holding it sees the edit
+        _CFG_STAMP[0] = _stamp(CONFIG_PATH)
+    GW.at = 0                          # gateways may have changed: list models afresh
+    TRACE.log("config", action="reloaded", reason="edited outside the app")
+    BUS.publish("config", "reloaded")
+    mcp_reload(wait=False)
+    return True
 
 
 # ------------------------------------------------------------------ archive --
@@ -1303,6 +1410,7 @@ class Handler(BaseHTTPRequestHandler):
                         "started": round(STARTED, 3)})
             return
         if path == "/api/config":
+            config_fresh()
             self._json({
                 "identity": CFG.get("identity", {}),
                 "upstream": CFG.get("upstream_url", ""),
@@ -1315,6 +1423,7 @@ class Handler(BaseHTTPRequestHandler):
                 "mcp": bool(CFG.get("mcp_servers")),
                 "video": bool(CFG.get("h3_url")),
                 "netcheck": bool(CFG.get("netcheck_ssh")),
+                "warnings": CONFIG_WARNINGS[-5:],
             })
         elif path == "/api/models":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -1512,6 +1621,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         if not self._guard():
             return
+        config_fresh()
         u = urllib.parse.urlparse(self.path)
         self._drain()
         if u.path == "/api/sessions":
@@ -1543,6 +1653,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._guard():
             return
+        config_fresh()
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/video":  # multipart, not JSON — handled whole
             self._video_post()
@@ -2416,6 +2527,12 @@ def serve(bind=None, port=None):
         inst.release()
         raise
     INSTANCE = inst
+    if _CFG_MIGRATED and os.path.exists(CONFIG_PATH):
+        # an older config, brought up to date: the original stays beside it
+        kept = _set_aside(CONFIG_PATH, "before-v%d" % CONFIG_VERSION)
+        save_config()
+        TRACE.log("config", action="migrated", steps=list(_CFG_MIGRATED), kept=os.path.basename(kept))
+        del _CFG_MIGRATED[:]
     inst.publish(srv.server_address[1], version=app_version(), desktop=bool(os.environ.get("BYTEBUNKER_DESKTOP")))
     import atexit
     atexit.register(release_instance)

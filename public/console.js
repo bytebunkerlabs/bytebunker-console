@@ -1521,7 +1521,7 @@
   function onLive(topic, fn) { (live.handlers[topic] = live.handlers[topic] || []).push(fn); }
   function startLive() {
     if (live.es || typeof EventSource === "undefined") return;
-    const topics = ["jobs", "sessions", "runs", "usage"];
+    const topics = ["jobs", "sessions", "runs", "usage", "config"];
     const es = new EventSource("/api/events?topics=" + topics.join(","));
     live.es = es;
     const fire = (topic, evt) => { for (const fn of live.handlers[topic] || []) { try { fn(evt); } catch (e) { console.error(e); } } };
@@ -2010,7 +2010,18 @@
   async function refreshConfig() {
     try { state.cfg = await (await fetch("/api/config")).json(); } catch (e) {}
     updateFirstRun();
+    showWarnings();
   }
+  // what happened to config.json (migrated, unreadable, kept aside): once per message
+  const seenWarnings = new Set();
+  function showWarnings() {
+    const fresh = ((state.cfg && state.cfg.warnings) || []).filter((w) => !seenWarnings.has(w));
+    if (!fresh.length) return;
+    $("app-banner-text").textContent = fresh.join(" ");
+    $("app-banner").hidden = false;
+    $("app-banner-close").onclick = () => { fresh.forEach((w) => seenWarnings.add(w)); $("app-banner").hidden = true; };
+  }
+  onLive("config", () => refreshConfig());
   function updateFirstRun() {
     const none = !((state.cfg && state.cfg.gateways) || []).length;
     $("first-run").hidden = !none;
@@ -4120,6 +4131,7 @@
     $("who-host").textContent = state.cfg.identity.host || "";
     $("avatar").textContent = (state.cfg.identity.user || "B")[0].toUpperCase();
     updateFirstRun();
+    showWarnings();
     if (state.cfg.video) { $("nav-video").hidden = false; vidRefresh(); }
     if (state.cfg.netcheck) $("netcheck-card").hidden = false;
     await loadModels();

@@ -27,11 +27,12 @@ class HttpError(Exception):
 class Server:
     """python -c 'import server; server.serve(port=0).serve_forever()' on a temp folder."""
 
-    def __init__(self, data, config=None):
+    def __init__(self, data, config=None, keep_config=False):
         self.data = data
         self.cfg = os.path.join(data, "config.json")
-        with open(self.cfg, "w") as f:
-            json.dump(dict({"gateways": [], "monitors": []}, **(config or {})), f)
+        if not keep_config:
+            with open(self.cfg, "w") as f:
+                json.dump(dict({"gateways": [], "monitors": []}, **(config or {})), f)
         env = dict(os.environ, BYTEBUNKER_DATA=data, BYTEBUNKER_CONFIG=self.cfg, PYTHONDONTWRITEBYTECODE="1")
         code = ("import sys; sys.path.insert(0, %r); import server; "
                 "srv = server.serve('127.0.0.1', 0); srv.serve_forever()" % ROOT)

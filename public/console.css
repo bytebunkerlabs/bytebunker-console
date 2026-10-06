@@ -141,6 +141,7 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 @media (prefers-reduced-motion:reduce){.msg-status .dot{animation:none;opacity:.7}}
 .msg-err{color:var(--err);font-size:13px;white-space:pre-wrap}
 /* degraded, not failed: the turn still produced an answer */
+.app-banner{display:flex;gap:12px;align-items:baseline;justify-content:space-between;margin:10px 16px 0;flex:none}
 .msg-note{color:var(--warn,#b7791f);font-size:12.5px;line-height:1.45;padding:6px 10px;
   border-left:2px solid currentColor;background:color-mix(in srgb,currentColor 8%,transparent);
   border-radius:0 4px 4px 0}
