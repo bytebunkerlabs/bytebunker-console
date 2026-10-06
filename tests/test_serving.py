@@ -19,7 +19,7 @@ from fake_engine import FakeEngine  # noqa: E402
 
 SERVING = {"schema": 1, "recipe": "qwen3-8b", "platform": "dgx", "engine": "vllm", "served_name": "qwen3-8b",
            "model": "Qwen/Qwen3-8B", "port": 8888, "roles": ["chat", "tools", "reasoning"], "context": 40960,
-           "tools": True, "vision": False,
+           "tools": True, "vision": False, "gateway_name": "qwen-route",
            "dialect": {"thinking": "chat_template_kwargs.enable_thinking", "strip_reasoning": "1",
                        "effort": "low medium high", "min_max_tokens": "2048"}}
 
@@ -52,8 +52,9 @@ class FakeMonitor:
 class ServingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # a router that lists two routes, one of them really served
-        cls.eng = FakeEngine(models=[{"id": "qwen3-8b"}, {"id": "old-route"}]).start()
+        # a router that lists three routes: the served name, the name rack
+        # gateway gave its route, and a route to nothing
+        cls.eng = FakeEngine(models=[{"id": "qwen3-8b"}, {"id": "qwen-route"}, {"id": "old-route"}]).start()
         cls.mon = FakeMonitor()
         cls.data = tempfile.mkdtemp()
         cls.srv = Server(cls.data, {"gateways": [{"name": "router", "url": cls.eng.url, "key": "", "enabled": True,
@@ -81,6 +82,13 @@ class ServingTest(unittest.TestCase):
         self.assertEqual((caps["ctx"], caps["strip_reasoning"], caps["effort"], caps["thinking_switch"]),
                          (40960, True, ["low", "medium", "high"], "chat_template_kwargs.enable_thinking"))
         self.assertEqual((models["qwen3-8b"]["served"], models["old-route"]["served"]), (True, False))
+
+    def test_a_route_named_by_rack_gateway_is_the_served_model(self):
+        # LiteLLM lists GATEWAY_NAME (glm-5.3-flash), the engine serves another name (glm5.3-flash)
+        models = {m["id"]: m for m in self.srv.request("GET", "/api/models")[1]["data"]}
+        self.assertIs(models["qwen-route"]["served"], True)
+        self.assertEqual((models["qwen-route"]["caps"]["ctx"], models["qwen-route"]["caps"]["min_max_tokens"]),
+                         (40960, 2048))
 
     def test_effort_off_turns_thinking_off_and_a_level_turns_it_on(self):
         self.eng.script([{"content": "a"}, {"content": "b"}, {"content": "c"}])

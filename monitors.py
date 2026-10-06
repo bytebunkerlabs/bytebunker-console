@@ -192,14 +192,18 @@ class Monitors:
 
     def serving(self, max_age=300):
         """What dgx-serve says each node serves (rack up's record, the
-        monitor's serving block), by the name the engine serves it under.
+        monitor's serving block), by the name the engine serves it under and
+        by its route on a gateway (a router lists that name, not the engine's).
         From the last fetch only: a model's facts never wait on the network."""
         d = self.latest(max_age)
         out = {}
         for n in (d or {}).get("nodes") or []:
             s = n.get("serving")
-            if isinstance(s, dict) and (s.get("served_name") or s.get("model")):
-                out.setdefault(s.get("served_name") or s.get("model"), dict(s, node=n.get("name")))
+            if not isinstance(s, dict):
+                continue
+            for name in (s.get("served_name") or s.get("model"), s.get("gateway_name")):
+                if name:
+                    out.setdefault(name, dict(s, node=n.get("name")))
         return out
 
     def engine_stats(self):
