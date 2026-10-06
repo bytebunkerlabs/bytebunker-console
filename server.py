@@ -1764,6 +1764,7 @@ class Handler(BaseHTTPRequestHandler):
                 "video": bool(CFG.get("h3_url")),
                 "netcheck": bool(CFG.get("netcheck_ssh")),
                 "warnings": CONFIG_WARNINGS[-5:],
+                "features": CFG.get("features") or {},
             })
         elif path == "/api/models":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -2210,6 +2211,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 TRACE.log("settings", action="install_cli", written=res["written"], skipped=res["skipped"])
                 self._json(res)
+                return
+            if isinstance(body.get("features"), dict):
+                # server_runner: the Playground's turns run on the server (runner.py)
+                feats = CFG.setdefault("features", {})
+                for k, v in body["features"].items():
+                    if k in ("server_runner",):
+                        feats[k] = bool(v)
+                save_config()
+                BUS.publish("config", "features", feats)
+                self._json({"ok": True, "features": feats})
                 return
             ident = CFG.setdefault("identity", {})
             if "user" in body:

@@ -102,6 +102,10 @@ class FakeEngine:
                     return
                 if not self._auth_ok():
                     return self._json(401, {"error": {"message": "unauthorized"}})
+                if self.path.startswith("/_fake/requests"):   # what it was sent, for browser tests
+                    with engine._lock:
+                        reqs = [r["body"] for r in engine.requests if r["path"].rstrip("/").endswith("/chat/completions")]
+                    return self._json(200, reqs)
                 if self.path.rstrip("/").endswith("/v1/models"):
                     data = [dict({"object": "model", "owned_by": "vllm"}, **m) for m in engine.models]
                     return self._json(200, {"object": "list", "data": data})

@@ -1,0 +1,29 @@
+name: ui
+
+# The app in a real browser, against a real server with the fake engine:
+# journeys through Jobs, Agents, Sessions, Workflows, approvals and the
+# Playground, and the parity suite (the Playground's own loop and the
+# server runner must send the same requests and save the same sessions).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Playwright and Chromium
+        run: |
+          npm install --no-save playwright-core@1.62.0
+          npx playwright-core install --with-deps chromium
+      - name: Browser journeys and parity
+        run: bash tests/ui/run.sh

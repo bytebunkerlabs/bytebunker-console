@@ -6,3 +6,4 @@ desktop/.venv/
 desktop/build/
 desktop/dist/
 desktop/build.log
+node_modules/

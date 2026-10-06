@@ -362,10 +362,10 @@
 
         <div class="pgroup">
           <div class="prow">
-            <div class="head"><b style="font-weight:600">Reasoning effort</b><span class="val" id="effort-val">High</span></div>
-            <span class="hint">How long the model thinks before it answers. Sent only when the model supports it.</span>
-            <input type="range" id="effort" min="0" max="5" step="1" value="4">
-            <div class="scale"><span>None</span><span>Min</span><span>Low</span><span>Med</span><span>High</span><span>XHigh</span></div>
+            <div class="head"><b style="font-weight:600">Reasoning effort</b><span class="val" id="effort-val">Default</span></div>
+            <span class="hint">How long the model thinks before it answers, for models that offer it: each model's own nearest level is sent. Default sends nothing.</span>
+            <input type="range" id="effort" min="0" max="5" step="1" value="0">
+            <div class="scale"><span>Default</span><span>Off</span><span>Low</span><span>Med</span><span>High</span><span>Max</span></div>
           </div>
         </div>
 

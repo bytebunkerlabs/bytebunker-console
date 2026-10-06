@@ -4,8 +4,23 @@
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
-  const EFFORT = ["none", "minimal", "low", "medium", "high", "xhigh"];
-  const EFFORT_LABEL = ["None", "Min", "Low", "Medium", "High", "XHigh"];
+  // Effort as a person thinks of it; each model gets its own nearest level
+  // (effortFor). Default sends nothing. Messages saved before 0.3 carry an
+  // index into the old scale instead (OLD_EFFORT_LABEL).
+  const ABSTRACT_EFFORT = [null, "off", "low", "medium", "high", "max"];
+  const EFFORT_LABEL = ["Default", "Off", "Low", "Medium", "High", "Max"];
+  const OLD_EFFORT_LABEL = ["None", "Min", "Low", "Medium", "High", "XHigh"];
+  function effortFor(effort, caps) {        // runner.py effort_for, the same rules
+    const levels = (caps && caps.effort) || [];
+    if (!effort || !levels.length) return null;
+    if (levels.includes(effort)) return effort;
+    const near = { off: ["none", "minimal"], low: ["minimal"], medium: ["low", "high"], high: ["xhigh", "medium"], max: ["xhigh", "max", "high"] }[effort] || [];
+    return near.find((l) => levels.includes(l)) || null;
+  }
+  function effortLabel(e) {
+    if (typeof e === "number") return OLD_EFFORT_LABEL[e] || String(e);
+    return e ? e.charAt(0).toUpperCase() + e.slice(1) : "Default";
+  }
   // Seconds before the heartbeat stops saying "working" and starts saying
   // "this is longer than normal". Prefill is generous: a 100k-token prompt on
   // a two-node rack legitimately takes tens of seconds before the first token.
@@ -18,7 +33,7 @@
     models: [],
     model: null,
     params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 8192,
-              seed: 0, effort: 4, json: false, stops: "", sys: "",
+              seed: 0, effort: 0, json: false, stops: "", sys: "",
               autoCompress: true, maxHops: 40 },
     messages: [],           // {role:'user'|'bot', content, reasoning, meta, error}
     streaming: false,
@@ -136,7 +151,7 @@
       "    extra_body={",
       `        "top_k": ${P.topK},`,
       `        "repetition_penalty": ${P.rep},`,
-      P.effort !== 4 ? `        "reasoning_effort": "${EFFORT[P.effort]}",` : null,
+      effortFor(ABSTRACT_EFFORT[P.effort], capsFor(state.model)) ? `        "reasoning_effort": "${effortFor(ABSTRACT_EFFORT[P.effort], capsFor(state.model))}",` : null,
       "    },", ")", "",
       "for chunk in stream:",
       '    print(chunk.choices[0].delta.content or "", end="")',
@@ -290,7 +305,7 @@
     // provenance is stamped on the message at send time — the label must
     // not follow the slider after the fact
     lab.textContent =
-      (m.effort != null ? "Reasoning · " + EFFORT_LABEL[m.effort] : "Reasoning") +
+      (m.effort != null ? "Reasoning · " + effortLabel(m.effort) : "Reasoning") +
       " · " + (text.length > 1000 ? (text.length / 1000).toFixed(1) + "k" : text.length) + " chars";
     sum.appendChild(lab);
     sum.appendChild(copyBtn(() => text));
@@ -907,6 +922,7 @@
     if (atts.some((a) => a.kind === "image") && !capsFor(state.model).vision) {
       if (!confirm("The selected model is not marked as accepting images. Send anyway?")) return;
     }
+    if (serverRunner()) { await sendViaServer(text, atts); return; }
     await hydrateImages(state.messages);
     if (/^\/compress\b/i.test(text)) { await compress("manual"); return; }
     if (P.autoCompress) {
@@ -930,7 +946,7 @@
     // model + effort stamped now: the transcript renders provenance, not
     // whatever the controls happen to say later
     const bot = { role: "bot", content: "", reasoning: "", meta: "",
-                  model: state.model, effort: P.effort, turn: newTurnId(),
+                  model: state.model, effort: ABSTRACT_EFFORT[P.effort], turn: newTurnId(),
                   skills: state.activeSkills.slice(),
                   thinkOpen: true };   // watch it stream; collapsed on completion
     state.messages.push(user, bot);
@@ -951,8 +967,8 @@
     if (P.stops.trim()) body.stop = P.stops.split(",").map((s) => s.trim()).filter(Boolean);
     // Only send an effort the model actually accepts. DeepSeek's encoder
     // asserts on the value, so "low" is a 500, not a no-op.
-    const eff = EFFORT[P.effort];
-    if (P.effort !== 4 && (caps.effort || []).includes(eff)) body.reasoning_effort = eff;
+    const eff = effortFor(ABSTRACT_EFFORT[P.effort], caps);
+    if (eff) body.reasoning_effort = eff;
     // Thinking is off by default on vLLM's DeepSeek-V4 path and must be asked
     // for; other models ignore an empty object.
     if (caps.ctk && Object.keys(caps.ctk).length) body.chat_template_kwargs = caps.ctk;
@@ -1091,6 +1107,115 @@
     }).catch(() => {});
   }
 
+  /* ---------------- the Playground on the server (features.server_runner) ---------------- */
+  // The turn runs on the server (runner.py): this tab sends it, draws its
+  // events, and reloads the session the server saved. Closing the tab does
+  // not stop it; Stop does. A terminal's turn in the open session is drawn
+  // the same way.
+  function serverRunner() { return !!((state.cfg && state.cfg.features) || {}).server_runner; }
+  function stopTurn() {
+    if (state.turnRun) {
+      fetch("/api/runs/" + encodeURIComponent(state.turnRun) + "/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
+    } else if (state.abort) state.abort.abort();
+  }
+  function turnRequest(text, atts) {
+    const params = { temperature: P.temp, top_p: P.topP, top_k: P.topK, repetition_penalty: P.rep, max_tokens: P.maxTok };
+    if (P.seed) params.seed = P.seed;
+    if (P.json) params.json = true;
+    if (P.stops.trim()) params.stop = P.stops.split(",").map((x) => x.trim()).filter(Boolean);
+    return {
+      text, model: state.model, effort: ABSTRACT_EFFORT[P.effort], params,
+      attachments: atts.map((a) => { const o = Object.assign({}, a); delete o.dataURL; delete o.status; return o; }),
+      system: P.sys, skills: state.activeSkills.slice(), tools: state.toolsOn, max_hops: Math.max(1, P.maxHops | 0),
+      auto_compress: P.autoCompress, interactive: true,
+    };
+  }
+  async function sendViaServer(text, atts) {
+    if (!state.session) state.session = "s-" + Date.now().toString(36);
+    state.attachments = []; renderAttachChips(); autosizeInput();
+    const compressing = /^\/compress\b/i.test(text);
+    const url = "/api/sessions/" + encodeURIComponent(state.session) + (compressing ? "/compress" : "/turns");
+    let r;
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(compressing ? { model: state.model } : turnRequest(text, atts)) });
+      r = await res.json();
+      if (!res.ok || r.error) throw new Error(r.error || ("HTTP " + res.status));
+    } catch (e) {
+      state.messages.push({ role: "user", content: text, attachments: atts }, { role: "bot", content: "", model: state.model, error: "could not start the turn: " + e.message });
+      renderMessages();
+      return;
+    }
+    if (compressing) state.messages.push({ role: "bot", kind: "compress", content: "", model: state.model, notice: "compressing older messages into a summary…" });
+    else state.messages.push({ role: "user", content: text, attachments: atts },
+                             { role: "bot", content: "", reasoning: "", meta: "", model: state.model, effort: ABSTRACT_EFFORT[P.effort], skills: state.activeSkills.slice(), thinkOpen: true });
+    await followTurn(r.run, state.messages[state.messages.length - 1]);
+  }
+  // Draw one server-side turn into bot (or, attaching to a turn already
+  // going, into a bot made when its "turn" event arrives), then reload the
+  // session as the server saved it.
+  function followTurn(rid, bot) {
+    return new Promise((resolve) => {
+      state.streaming = true; state.turnRun = rid;
+      $("send-btn").classList.add("stop");
+      renderMessages();
+      let raf = 0;
+      const queue = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; renderMessages(true); }); };
+      const es = followRun(rid, (e) => {
+        const d = e.data || {};
+        if (e.type === "turn" && !bot) {
+          state.messages.push(Object.assign({}, d.user || { role: "user", content: "" }),
+                              bot = { role: "bot", content: "", reasoning: "", meta: "", model: d.model, thinkOpen: true });
+          renderMessages();
+          return;
+        }
+        if (!bot) return;
+        if (e.type === "turn") bot.turn = d.turn;
+        else if (e.type === "status") bot.status = d && d.text ? { text: d.text, slow: d.slow } : null;
+        else if (e.type === "delta") { if (d.reasoning) bot.reasoning = (bot.reasoning || "") + d.reasoning; if (d.content) bot.content = (bot.content || "") + d.content; }
+        else if (e.type === "notice") bot.notice = d.text;
+        else if (e.type === "compress") bot.notice = d.text;
+        else if (e.type === "tool_call") bot.toolUse = (bot.toolUse || []).concat([{ name: d.name, args: d.args || "{}", result: "running…", error: false }]);
+        else if (e.type === "tool_result") {
+          const t = (bot.toolUse || []).slice().reverse().find((x) => x.result === "running…" && x.name === d.name);
+          if (t) { t.result = d.content + (d.chars > (d.content || "").length ? "\n…" : ""); t.error = !!d.is_error; }
+        }
+        else if (e.type === "hop") bot.content = "";
+        else if (e.type === "approval") bot.status = { text: "waiting: " + d.tool + " asks before it runs", slow: false };
+        else if (e.type === "done") { Object.assign(bot, d.message || {}); bot.status = null; }
+        else if (e.type === "finished") {
+          bot.status = null;
+          if (d.state === "error" && !bot.error && d.error) bot.error = d.error;
+          state.streaming = false; state.turnRun = null;
+          $("send-btn").classList.remove("stop");
+          reloadSession().then(() => { servingLine(); resolve(); });
+          return;
+        }
+        else return;
+        queue();
+      });
+      state.turnStream = es;
+    });
+  }
+  async function reloadSession() {
+    if (!state.session) return renderMessages();
+    try {
+      const res = await fetch("/api/sessions?id=" + encodeURIComponent(state.session));
+      if (res.ok) {
+        const full = await res.json();
+        state.messages = (full.messages || []).map((m) => ({ ...m }));
+      }
+    } catch (e) {}
+    renderMessages();
+  }
+  // a turn already running in this session (a terminal's, another tab's): draw it
+  async function attachRunningTurn() {
+    if (!serverRunner() || state.streaming || !state.session) return;
+    let d = { runs: [] };
+    try { d = await (await fetch("/api/runs?kind=chat&limit=20")).json(); } catch (e) { return; }
+    const live = (d.runs || []).find((r) => (r.state === "running" || r.state === "queued") && (r.meta || {}).session === state.session);
+    if (live && !state.streaming) followTurn(live.id, null);
+  }
+
   /* ---------------- compression ---------------- */
   // The model writes a dense summary of the older part of the conversation,
   // the originals go to a file on the server (data/archive/), and the
@@ -1153,7 +1278,7 @@
 
     if (!state.session) state.session = "s-" + Date.now().toString(36);
     const tmp = { role: "bot", kind: "compress", content: "", reasoning: "", meta: "",
-                  model: state.model, effort: P.effort, thinkOpen: false, turn: newTurnId(),
+                  model: state.model, effort: ABSTRACT_EFFORT[P.effort], thinkOpen: false, turn: newTurnId(),
                   notice: (why === "auto" && estTokens
                             ? "Context is at ~" + estTokens.toLocaleString() + " of " + win.toLocaleString() + " tokens: "
                             : "") + "compressing " + old.length + " older messages into a summary…" };
@@ -1214,7 +1339,7 @@
   }
 
   $("send-btn").onclick = () => {
-    if (state.streaming) { state.abort && state.abort.abort(); return; }
+    if (state.streaming) { stopTurn(); return; }
     const el = $("input"); const v = el.value; el.value = ""; send(v);
   };
   $("input").onkeydown = (e) => {
@@ -1381,7 +1506,7 @@
   // conversation appends to the first one forever. A "new chat" is simply:
   // drop the transcript and forget the id, so the next save mints a fresh one.
   function newChat() {
-    if (state.streaming && state.abort) state.abort.abort();
+    if (state.streaming) stopTurn();
     state.messages = [];
     state.session = null;
     state.ctxUsed = null;
@@ -1513,6 +1638,7 @@
         }
         go("playground");
         renderMessages();
+        attachRunningTurn();
       };
       t.appendChild(r);
     }
@@ -1546,6 +1672,9 @@
   onLive("runs", (e) => {
     // a goal started elsewhere (another tab, a job, bb) shows up here
     if (state.screen === "agents" && !state.streaming && e.type === "started" && (e.data || {}).kind === "agents") attachAgentRun();
+    // a turn started elsewhere (bb, another tab) in the session open here
+    const d = e.data || {};
+    if (e.type === "started" && d.kind === "chat" && (d.meta || {}).session === state.session && !state.streaming) attachRunningTurn();
   });
 
   /* ---------------- models ---------------- */
@@ -2022,6 +2151,16 @@
     const addBtn = document.createElement("button"); addBtn.type = "button"; addBtn.className = "ghost-btn"; addBtn.textContent = "＋ New profile";
     addBtn.onclick = () => { addSlot.textContent = ""; addSlot.appendChild(profForm(null)); };
     pc.appendChild(addBtn); pc.appendChild(addSlot);
+    // where the Playground's turns run
+    const ce = card("Chats", "where the Playground's turns run");
+    const cl = document.createElement("label"); cl.style.cssText = "display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--muted)";
+    const cx = document.createElement("input"); cx.type = "checkbox"; cx.checked = serverRunner(); cx.id = "server-runner";
+    cl.appendChild(cx); cl.appendChild(document.createTextNode("Run them on the server (beta): a turn keeps going when the tab closes, the app and bb follow each other's turns live, and tools can ask before they run."));
+    cx.onchange = async () => {
+      try { await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ features: { server_runner: cx.checked } }) }); } catch (e) {}
+      await refreshConfig();
+    };
+    ce.appendChild(cl);
     // the terminal: bb runs on this same server; its chats show up in Sessions
     const cli = card("Command line", "bb: chat, agents and jobs from a terminal, on this same server");
     const crow = document.createElement("div"); crow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
