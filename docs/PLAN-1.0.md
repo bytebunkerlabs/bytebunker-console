@@ -18,7 +18,7 @@ Started 2026-10-05 on the owner's go. Work happens in phase order; dgx-serve (ph
 
 Decisions taken as recommended (the owner said "build it"): 5 (llama.cpp on Macs), 8 (no LiteLLM by default), 9 (private recipes to an overlay), 10 (tools catalog), 11 (no Linux desktop app), 12 (Video out of 1.0), 13 (support matrix), 14 (an engine on the agent worker allowed, labelled), 15 (a folder per recipe).
 
-Waiting for the owner: 1 (purge the transcript from history: a force-push), 2 (renaming the repo), 3 (licenses), 4 (the harness EULA), 6 (signing accounts), 7 (docs and get domains), to be planned together. On spark-1: `sudo loginctl enable-linger trickyfalcon` (then `rack up glm53-flash-keys --replace` installs the boot unit) and the drop-caches helper.
+Waiting for the owner: 1 (purge the transcript from history: a force-push), 2 (renaming the repo), 3 (licenses), 4 (the harness EULA), 6 (signing accounts), 7 (docs and get domains), to be planned together. On spark-1: `sudo loginctl enable-linger trickyfalcon`, then `rack up glm53-flash-keys` (it sees the recipe serving and only installs the boot unit, no restart), and the drop-caches helper.
 
 
 ## Context
