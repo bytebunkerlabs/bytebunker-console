@@ -3,230 +3,76 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How Agents Run</title>
-<meta name="description" content="Animated walkthrough of a ByteBunker goal: the console, the Sultan on the worker, containers spawned by podman, the socket to the gateway, the engines, results, panels, Malikah, and the stop path.">
+<title>How agents run</title>
 <style>
-:root { --bg:#FBFAF7; --side:#F4F2EC; --surface:#FFFFFF; --border:#E6E2D8; --fg:#171613; --muted:#6E6A61; --faint:#9A958B; --code:#F5F2EB; --accent:#3F8F5B; --warn:#B8801F; --err:#C4462F; --blue:#2F6F7E; --p1:#E9EEF4; --p2:#F3ECDF; --p3:#E7F1E6; --p4:#F4E6EE; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#131211; --side:#0E0D0C; --surface:#1A1917; --border:#2B2925; --fg:#F1EEE8; --muted:#948E84; --faint:#6B665E; --code:#1E1C1A; --accent:#5FBE83; --warn:#E0A94A; --err:#E2705A; --blue:#7FC0CF; --p1:#1c232d; --p2:#2a2419; --p3:#1b2a1d; --p4:#2a1f27; } }
-:root[data-theme="dark"] { --bg:#131211; --side:#0E0D0C; --surface:#1A1917; --border:#2B2925; --fg:#F1EEE8; --muted:#948E84; --faint:#6B665E; --code:#1E1C1A; --accent:#5FBE83; --warn:#E0A94A; --err:#E2705A; --blue:#7FC0CF; --p1:#1c232d; --p2:#2a2419; --p3:#1b2a1d; --p4:#2a1f27; }
-* { box-sizing:border-box }
-html, body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif }
-main { max-width:1180px; margin:0 auto; padding:22px 16px 60px }
-header { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:12px }
-h1 { font-size:1.35rem; margin:0; letter-spacing:-.01em } .sub { color:var(--muted); font-size:.9rem }
-.layout { display:grid; grid-template-columns: minmax(0, 1fr) 340px; gap:16px; align-items:start }
-@media (max-width: 900px) { .layout { grid-template-columns: 1fr } }
-.stage { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:10px; overflow:hidden }
-.stage svg { width:100%; height:auto; display:block; font-family: ui-sans-serif, system-ui, sans-serif }
-.panel { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px 16px; position:sticky; top:12px }
-.controls { display:flex; gap:8px; align-items:center; margin:0 0 10px; flex-wrap:wrap }
-button { font:inherit; font-size:.85rem; padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--fg); cursor:pointer }
-button:hover { background:var(--code) } button.primary { background:var(--accent); border-color:var(--accent); color:#fff }
-.stepno { font-size:.75rem; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); font-weight:600 }
-.title { font-size:1.05rem; font-weight:650; margin:4px 0 8px }
-.text { color:var(--fg); font-size:.93rem } .text p { margin:0 0 8px }
-code { font:.84em ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code); padding:1px 5px; border-radius:4px; word-break:break-word }
-pre { background:var(--code); border-radius:8px; padding:8px 10px; font-size:.78rem; line-height:1.45; overflow-x:auto; margin:6px 0 8px; white-space:pre-wrap }
-.steps { list-style:none; padding:0; margin:12px 0 0; display:flex; flex-direction:column; gap:3px; max-height:44vh; overflow:auto }
-.steps li { font-size:.84rem; color:var(--muted); padding:5px 8px; border-radius:7px; cursor:pointer; display:flex; gap:8px } .steps li span.n { color:var(--faint); font-family: ui-monospace, monospace; width:22px; flex:none }
-.steps li.on { background:var(--code); color:var(--fg) } .steps li:hover { background:var(--code) }
-.legend { display:flex; gap:14px; flex-wrap:wrap; font-size:.8rem; color:var(--muted); margin:10px 2px 0 }
-.legend i { display:inline-block; width:22px; height:3px; vertical-align:middle; margin-right:6px; border-radius:2px }
-.progress { height:3px; background:var(--border); border-radius:2px; margin:8px 0 12px; overflow:hidden } .progress div { height:100%; background:var(--accent); width:0; transition:width .4s }
-/* svg */
-text { fill:var(--fg); font-size:11px } text.t { font-weight:650; font-size:12px } text.m { fill:var(--muted); font-size:10px } text.tiny { fill:var(--faint); font-size:9px }
-.box { fill:var(--surface); stroke:var(--border); stroke-width:1 }
-.plane { stroke:none } .pl1 { fill:var(--p1) } .pl2 { fill:var(--p2) } .pl3 { fill:var(--p3) } .pl4 { fill:var(--p4) }
-.wire { fill:none; stroke:var(--faint); stroke-width:1.1; opacity:.55 }
-.dim { opacity:.28; transition:opacity .4s } .lit { opacity:1; transition:opacity .4s }
-.glow { filter: drop-shadow(0 0 6px var(--accent)) } .glow-blue { filter: drop-shadow(0 0 6px var(--blue)) } .glow-warn { filter: drop-shadow(0 0 6px var(--warn)) }
-.container { transition: opacity .5s, transform .5s; transform-origin:center; transform-box:fill-box }
-.container.hidden { opacity:0; transform:scale(.6) }
-.loop-arc { fill:none; stroke:var(--accent); stroke-width:2; stroke-dasharray:4 6; animation: spin 1.2s linear infinite; transform-origin:center; transform-box:fill-box }
-@keyframes spin { to { stroke-dashoffset:-20 } }
-.pulse { animation: pulse 1.6s ease-in-out infinite } @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.45 } }
-.blocked { stroke:var(--err); stroke-width:2; fill:none }
-@media (prefers-reduced-motion: reduce) { .loop-arc, .pulse { animation:none } }
+@font-face{font-family:'Geist';src:url('fonts/Geist-Variable.woff2') format('woff2');font-weight:100 900}
+@font-face{font-family:'Geist Mono';src:url('fonts/GeistMono-Variable.woff2') format('woff2');font-weight:100 900}
+:root{--bg:#f7f6f2;--surface:#fff;--ink:#1b1a17;--muted:#6b675e;--faint:#a19c90;--border:#e4e1d8;--accent:#3d6b4f;--chip:#efede6}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#141412;--surface:#1c1b19;--ink:#ecebe6;--muted:#a9a59b;--faint:#6f6b62;--border:#2e2c28;--accent:#7fb08f;--chip:#24231f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:'Geist',ui-sans-serif,system-ui,sans-serif;line-height:1.55}
+main{max-width:980px;margin:0 auto;padding:28px 16px 60px}
+h1{font-size:24px;letter-spacing:-.02em;margin:0 0 6px}
+.sub{color:var(--muted);margin:0 0 26px}
+.planes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:26px}
+.plane{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px}
+.plane b{display:block;font-size:14px;margin-bottom:2px}
+.plane .where{font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
+.plane p{margin:8px 0 0;font-size:13px;color:var(--muted)}
+svg{width:100%;height:auto;display:block;background:var(--surface);border:1px solid var(--border);border-radius:14px}
+svg .box{fill:var(--chip);stroke:var(--border)}
+svg .t{fill:var(--ink);font:600 13px 'Geist',sans-serif}
+svg .m{fill:var(--muted);font:12px 'Geist',sans-serif}
+svg .arrow{stroke:var(--accent);stroke-width:1.6;fill:none;marker-end:url(#tip)}
+svg .dash{stroke-dasharray:4 4}
+code{font-family:'Geist Mono',ui-monospace,monospace;font-size:12px;background:var(--chip);padding:1px 5px;border-radius:5px}
+ol{padding-left:20px;margin:22px 0 0}
+li{margin:8px 0}
+.note{margin-top:22px;padding:10px 14px;border-left:3px solid var(--accent);background:var(--chip);border-radius:0 10px 10px 0;font-size:13.5px}
+@media (max-width:720px){.planes{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <main>
-<header><h1>How agents run</h1><span class="sub">one goal, from the click in the console to the containers on the worker and back · press play</span></header>
-<div class="layout">
-  <div class="stage">
-    <svg id="svg" viewBox="0 0 1000 620" role="img" aria-label="Animated diagram of a goal running through the ByteBunker planes">
-      <defs>
-        <marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--faint)"/></marker>
-      </defs>
-      <!-- planes -->
-      <rect class="plane pl1" x="8" y="8" width="190" height="604" rx="14"/>
-      <text class="t" x="20" y="30">Control plane</text><text class="m" x="20" y="45">hermes · Mac mini</text>
-      <rect class="plane pl3" x="212" y="8" width="470" height="604" rx="14"/>
-      <text class="t" x="224" y="30">Agent plane</text><text class="m" x="224" y="45">agents-worker · Ubuntu WSL2 inside the Windows box · rootless podman</text>
-      <rect class="plane pl2" x="696" y="8" width="296" height="300" rx="14"/>
-      <text class="t" x="708" y="30">Model plane</text><text class="m" x="708" y="45">spark-1 + spark-2 · DGX Sparks</text>
-      <rect class="plane pl4" x="696" y="322" width="296" height="290" rx="14"/>
-      <text class="t" x="708" y="344">Fast-model plane</text><text class="m" x="708" y="359">the worker's own RTX 2070</text>
+  <h1>How agents run</h1>
+  <p class="sub">A goal goes to a master that plans and a team of helpers that do the work, on a machine of their own.</p>
 
-      <!-- control plane -->
-      <g id="browser"><rect class="box" x="24" y="80" width="158" height="52" rx="9"/><text class="t" x="34" y="102">Your browser</text><text class="m" x="34" y="118">Agents screen · Stop button</text></g>
-      <g id="console"><rect class="box" x="24" y="160" width="158" height="64" rx="9"/><text class="t" x="34" y="182">Console · server.py</text><text class="m" x="34" y="198">POST /api/agents → SSE</text><text class="m" x="34" y="212">launchd · :8765</text></g>
-      <g id="trace"><rect class="box" x="24" y="470" width="158" height="52" rx="9"/><text class="t" x="34" y="492">Trace log</text><text class="m" x="34" y="508">data/traces/&lt;day&gt;.jsonl</text></g>
-
-      <!-- agent plane -->
-      <g id="sultan"><rect class="box" x="236" y="80" width="200" height="74" rx="9"/><text class="t" x="246" y="102">run_master.py · the Sultan</text><text class="m" x="246" y="118">setsid process group + stdin sidecar</text><text class="m" x="246" y="133">traces → trajectories/&lt;goal&gt;/master.jsonl</text><text class="m" x="246" y="147">ledger → trajectories/spawns.jsonl</text></g>
-      <g id="taskdir" class="container hidden"><rect class="box" x="236" y="176" width="200" height="50" rx="9"/><text class="t" x="246" y="196">/tmp/bb-&lt;id&gt;/</text><text class="m" x="246" y="211">input.json · result.json · events.jsonl</text></g>
-      <g id="proxy" class="container hidden"><rect class="box" x="478" y="176" width="184" height="50" rx="9"/><text class="t" x="488" y="196">LLM proxy</text><text class="m" x="488" y="211">llm.sock → gateway (LAN)</text></g>
-
-      <g id="c1" class="container hidden"><rect class="box" x="236" y="262" width="126" height="92" rx="9"/><text class="t" x="246" y="282">minion · Tariq</text><text class="m" x="246" y="297">bytebunker-slave</text><text class="m" x="246" y="311">--network none</text><text class="tiny" x="246" y="326">-v task:/task</text><text class="tiny" x="246" y="338">-v llm.sock:/task/llm.sock</text><text class="tiny" x="246" y="350">label bytebunker.pgid=…</text></g>
-      <g id="c2" class="container hidden"><rect class="box" x="374" y="262" width="126" height="92" rx="9"/><text class="t" x="384" y="282">minion · Iris</text><text class="m" x="384" y="297">bytebunker-slave</text><text class="m" x="384" y="311">--network none</text><text class="tiny" x="384" y="326">-v task:/task</text><text class="tiny" x="384" y="338">-v llm.sock:/task/llm.sock</text><text class="tiny" x="384" y="350">label bytebunker.pgid=…</text></g>
-      <g id="c3" class="container hidden"><rect class="box" x="512" y="262" width="150" height="92" rx="9"/><text class="t" x="522" y="282">minion · Jack</text><text class="m" x="522" y="297">bytebunker-slave</text><text class="m" x="522" y="311" id="c3net">--network none</text><text class="tiny" x="522" y="326">-v task:/task</text><text class="tiny" x="522" y="338">-v llm.sock:/task/llm.sock</text><text class="tiny" x="522" y="350">label bytebunker.pgid=…</text></g>
-      <g id="loop" class="container hidden"><circle class="loop-arc" cx="299" cy="404" r="26"/><text class="m" x="336" y="392">gather</text><text class="m" x="336" y="406">act (tools)</text><text class="m" x="336" y="420">verify</text><text class="tiny" x="240" y="446">result.json checkpointed every step · events.jsonl streamed</text></g>
-      <g id="malikah" class="container hidden"><rect class="box" x="512" y="372" width="150" height="70" rx="9"/><text class="t" x="522" y="392">malikah · the queen</text><text class="m" x="522" y="407">judges the @draft</text><text class="m" x="522" y="421">thinking on · big engine</text></g>
-      <g id="internet" class="container hidden"><rect class="box" x="478" y="520" width="184" height="50" rx="9"/><text class="t" x="488" y="540">internet</text><text class="m" x="488" y="555">bridge network · this spawn only</text></g>
-      <g id="stopsign" class="container hidden"><rect class="box" x="236" y="520" width="200" height="50" rx="9" style="stroke:var(--err)"/><text class="t" x="246" y="540">sidecar: stdin closed</text><text class="m" x="246" y="555">kill -TERM -- -pgid · sweep label</text></g>
-
-      <!-- model plane -->
-      <g id="gateway"><rect class="box" x="712" y="76" width="264" height="54" rx="9"/><text class="t" x="722" y="98">litellm gateway · :4000</text><text class="m" x="722" y="114">every engine is a model name</text></g>
-      <g id="engine"><rect class="box" x="712" y="160" width="264" height="86" rx="9"/><text class="t" x="722" y="182">vLLM · tensor parallel 2</text><text class="m" x="722" y="198">deepseek-v4-vision-uncensored · 262k window</text><text class="m" x="722" y="212">the Sultan · wazir · Malikah · skeptic panels</text><text class="tiny" x="722" y="228">rack up dsv4-vision-ab · thinking on by default at the engine</text></g>
-      <g id="fast"><rect class="box" x="712" y="384" width="264" height="86" rx="9"/><text class="t" x="722" y="406">vLLM · RTX 2070 · 8 GB</text><text class="m" x="722" y="422">qwen3-4b-fast · Qwen3-4B AWQ · 24k window</text><text class="m" x="722" y="436">minions and researchers · thinking off</text><text class="tiny" x="722" y="452">WSL2 :8001 → Windows portproxy 172.16.25.83:8001</text></g>
-      <g id="panels" class="container hidden"><rect class="box" x="712" y="262" width="264" height="34" rx="9"/><text class="t" x="722" y="284">skeptic panel · 3 votes in parallel</text></g>
-
-      <!-- static wires (paths reused by packets) -->
-      <path id="p-browser-console" class="wire" d="M103 132 L103 160" marker-end="url(#ah)"/>
-      <path id="p-console-sultan" class="wire" d="M182 192 C 210 192, 210 117, 236 117" marker-end="url(#ah)"/>
-      <path id="p-sultan-console" class="wire" d="M236 128 C 214 128, 214 200, 182 200" marker-end="url(#ah)"/>
-      <path id="p-console-trace" class="wire" d="M103 224 L103 470" marker-end="url(#ah)"/>
-      <path id="p-sultan-gateway" class="wire" d="M436 96 C 560 96, 560 103, 712 103" marker-end="url(#ah)"/>
-      <path id="p-gateway-engine" class="wire" d="M844 130 L844 160" marker-end="url(#ah)"/>
-      <path id="p-gateway-fast" class="wire" d="M976 103 C 996 103, 996 427, 976 427" marker-end="url(#ah)"/>
-      <path id="p-sultan-task" class="wire" d="M336 154 L336 176" marker-end="url(#ah)"/>
-      <path id="p-task-c1" class="wire" d="M299 226 L299 262" marker-end="url(#ah)"/>
-      <path id="p-task-c2" class="wire" d="M436 205 C 460 205, 437 240, 437 262" marker-end="url(#ah)"/>
-      <path id="p-task-c3" class="wire" d="M436 215 C 500 215, 587 240, 587 262" marker-end="url(#ah)"/>
-      <path id="p-c1-proxy" class="wire" d="M362 300 C 420 300, 440 201, 478 201" marker-end="url(#ah)"/>
-      <path id="p-proxy-gateway" class="wire" d="M662 201 C 690 201, 690 110, 712 110" marker-end="url(#ah)"/>
-      <path id="p-c3-internet" class="wire" d="M587 354 L 587 520" marker-end="url(#ah)"/>
-      <path id="p-c1-blocked" class="wire" d="M299 354 L 299 380"/>
-      <path id="p-c1-task" class="wire" d="M270 262 C 250 250, 250 240, 260 226" marker-end="url(#ah)"/>
-      <path id="p-task-sultan" class="wire" d="M250 176 L 250 154" marker-end="url(#ah)"/>
-      <path id="p-malikah-proxy" class="wire" d="M600 372 C 600 330, 640 330, 640 226" marker-end="url(#ah)"/>
-      <path id="p-sultan-panels" class="wire" d="M436 140 C 600 140, 600 279, 712 279" marker-end="url(#ah)"/>
-      <path id="p-stop" class="wire" d="M182 108 C 210 108, 226 160, 236 545" marker-end="url(#ah)"/>
-      <g id="packets"></g>
-      <g id="marks"></g>
-    </svg>
-    <div class="legend"><span><i style="background:var(--warn)"></i>control · goal, results, stop</span><span><i style="background:var(--blue)"></i>model traffic · always via the socket and the gateway</span><span><i style="background:var(--accent)"></i>the runner loop inside a container</span><span><i style="background:var(--err)"></i>blocked · no route unless granted</span></div>
+  <div class="planes">
+    <div class="plane"><span class="where">models</span><b>Your model servers</b><p>Engines dgx-serve runs, on a Spark, an NVIDIA box, a Windows PC or a Mac. They serve models and nothing else: no agent code runs there.</p></div>
+    <div class="plane"><span class="where">control</span><b>ByteBunker</b><p>Starts each goal on the worker over SSH, follows it, stops it when asked, and keeps the record: the transcript, the tokens, the jobs it filed.</p></div>
+    <div class="plane"><span class="where">agents</span><b>The worker</b><p>A separate machine. The master plans; each helper runs in a fresh container with no network unless the master grants it.</p></div>
   </div>
-  <aside class="panel">
-    <div class="controls"><button id="play" class="primary">Play</button><button id="prev">◀</button><button id="next">▶</button><button id="restart">Restart</button></div>
-    <div class="progress"><div id="bar"></div></div>
-    <div class="stepno" id="stepno"></div>
-    <div class="title" id="title"></div>
-    <div class="text" id="text"></div>
-    <ol class="steps" id="steps"></ol>
-  </aside>
-</div>
-</main>
-<script>
-(function () {
-  var STEPS = [
-    { title: "The four planes", lit: ["browser","console","trace","sultan","gateway","engine","fast"],
-      text: "<p>Three rules shape everything: agents never run on a model host, the console never runs agent code, and a container reaches the model only through a socket. Four hosts, four colours.</p><p>Play walks one goal through the system; click any step in the list to jump.</p>" },
-    { title: "You post a goal", lit: ["browser","console"], flows: [["p-browser-console","warn"]],
-      text: "<p>The Agents screen sends <code>POST /api/agents {goal}</code>. The console answers with a server-sent event stream that stays open for the whole run, with a keepalive every five seconds so a dropped browser is noticed.</p><pre>POST /api/agents\n{\"goal\": \"Give me the details of CVE-2026-88778 …\"}</pre>" },
-    { title: "One ssh session to the worker", lit: ["console","sultan"], flows: [["p-console-sultan","warn"]],
-      text: "<p>The console opens a single ssh session and starts the master in its own process group, with a sidecar watching the session's stdin.</p><pre>ssh agents-worker 'cd ~/bytebunker-harness && exec 3<&0;\n setsid env PYTHONUNBUFFERED=1 BYTEBUNKER_MASTER_NAME=Sultan \\\n   uv run scripts/run_master.py --goal … &\n CPID=$!; ( cat <&3 >/dev/null; kill -TERM -- -$CPID; …sweep containers… ) &'</pre><p>Stdout streams back as SSE. The sidecar is the stop path (step 13).</p>" },
-    { title: "The Sultan thinks", lit: ["sultan","gateway","engine"], flows: [["p-sultan-gateway","blue"],["p-gateway-engine","blue"]], glow: ["engine"],
-      text: "<p>The master reads its standing orders, the skill catalog and the archetype roster, then calls the big engine through litellm. Every round is traced: seconds, tokens in and out, the tools it called or the prose it wrote.</p><pre>trajectories/&lt;goal&gt;/master.jsonl\n{\"kind\":\"llm\",\"step\":0,\"elapsed_s\":43.1,\"prompt_tokens\":2789,\n \"completion_tokens\":1019,\"tools\":[\"spawn_slave\"]}</pre>" },
-    { title: "spawn_slave: a task directory and a socket", lit: ["sultan","taskdir","proxy"], show: ["taskdir","proxy"], flows: [["p-sultan-task","warn"]],
-      text: "<p>For each agent the harness writes a task directory and starts a unix-socket proxy on the worker. The directory carries everything the agent will ever see; the socket is its only way to a model.</p><pre>/tmp/bb-minion-a1b2c3d4-xyz/input.json\n{ spec: {role, brief, tools, depth, timeout_s, network},\n  skills: {\"cve-lookup\": \"…SKILL.md body…\"},\n  llm: {base_url: \"unix:///task/llm.sock\", model: \"qwen3-4b-fast\",\n        max_tokens: 3000, extra: {chat_template_kwargs:{thinking:false}},\n        transcript_chars: 36000, fetch_max_chars: 8000} }</pre>" },
-    { title: "podman run, one container per agent", lit: ["taskdir","proxy","c1","c2","c3"], show: ["c1","c2","c3"], flows: [["p-task-c1","warn"],["p-task-c2","warn"],["p-task-c3","warn"]],
-      text: "<p>Rootless podman starts one container per agent from the slave image. No network. The task directory and the socket are bind-mounted in; the container is labelled with the master's process-group id so it can be swept later.</p><pre>podman run --rm --network none --userns=keep-id \\\n  --label bytebunker.pgid=$PGID --memory 2g --cpus 2 \\\n  -v /tmp/bb-…:/task -v /tmp/bb-llm-….sock:/task/llm.sock \\\n  bytebunker-slave:latest</pre><p>The Sultan names them (Tariq, Iris, Jack showed up in real runs).</p>" },
-    { title: "Inside a container: the runner loop", lit: ["c1","loop"], show: ["loop"], glow: ["c1"],
-      text: "<p><code>slaves/runner.py</code> loops gather → act → verify with a step budget per depth (quick 6, standard 30, deep 60) and the time budget from the spawn. It trims old tool output past a character budget, nudges at two steps left, offers only <code>submit_result</code> on the last step, and salvages a truncated or prose submission rather than losing it.</p><pre>/task/result.json   ← checkpointed every step\n/task/events.jsonl  ← llm_call, tool, verdict, budget_nudge …\n(the console tails this for the live cards)</pre>" },
-    { title: "Model traffic: socket → proxy → gateway → engine", lit: ["c1","proxy","gateway","fast"], flows: [["p-c1-proxy","blue"],["p-proxy-gateway","blue"],["p-gateway-fast","blue"]], glow: ["fast"],
-      text: "<p>A minion's call leaves the container through <code>/task/llm.sock</code>. The proxy on the worker forwards it to litellm on the Spark's LAN address, and litellm routes by model name: minions and researchers to <code>qwen3-4b-fast</code> on the worker's own RTX 2070 (through the Windows port forward), wazir, Malikah and the panels to the big engine.</p><pre>harness config.yaml\n  default_slave_model: qwen3-4b-fast\n  thinking_model:      deepseek-v4-vision-uncensored\n  master_model:        deepseek-v4-vision-uncensored</pre>" },
-    { title: "Network only when granted", lit: ["c3","internet","c1"], show: ["internet"], flows: [["p-c3-internet","warn"]], blocked: ["p-c1-blocked"], c3net: "--network bridge",
-      text: "<p>A role that needs the web (a research minion, a researcher) gets a bridge network for that spawn only, and only if the role is on the worker's allowlist. Everyone else has no route at all: the red mark under Tariq is podman's <code>--network none</code>.</p><pre>network:\n  default: false\n  allowed_roles: [internet_agent, researcher, minion, wazir, malikah]</pre><p>Even a networked agent still talks to the model only through the socket.</p>" },
-    { title: "Results flow back", lit: ["c1","taskdir","sultan"], flows: [["p-c1-task","warn"],["p-task-sultan","warn"]], hide: ["loop"],
-      text: "<p>When the container exits, the harness reads <code>result.json</code>, records one line in the spawn ledger, and hands the Sultan a label rather than a raw blob.</p><pre>trajectories/spawns.jsonl\n{\"slave_id\":\"minion-a1b2c3d4\",\"role\":\"minion\",\"success\":true,\n \"tokens\":16886,\"prompt_tokens\":15200,\"completion_tokens\":1686,\n \"model\":\"qwen3-4b-fast\",\"final_result\":{answer, evidence, unknowns}}</pre><p>The three labels the Sultan sees: <code>ok</code>, <code>ANSWERED but UNVERIFIED</code> (out of time before its self-check; material to cross-check, never a reason to redo), <code>failed</code>.</p>" },
-    { title: "Skeptic panels", lit: ["sultan","panels","engine"], show: ["panels"], flows: [["p-sultan-panels","blue"],["p-gateway-engine","blue"]], glow: ["engine"],
-      text: "<p><code>verify_result</code> runs an independent panel: three fresh contexts on the big engine each try to refute the answer, in parallel, with reasoning off and a short output cap. A strict majority passes. Anything the panel names as missing becomes a narrow follow-up brief, never a repeat of the same one.</p>" },
-    { title: "Synthesis and Malikah", lit: ["sultan","malikah","proxy","gateway","engine"], show: ["malikah"], hide: ["c1","c2","c3","panels"], flows: [["p-malikah-proxy","blue"],["p-proxy-gateway","blue"],["p-gateway-engine","blue"]], glow: ["malikah"],
-      text: "<p>The Sultan writes one report with sources. A long report is written as a plain message and referenced as <code>@draft</code>, so it never has to fit inside a tool call. Malikah, the queen, is spawned like any agent with the report as material and judges it on the big engine with thinking on. REVISE means one round of corrections, then approval.</p>" },
-    { title: "The final answer streams to you", lit: ["sultan","console","browser","trace"], hide: ["malikah","taskdir","proxy","internet"], flows: [["p-sultan-console","warn"],["p-console-trace","warn"]],
-      text: "<p><code>final_answer</code> is printed by the master, arrives at the console over the same ssh session, and is pushed to the browser as the last SSE lines. The console writes the whole run to its trace log, which the Usage screen and <code>/api/export</code> read.</p><pre>data/traces/2026-09-30.jsonl\n{\"kind\":\"agent_run\",\"id\":\"fce7bfd0…\",\"exit\":0,\"lines\":81,\"ms\":378000}</pre>" },
-    { title: "Stop, at any time", lit: ["browser","console","stopsign","c1","c2","c3"], show: ["stopsign","c1","c2","c3"], hide: ["malikah"], flows: [["p-stop","err"]], kill: true,
-      text: "<p>The Stop button, a closed browser, or the run cap all do the same thing: the console closes the ssh session's stdin. The sidecar reads end-of-file and kills the master's whole process group, then sweeps every container carrying the run's label.</p><pre>kill -TERM -- -$CPID; sleep 8; kill -KILL -- -$CPID\npodman ps -q --filter label=bytebunker.pgid=$CPID | xargs -r podman kill</pre><p>Nothing survives the operator's hand: that is the whole point of the labels.</p>" }
-  ];
-  var COLORS = { warn: "var(--warn)", blue: "var(--blue)", err: "var(--err)", accent: "var(--accent)" };
-  var svg = document.getElementById("svg"), packets = document.getElementById("packets"), marks = document.getElementById("marks");
-  var NODES = ["browser","console","trace","sultan","taskdir","proxy","c1","c2","c3","loop","malikah","internet","stopsign","gateway","engine","fast","panels"];
-  var shown = {};
-  var cur = 0, timer = null, playing = false;
-  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  function el(id) { return document.getElementById(id); }
-  function clearPackets() { packets.innerHTML = ""; marks.innerHTML = ""; }
-  function packet(pathId, color, delay) {
-    var p = el(pathId); if (!p) return;
-    var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    c.setAttribute("r", "4.5"); c.setAttribute("fill", COLORS[color] || color);
-    if (reduce) { var L = p.getTotalLength(), pt = p.getPointAtLength(L * 0.5); c.setAttribute("cx", pt.x); c.setAttribute("cy", pt.y); packets.appendChild(c); return; }
-    var am = document.createElementNS("http://www.w3.org/2000/svg", "animateMotion");
-    am.setAttribute("dur", "1.6s"); am.setAttribute("repeatCount", "indefinite"); am.setAttribute("begin", (delay || 0) + "s");
-    var mp = document.createElementNS("http://www.w3.org/2000/svg", "mpath"); mp.setAttributeNS("http://www.w3.org/1999/xlink", "href", "#" + pathId); mp.setAttribute("href", "#" + pathId);
-    am.appendChild(mp); c.appendChild(am); packets.appendChild(c);
-    p.style.stroke = COLORS[color] || color; p.style.opacity = "1"; p.style.strokeWidth = "1.8";
-  }
-  function blockedMark(pathId) {
-    var p = el(pathId); if (!p) return;
-    var L = p.getTotalLength(), pt = p.getPointAtLength(L * 0.6);
-    var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    g.innerHTML = '<line class="blocked" x1="' + (pt.x - 7) + '" y1="' + (pt.y - 7) + '" x2="' + (pt.x + 7) + '" y2="' + (pt.y + 7) + '"/><line class="blocked" x1="' + (pt.x + 7) + '" y1="' + (pt.y - 7) + '" x2="' + (pt.x - 7) + '" y2="' + (pt.y + 7) + '"/>';
-    marks.appendChild(g);
-  }
-  function apply(i) {
-    var s = STEPS[i];
-    clearPackets();
-    document.querySelectorAll("#svg .wire").forEach(function (w) { w.style.stroke = ""; w.style.opacity = ""; w.style.strokeWidth = ""; });
-    (s.show || []).forEach(function (id) { shown[id] = true; });
-    (s.hide || []).forEach(function (id) { shown[id] = false; });
-    if (i === 0) { shown = {}; }
-    NODES.forEach(function (id) {
-      var n = el(id); if (!n) return;
-      var isContainer = n.classList.contains("container");
-      if (isContainer) n.classList.toggle("hidden", !shown[id]);
-      var lit = (s.lit || []).indexOf(id) >= 0;
-      n.classList.toggle("dim", !lit && (!isContainer || shown[id]));
-      n.classList.toggle("lit", lit);
-      n.classList.remove("glow", "glow-blue", "glow-warn");
-      if ((s.glow || []).indexOf(id) >= 0) n.classList.add(id === "engine" || id === "fast" ? "glow-blue" : "glow");
-    });
-    el("c3net").textContent = s.c3net || "--network none";
-    (s.flows || []).forEach(function (f, k) { packet(f[0], f[1], k * 0.35); });
-    (s.blocked || []).forEach(blockedMark);
-    if (s.kill) { setTimeout(function () { if (cur === i) ["c1","c2","c3"].forEach(function (id) { el(id).classList.add("hidden"); shown[id] = false; }); }, reduce ? 0 : 1800); }
-    el("stepno").textContent = "step " + (i + 1) + " of " + STEPS.length;
-    el("title").textContent = s.title;
-    el("text").innerHTML = s.text;
-    el("bar").style.width = ((i + 1) / STEPS.length * 100) + "%";
-    document.querySelectorAll("#steps li").forEach(function (li, k) { li.classList.toggle("on", k === i); });
-    var on = document.querySelector("#steps li.on"); if (on && on.scrollIntoView) on.scrollIntoView({ block: "nearest" });
-  }
-  function go(i) { cur = Math.max(0, Math.min(STEPS.length - 1, i)); apply(cur); }
-  function stop() { playing = false; clearInterval(timer); timer = null; el("play").textContent = "Play"; }
-  function play() { playing = true; el("play").textContent = "Pause"; timer = setInterval(function () { if (cur >= STEPS.length - 1) { stop(); return; } go(cur + 1); }, 6500); }
-  var list = el("steps");
-  STEPS.forEach(function (s, k) { var li = document.createElement("li"); li.innerHTML = '<span class="n">' + (k + 1) + '</span><span></span>'; li.lastChild.textContent = s.title; li.onclick = function () { stop(); go(k); }; list.appendChild(li); });
-  el("play").onclick = function () { if (playing) stop(); else { if (cur >= STEPS.length - 1) go(0); play(); } };
-  el("next").onclick = function () { stop(); go(cur + 1); };
-  el("prev").onclick = function () { stop(); go(cur - 1); };
-  el("restart").onclick = function () { stop(); go(0); };
-  document.addEventListener("keydown", function (e) { if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); stop(); go(cur + 1); } if (e.key === "ArrowLeft") { stop(); go(cur - 1); } });
-  go(0);
-})();
-</script>
+  <svg viewBox="0 0 940 300" role="img" aria-label="A goal flows from ByteBunker to the master on the worker, to helpers in containers, which reach the model servers through the worker's proxy">
+    <defs><marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#3d6b4f"/></marker></defs>
+    <rect class="box" x="20" y="40" width="190" height="80" rx="10"/>
+    <text class="t" x="36" y="68">ByteBunker</text><text class="m" x="36" y="88">the app, bb, or a job</text><text class="m" x="36" y="106">starts and watches</text>
+    <rect class="box" x="290" y="40" width="190" height="80" rx="10"/>
+    <text class="t" x="306" y="68">Master</text><text class="m" x="306" y="88">plans, hands out steps,</text><text class="m" x="306" y="106">writes the answer</text>
+    <rect class="box" x="560" y="20" width="160" height="56" rx="10"/><text class="t" x="576" y="44">Helper</text><text class="m" x="576" y="62">its own container</text>
+    <rect class="box" x="560" y="90" width="160" height="56" rx="10"/><text class="t" x="576" y="114">Helper</text><text class="m" x="576" y="132">its own container</text>
+    <rect class="box" x="560" y="160" width="160" height="56" rx="10"/><text class="t" x="576" y="184">Skeptics</text><text class="m" x="576" y="202">check each answer</text>
+    <rect class="box" x="290" y="200" width="190" height="80" rx="10"/>
+    <text class="t" x="306" y="228">Proxy on the worker</text><text class="m" x="306" y="248">adds the model keys;</text><text class="m" x="306" y="266">containers never see them</text>
+    <rect class="box" x="20" y="200" width="190" height="80" rx="10"/>
+    <text class="t" x="36" y="228">Model servers</text><text class="m" x="36" y="248">engines dgx-serve runs</text><text class="m" x="36" y="266">on your machines</text>
+    <path class="arrow" d="M210 80 H286"/>
+    <path class="arrow" d="M480 70 C520 60 530 48 556 48"/>
+    <path class="arrow" d="M480 82 H556"/>
+    <path class="arrow" d="M480 96 C520 120 530 188 556 188"/>
+    <path class="arrow dash" d="M640 216 V236 H484"/>
+    <path class="arrow" d="M290 240 H214"/>
+  </svg>
+
+  <ol>
+    <li><b>You give a goal</b>: on the Agents screen, with <code>bb agents "goal"</code>, or as a scheduled job.</li>
+    <li><b>ByteBunker starts it on the worker</b> over SSH and streams what the master says as it works. Closing the app does not stop it; Stop does.</li>
+    <li><b>The master plans</b> and hands steps to helpers, each in a fresh container. A helper gets the network only when the master grants it, for that helper alone.</li>
+    <li><b>Helpers reach models only through the worker's proxy</b>, which adds the keys. No key is ever inside a container.</li>
+    <li><b>Skeptics check</b> each helper's answer before the master uses it.</li>
+    <li><b>The master writes the answer.</b> ByteBunker records it with the tokens it took; work that should happen again can come back as a job.</li>
+  </ol>
+  <p class="note">The worker is never the machine that serves the models, and never the one ByteBunker runs on: a goal that goes wrong stays inside its containers on the worker.</p>
+</main>
 </body>
 </html>

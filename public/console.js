@@ -444,6 +444,12 @@
       const e = document.createElement("div");
       e.className = "msg-err";
       e.textContent = m.error;
+      const fix = helpFor(m.error);
+      if (fix) {
+        const a = document.createElement("button"); a.type = "button"; a.className = "linky"; a.textContent = " How to fix \u2192";
+        a.onclick = () => openHelp(fix);
+        e.appendChild(a);
+      }
       bot.appendChild(e);
     }
     // Live status while a turn is in flight. Without this an empty bubble is
@@ -2497,6 +2503,19 @@
       c.appendChild(pre); pane.appendChild(c);
     }
   }
+
+  // which guide explains an error, by what it says
+  const ERROR_HELP = [
+    [/context is full|over the context window/i, "troubleshooting"],
+    [/tool support|tool-call-parser|auto-tool-choice/i, "troubleshooting"],
+    [/approval needed/i, "cli"],
+    [/closed the stream before|stream failed/i, "troubleshooting"],
+    [/ role names no model| role is .* no gateway serves/i, "settings"],
+    [/no gateway|no model|Gateways screen|could not start the turn/i, "gateways"],
+    [/agents are not set up|connect a worker/i, "agents"],
+    [/Local Network/i, "troubleshooting"],
+  ];
+  function helpFor(text) { const hit = ERROR_HELP.find(([re]) => re.test(text || "")); return hit ? hit[1] : null; }
 
   /* ---------------- help ---------------- */
   // Guides from docs/help, drawn by a small Markdown subset (no raw HTML):
