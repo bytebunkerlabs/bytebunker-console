@@ -169,9 +169,10 @@ class JobStore:
             sched = {"kind": "cron", "cron": " ".join(str(sched.get("cron")).split())}
         kind = spec.get("kind") if spec.get("kind") in ("chat", "agent") else "chat"
         prompt = str(spec.get("prompt") or "").strip()
-        if not prompt:
-            raise ValueError("the job needs a prompt (chat) or a goal (agent)")
-        name = str(spec.get("name") or prompt[:40]).strip()[:80]
+        workflow = str(spec.get("workflow") or "").strip()[:48]
+        if not prompt and not workflow:
+            raise ValueError("the job needs a prompt (chat), a goal (agent) or a workflow")
+        name = str(spec.get("name") or prompt[:40] or workflow).strip()[:80]
         if spec.get("id") and not _JID.match(str(spec["id"])):
             raise ValueError("a job id is letters, digits, - and _ (64 at most)")
         job = {
@@ -186,6 +187,10 @@ class JobStore:
             "created_by": str(spec.get("created_by") or "you")[:40],
             "reason": str(spec.get("reason") or "")[:500],
             "goal": str(spec.get("goal") or "")[:40],
+            "workflow": workflow,
+            "params": {str(k)[:40]: str(v)[:2000] for k, v in (spec.get("params") or {}).items()}
+            if isinstance(spec.get("params"), dict) else {},
+            "profile": str(spec.get("profile") or "")[:40],
             "created": None, "last_run": None, "runs": 0,
         }
         with self._lock:

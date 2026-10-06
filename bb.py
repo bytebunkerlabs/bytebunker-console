@@ -731,6 +731,8 @@ def slash(word, rest, st, srv, out):
                 out.err("  " + m)
         elif word == "/usage":
             print_usage(srv, out)
+        elif word == "/workflows":
+            cmd_workflows(None, out)
     except BBError as e:
         out.err(out.bad(str(e)))
     return None
@@ -895,6 +897,69 @@ def cmd_jobs(a, out):
     return follow(srv, r["run"], GenericView(out), out)
 
 
+def cmd_run(a, out):
+    """bb run WORKFLOW -p key=value: a chat workflow runs as a turn with bb's
+    tools in the workflow's folder (or here); an agents workflow as a goal."""
+    srv = connect(out=out)
+    params = {}
+    for kv in a.param or []:
+        k, sep, v = kv.partition("=")
+        if not sep:
+            raise BBError("-p takes KEY=VALUE, not %r" % kv, EXIT_USAGE)
+        params[k.strip()] = v
+    wfs = srv.get("/api/workflows").get("workflows") or {}
+    wf = wfs.get(a.workflow)
+    if wf is None:
+        raise BBError("no workflow named %r%s" % (a.workflow, " (there are: %s)" % ", ".join(sorted(wfs)) if wfs else
+                                                   "; make one in the app (Workflows)"), EXIT_USAGE)
+    body = {"params": params}
+    view = GenericView(out)
+    if wf.get("kind") != "agents":
+        folder = os.path.expanduser(wf.get("folder") or "") or os.getcwd()
+        if not os.path.isdir(folder):
+            raise BBError("the workflow's folder %s does not exist here" % folder, EXIT_USAGE)
+        import workspace
+        ws = workspace.Workspace(folder)
+        body.update(client_tools=ws.defs(), interactive=can_prompt(), cwd=folder)
+        if a.yes:
+            body["yes"] = True
+        if a.session:
+            body["session"] = a.session
+        view = GenericView(out, srv=srv, ws=ws, yes=a.yes)
+    try:
+        r = srv.post("/api/workflows/%s/run" % urllib.parse.quote(a.workflow), body)
+    except BBError as e:
+        if getattr(e, "status", 0) == 409 and (e.body or {}).get("run"):
+            raise BBError("%s: bb runs watch %s" % (e, e.body["run"]))
+        raise
+    view.rid = r["run"]
+    if a.detach:
+        out.say(r["run"])
+        return EXIT_OK
+    return follow(srv, r["run"], view, out)
+
+
+def cmd_workflows(a, out):
+    srv = connect(out=out)
+    wfs = srv.get("/api/workflows").get("workflows") or {}
+    if not wfs:
+        out.say("no workflows yet: make one in the app (Workflows), then: bb run NAME -p key=value")
+        return EXIT_OK
+    rows = [[n, w.get("kind"), w.get("profile") or "", " ".join("%s=" % p["name"] for p in w.get("params") or []),
+             (w.get("description") or "")[:50]] for n, w in sorted(wfs.items())]
+    out.say(table(rows, ["workflow", "kind", "profile", "takes", ""]))
+    return EXIT_OK
+
+
+def cmd_profiles(a, out):
+    srv = connect(out=out)
+    d = srv.get("/api/profiles")
+    rows = [[("* " if n == d.get("default") else "  ") + n, p.get("effort") or "", (p.get("params") or {}).get("max_tokens") or "",
+             p.get("description") or ""] for n, p in d["profiles"].items()]
+    out.say(table(rows, ["profile", "effort", "max tokens", ""]))
+    return EXIT_OK
+
+
 def cmd_doctor(a, out):
     """What is reachable, and the one thing to do when something is not."""
     data = paths.data_dir()
@@ -987,6 +1052,14 @@ def parser():
     j = sub.add_parser("jobs")
     j.add_argument("action", choices=("ls", "run"), nargs="?", default="ls")
     j.add_argument("id", nargs="?")
+    w = sub.add_parser("run", help="run a workflow")
+    w.add_argument("workflow")
+    w.add_argument("-p", "--param", action="append", metavar="KEY=VALUE")
+    w.add_argument("-s", "--session", help="run it in this session")
+    w.add_argument("--yes", action="store_true", help="allow tool calls that would ask")
+    w.add_argument("--detach", action="store_true", help="start it and return its run id")
+    sub.add_parser("workflows")
+    sub.add_parser("profiles")
     sub.add_parser("doctor")
     sub.add_parser("serve")
     sub.add_parser("help")
@@ -994,7 +1067,8 @@ def parser():
 
 
 HANDLERS = {"ask": cmd_ask, "chat": cmd_chat, "sessions": cmd_sessions, "runs": cmd_runs, "agents": cmd_agents,
-            "jobs": cmd_jobs, "doctor": cmd_doctor, "serve": cmd_serve, "help": cmd_help,
+            "jobs": cmd_jobs, "doctor": cmd_doctor, "serve": cmd_serve, "help": cmd_help, "run": cmd_run,
+            "workflows": cmd_workflows, "profiles": cmd_profiles,
             "models": cmd_list, "gateways": cmd_list, "monitors": cmd_list, "cluster": cmd_list,
             "usage": cmd_list, "skills": cmd_list, "mcp": cmd_list}
 

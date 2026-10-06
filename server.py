@@ -542,95 +542,39 @@ def agent_goal(run, emit, goal, via="app"):
 
 
 def run_job(job, run):
-    """One run of a job, inside its run. chat: a bounded tool loop against the
-    gateway, like the Playground does but server-side. agent: a harness goal.
-    Returns {output, hops, tokens}; raises when the job failed."""
-    emit = lambda obj: RUNS.emit(run, "out", obj)   # noqa: E731
-    if job.get("kind") == "agent":
+    """One run of a job, inside its run: a chat turn on the runner (no
+    session file, nobody to ask), or a goal for the agents. A job may name a
+    workflow, which gives it its prompt, kind and profile. Returns {output,
+    hops, tokens}; raises when the job failed."""
+    kind, prompt, profile = job.get("kind"), job.get("prompt") or "", job.get("profile") or None
+    if job.get("workflow"):
+        wf, prompt = render_workflow(job["workflow"], job.get("params") or {})
+        kind = "agent" if wf.get("kind") == "agents" else "chat"
+        profile = wf.get("profile") or profile
+    if kind == "agent":
         if not agentmod.status(CFG).get("enabled"):
             raise RuntimeError("agents are not set up: connect a worker on the Agents screen")
-        res, lines = agent_goal(run, emit, job["prompt"], via="job:" + job["id"])
+        res, lines = agent_goal(run, lambda obj: RUNS.emit(run, "out", obj), prompt, via="job:" + job["id"])
         if not res.get("ok"):
             raise RuntimeError((res.get("error") or "failed") + ("\n" + "\n".join(lines[-20:]) if lines else ""))
         return {"output": "\n".join(lines), "hops": None, "tokens": None}
-
-    model = job.get("model") or ""
-    if not model:
-        # a gateway's list is what it is configured for, not what is up (litellm
-        # lists every backend, served or not): the model you last used is the
-        # best guess, then the first one listed
-        GW.refresh()
-        model = last_used_model() or (GW.models[0]["id"] if GW.models else "")
-    if not model:
-        raise RuntimeError("no model configured for the job and no gateway offers one")
-    model, job_gw = GW.resolve(model)
-    if job_gw is None:
-        raise RuntimeError("no gateway serves %s" % model)
-    caps = caps_for(model)
-    sys_parts = []
-    bodies = skill_catalog().bodies(job.get("skills") or [])
-    for name, body in bodies.items():
-        if body:
-            sys_parts.append("# Skill: " + name + "\n\n" + body)
-    if job.get("system"):
-        sys_parts.append(job["system"])
-    sys_parts.append("You are running as a scheduled job named %r at %s. There is no human in the loop: do the task "
-                     "with the tools you have, then write the result as your final message." % (job["name"], time.strftime("%Y-%m-%d %H:%M")))
-    msgs = [{"role": "system", "content": "\n\n".join(sys_parts)}, {"role": "user", "content": job["prompt"]}]
-    tools = None
-    if job.get("tools", True) and caps.get("tools", True):
-        try:
-            tools = mcp_host().openai_tools() or None
-        except Exception:   # noqa: BLE001
-            tools = None
-    emit({"line": "%s on %s%s" % (model, job_gw["name"], " \u00b7 %d tools" % len(tools) if tools else "")})
-    total_tokens = 0
-    hops = 0
-    for hop in range(max(1, int(job.get("max_hops") or 12))):
-        if run.cancelled:
-            raise RuntimeError("cancelled")
-        payload = {"model": model, "messages": msgs, "max_tokens": 8000, "temperature": 0.3}
-        if caps.get("ctk"):
-            payload["chat_template_kwargs"] = dict(caps["ctk"])
-        if tools:
-            payload["tools"] = tools
-        req = upstream_request("/chat/completions", payload, "POST", gateway=job_gw)
-        t0 = time.time()
-        with urllib.request.urlopen(req, timeout=900) as r:
-            resp = json.loads(r.read().decode("utf-8", "replace"))
-        TRACE.log("chat", status=200, request=trace_safe(payload), response=resp, purpose="job", job=job["id"],
-                  run=run.id, ms=int((time.time() - t0) * 1000))
-        usage = resp.get("usage") or {}
-        total_tokens += int(usage.get("total_tokens") or 0)
-        if usage.get("completion_tokens"):
-            # the Usage screen counts every turn, the Playground's and the jobs'
-            append_usage({"model": model, "gateway": job_gw["name"], "source": "job", "job": job["id"],
-                          "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                          "completion_tokens": int(usage.get("completion_tokens") or 0),
-                          "ttft_s": None, "decode_tok_s": None, "estimated": False})
-        choice = (resp.get("choices") or [{}])[0]
-        msg = choice.get("message") or {}
-        calls = msg.get("tool_calls") or []
-        hops += 1
-        if not calls:
-            return {"output": msg.get("content") or "", "hops": hops, "tokens": total_tokens,
-                    "gateway": job_gw["name"], "model": model}
-        entry = {"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls}
-        if not caps.get("strip_reasoning", True) and msg.get("reasoning_content"):
-            entry["reasoning_content"] = msg["reasoning_content"]
-        msgs.append(entry)
-        for tc in calls:
-            fn = tc.get("function") or {}
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except ValueError:
-                args = {}
-            emit({"line": "hop %d: %s" % (hops, fn.get("name") or "?")})
-            text, is_err = mcp_host().call(fn.get("name") or "", args)
-            TRACE.log("tool", name=fn.get("name"), args=args, result=str(text)[:4000], is_error=bool(is_err), purpose="job",
-                      job=job["id"], run=run.id)
-            msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": str(text)[:20000]})
-    return {"output": "(stopped after %d tool hops without a final answer)" % hops, "hops": hops, "tokens": total_tokens}
+    system = "\n\n".join(x for x in (
+        job.get("system") or "",
+        "You are running as a scheduled job named %r at %s. There is no human in the loop: do the task with the "
+        "tools you have, then write the result as your final message." % (job["name"], time.strftime("%Y-%m-%d %H:%M"))) if x)
+    req = apply_profile({
+        "text": prompt, "model": job.get("model") or None, "profile": profile, "skills": job.get("skills") or [],
+        "system": system, "tools": job.get("tools", True), "max_hops": int(job.get("max_hops") or 12),
+        "params": {"max_tokens": 8000, "temperature": 0.3}, "auto_compress": False,
+        "unattended": True, "ephemeral": True, "interactive": False, "source": "job", "job": job["id"]})
+    out = {}
+    res = runner().turn(run, lambda t, d=None: RUNS.emit(run, t, d), "job-" + job["id"], req, out=out)
+    msg = out.get("message") or {}
+    if msg.get("error"):
+        raise RuntimeError(msg["error"])
+    model = msg.get("model") or ""
+    return {"output": msg.get("content") or "", "hops": len(msg.get("hops") or []) + 1, "tokens": res.get("tokens"),
+            "model": model, "gateway": GW.model_map.get(model)}
 
 
 _JOB_SLOTS = None
@@ -1185,10 +1129,79 @@ def apply_profile(body):
     out = {k: v for k, v in prof.items() if k in PROFILE_KEYS}
     params = dict(prof.get("params") or {})
     params.update(body.get("params") or {})
-    out.update({k: v for k, v in body.items() if v is not None and k != "params"})
+    out.update({k: v for k, v in body.items() if v not in (None, "") and k != "params"})
     out["params"] = params
     out["profile"] = name
     return out
+
+
+# Workflows: a named prompt with {{param}} placeholders, a kind (a chat
+# turn, or a goal for the agents), a profile and an optional folder (bb
+# works there). Run from the app, from bb run, or by a job.
+_PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}")
+
+
+def workflows():
+    return {n: w for n, w in (CFG.get("workflows") or {}).items() if isinstance(w, dict) and isinstance(n, str)}
+
+
+def workflow_params(wf):
+    """Declared params, plus any placeholder the prompt uses without declaring it."""
+    declared = [p for p in wf.get("params") or [] if isinstance(p, dict) and p.get("name")]
+    names = [p["name"] for p in declared]
+    for k in _PLACEHOLDER.findall(wf.get("prompt") or ""):
+        if k not in names:
+            names.append(k)
+            declared.append({"name": k})
+    return declared
+
+
+def render_workflow(name, params):
+    """(workflow, prompt). ValueError names what is missing and how to give it."""
+    wf = workflows().get(name)
+    if wf is None:
+        raise ValueError("no workflow named %r%s" % (name, (" (there are: %s)" % ", ".join(sorted(workflows())))
+                                                     if workflows() else ""))
+    declared = {p["name"]: p for p in workflow_params(wf)}
+    values = {str(k): str(v) for k, v in (params or {}).items() if v is not None}
+    missing = []
+
+    def fill(m):
+        k = m.group(1)
+        if k in values:
+            return values[k]
+        d = declared.get(k, {}).get("default")
+        if d not in (None, ""):
+            return str(d)
+        missing.append(k)
+        return m.group(0)
+    text = _PLACEHOLDER.sub(fill, wf.get("prompt") or "")
+    if missing:
+        ks = sorted(set(missing))
+        raise ValueError("workflow %s needs %s (bb run %s %s)" % (
+            name, ", ".join(ks), name, " ".join("-p %s=..." % k for k in ks)))
+    return wf, text
+
+
+def start_turn(sid, body, source):
+    """A chat turn as a server-owned run: (run, sid). Busy when the session
+    already has one going; ValueError for an unknown profile."""
+    if sid == "new":
+        sid = new_session_id()
+    body = dict(body, source=source)
+    body = apply_profile(body)
+    run = RUNS.start("chat", source, lambda run: runner().turn(run, lambda t, d=None: RUNS.emit(run, t, d), sid, body),
+                     title=(body.get("title") or body.get("text") or "").strip()[:80] or "turn",
+                     key="session:" + sid, meta={"session": sid, "model": body.get("model") or "", "what": "turns",
+                                                 "workflow": body.get("workflow") or None})
+    return run, sid
+
+
+def start_goal(goal, source, title=None, meta=None):
+    """An agents goal as a server-owned run (one at a time)."""
+    agentmod.build_command(CFG, goal)              # AgentConfigError: not set up
+    return RUNS.start("agents", source, lambda run: agent_goal(run, lambda obj: RUNS.emit(run, "out", obj), goal)[0],
+                      title=title or goal.strip()[:120], key="agents", meta=meta or {})
 
 
 def runner():
@@ -1223,6 +1236,43 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # quiet
         pass
+
+    # Every request goes through _safe: a bug in a handler answers 500 with
+    # what went wrong (and lands in the trace log) instead of dropping the
+    # connection, which a client can only report as "the server stopped".
+    def send_response(self, code, message=None):
+        self._responded = True
+        super().send_response(code, message)
+
+    def _safe(self, handler):
+        self._responded = False
+        try:
+            handler()
+        except (BrokenPipeError, ConnectionResetError):
+            pass                                   # the client left
+        except Exception as e:   # noqa: BLE001
+            import traceback
+            where = traceback.extract_tb(e.__traceback__)[-1]
+            TRACE.log("error", method=self.command, path=urllib.parse.urlparse(self.path).path,
+                      error="%s: %s" % (type(e).__name__, str(e)[:300]),
+                      at="%s:%d" % (os.path.basename(where.filename), where.lineno))
+            traceback.print_exc()
+            if not self._responded:
+                try:
+                    self._json({"error": "internal error in the ByteBunker server (%s: %s). It is in the trace "
+                                         "log; please report it." % (type(e).__name__, str(e)[:200])}, 500, close=True)
+                except OSError:
+                    pass
+            self.close_connection = True
+
+    def do_GET(self):
+        self._safe(self._do_GET)
+
+    def do_POST(self):
+        self._safe(self._do_POST)
+
+    def do_DELETE(self):
+        self._safe(self._do_DELETE)
 
     # Loopback binding stops remote packets, not the operator's own browser.
     # A hostile page can reach 127.0.0.1 via DNS rebinding (its origin becomes
@@ -1414,34 +1464,99 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "expected object"}, 400)
             return
         sid, _, what = path[len("/api/sessions/"):].rpartition("/")
-        if sid == "new":
-            sid = new_session_id()
-        if not sessmod._ID.match(sid or ""):
+        if sid != "new" and not sessmod._ID.match(sid or ""):
             self._json({"error": "bad session id"}, 400)
             return
-        if what == "compress" and SESSIONS.get(sid) is None:
-            self._json({"error": "no such session"}, 404)
-            return
-        body["source"] = self._client()
         try:
-            body = apply_profile(body)
+            if what == "turns":
+                run, sid = start_turn(sid, body, self._client())
+            else:
+                if SESSIONS.get(sid) is None:
+                    self._json({"error": "no such session"}, 404)
+                    return
+                req = dict(apply_profile(dict(body, source=self._client())))
+                run = RUNS.start("chat", req["source"],
+                                 lambda run: runner().compress_session(run, lambda t, d=None: RUNS.emit(run, t, d), sid, req),
+                                 title="compress", key="session:" + sid, meta={"session": sid, "what": "compress"})
         except ValueError as e:
             self._json({"error": str(e)}, 400)
             return
-        emit_to = lambda run: (lambda t, d=None: RUNS.emit(run, t, d))   # noqa: E731
-        if what == "turns":
-            target = lambda run: runner().turn(run, emit_to(run), sid, body)      # noqa: E731
-            title = (body.get("text") or "").strip()[:80] or "turn"
-        else:
-            target = lambda run: runner().compress_session(run, emit_to(run), sid, body)   # noqa: E731
-            title = "compress"
-        try:
-            run = RUNS.start("chat", body["source"], target, title=title, key="session:" + sid,
-                             meta={"session": sid, "model": body.get("model") or "", "what": what})
         except runsmod.Busy as e:
             self._json({"error": "a turn is already running in this session", "run": e.run.id, "session": sid}, 409)
             return
         self._json({"ok": True, "run": run.id, "session": sid}, 202)
+
+    def _workflows(self, path, body):
+        """POST /api/workflows {action: save|delete, name, workflow};
+        POST /api/workflows/<name>/run {params, and for chat: client_tools,
+        interactive, yes, cwd, session}."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        if path.endswith("/run"):
+            name = urllib.parse.unquote(path[len("/api/workflows/"):-len("/run")])
+            try:
+                wf, prompt = render_workflow(name, body.get("params") or {})
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            source = self._client()
+            try:
+                if wf.get("kind") == "agents":
+                    run = start_goal(prompt, source, title=name, meta={"workflow": name})
+                    TRACE.log("workflow", name=name, workflow_kind="agents", run=run.id, source=source)
+                    self._json({"ok": True, "run": run.id, "kind": "agents"}, 202)
+                    return
+                req = {k: body.get(k) for k in ("client_tools", "interactive", "yes", "cwd", "model", "effort")
+                       if body.get(k) is not None}
+                req.update(text=prompt, profile=wf.get("profile") or body.get("profile"), title=name, workflow=name)
+                run, sid = start_turn(body.get("session") or "new", req, source)
+            except agentmod.AgentConfigError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            except runsmod.Busy as e:
+                self._json({"error": str(e), "run": e.run.id}, 409)
+                return
+            TRACE.log("workflow", name=name, workflow_kind="chat", run=run.id, session=sid, source=source)
+            self._json({"ok": True, "run": run.id, "session": sid, "kind": "chat", "folder": wf.get("folder") or ""}, 202)
+            return
+        name = str(body.get("name") or "").strip()
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$", name):
+            self._json({"error": "a workflow name is letters, digits, . _ - (48 at most), no spaces: it is typed in bb run"}, 400)
+            return
+        mine = CFG.setdefault("workflows", {})
+        action = body.get("action") or "save"
+        if action == "delete":
+            if mine.pop(name, None) is None:
+                self._json({"error": "no workflow named %r" % name}, 404)
+                return
+        elif action == "save":
+            wf = body.get("workflow") if isinstance(body.get("workflow"), dict) else {}
+            kind = wf.get("kind") or "chat"
+            if kind not in ("chat", "agents"):
+                self._json({"error": "kind is chat or agents"}, 400)
+                return
+            if not (wf.get("prompt") or "").strip():
+                self._json({"error": "a workflow needs a prompt (a goal, for agents)"}, 400)
+                return
+            if wf.get("profile") and wf["profile"] not in profiles():
+                self._json({"error": "no profile named %r" % wf["profile"]}, 400)
+                return
+            params = [{"name": str(p.get("name")), "help": str(p.get("help") or "")[:200],
+                       "default": str(p.get("default") or "")[:2000]}
+                      for p in wf.get("params") or [] if isinstance(p, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_-]*$", str(p.get("name") or ""))]
+            mine[name] = {"description": str(wf.get("description") or "")[:300], "kind": kind,
+                          "profile": wf.get("profile") or "", "prompt": str(wf["prompt"])[:20000], "params": params,
+                          "folder": str(wf.get("folder") or "")[:500]}
+        else:
+            self._json({"error": "unknown action"}, 400)
+            return
+        save_config()
+        BUS.publish("config", "workflows", {"name": name})
+        self._json({"ok": True, "workflows": {n: dict(w, params=workflow_params(w)) for n, w in workflows().items()}})
 
     def _profiles_admin(self, body):
         """{action: save, name, profile} | {action: delete, name} | {action: default, name}.
@@ -1623,7 +1738,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)[:300]}, 502)
 
     # ---- routes ----
-    def do_GET(self):
+    def _do_GET(self):
         if not self._guard():
             return
         path = urllib.parse.urlparse(self.path).path
@@ -1727,6 +1842,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"profiles": profiles(), "default": CFG.get("default_profile") or "Default"})
         elif path == "/api/approvals":
             self._json({"pending": APPROVALS.list()})
+        elif path == "/api/workflows":
+            self._json({"workflows": {n: dict(w, params=workflow_params(w)) for n, w in workflows().items()}})
         elif path == "/api/runs":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             self._json({"runs": RUNS.history(limit=max(1, min(1000, _int((q.get("limit") or [""])[0], 100))),
@@ -1848,7 +1965,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._static(path)
 
-    def do_DELETE(self):
+    def _do_DELETE(self):
         if not self._guard():
             return
         config_fresh()
@@ -1880,7 +1997,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json({"error": "not found"}, 404)
 
-    def do_POST(self):
+    def _do_POST(self):
         if not self._guard():
             return
         config_fresh()
@@ -1892,6 +2009,11 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             if body is not None:
                 self._turn(path, body)
+            return
+        if path == "/api/workflows" or (path.startswith("/api/workflows/") and path.endswith("/run")):
+            body = self._body()
+            if body is not None:
+                self._workflows(path, body)
             return
         if path == "/api/approvals":
             body = self._body()

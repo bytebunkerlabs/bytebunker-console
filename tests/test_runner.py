@@ -277,5 +277,58 @@ class ApprovalTest(_Base):
         self.assertEqual(self.sent(0)["tools"][-1]["function"]["name"], "ws__read")
 
 
+class WorkflowTest(_Base):
+    def save(self, name, **wf):
+        st, r = self.srv.request("POST", "/api/workflows", {"action": "save", "name": name, "workflow": wf})
+        self.assertEqual(st, 200, r)
+        return r
+
+    def test_a_workflow_runs_as_a_turn_with_its_prompt_filled(self):
+        r = self.save("review", prompt="Review this for bugs: {{code}} (focus: {{focus}})", profile="Deep",
+                      params=[{"name": "focus", "default": "correctness"}])
+        self.assertEqual([p["name"] for p in r["workflows"]["review"]["params"]], ["focus", "code"])
+        st, err = self.srv.request("POST", "/api/workflows/review/run", {"params": {}})
+        self.assertEqual(st, 400)
+        self.assertIn("needs code", err["error"])
+        self.assertIn("-p code=", err["error"])
+        self.eng.script([{"content": "looks fine"}])
+        st, run = self.srv.request("POST", "/api/workflows/review/run", {"params": {"code": "x = 1"}})
+        self.assertEqual(st, 202, run)
+        evts = self.follow(run["run"])
+        self.assertEqual(self.of(evts, "done")[0]["message"]["content"], "looks fine")
+        sent = self.sent(0)
+        self.assertEqual(sent["messages"][-1]["content"], "Review this for bugs: x = 1 (focus: correctness)")
+        self.assertEqual(sent["max_tokens"], 32768)                     # the Deep profile
+        sess = self.srv.request("GET", "/api/sessions?id=" + run["session"])[1]
+        self.assertEqual(sess["title"], "Review this for bugs: x = 1 (focus: correctness)")
+
+    def test_a_job_can_run_a_workflow_and_never_asks(self):
+        self.save("ping", prompt="ping the client and report: {{why}}")
+        st, saved = self.srv.request("POST", "/api/jobs", {"action": "save", "job": {
+            "name": "pinger", "workflow": "ping", "params": {"why": "nightly"},
+            "schedule": {"kind": "cron", "cron": "0 3 * * *"}}})
+        self.assertEqual(st, 200, saved)
+        self.eng.script([{"tool_calls": [{"name": "fake__ping_client", "arguments": {}}]}, {"content": "could not"}])
+        st, r = self.srv.request("POST", "/api/jobs", {"action": "run_now", "id": saved["job"]["id"]})
+        evts = self.follow(r["run"])
+        self.assertEqual(self.of(evts, "finished")[0]["state"], "done")
+        self.assertEqual(self.sent(0)["messages"][-1]["content"], "ping the client and report: nightly")
+        self.assertIn("scheduled job never asks", self.sent(1)["messages"][-1]["content"])
+        self.assertEqual(self.of(evts, "approval"), [])
+        hist = self.srv.request("GET", "/api/jobs/runs?id=" + saved["job"]["id"])[1]["runs"]
+        self.assertEqual((hist[0]["ok"], hist[0]["output"]), (True, "could not"))
+        names = [s["id"] for s in self.srv.request("GET", "/api/sessions")[1]]
+        self.assertNotIn("job-" + saved["job"]["id"], names)             # a job leaves no session behind
+
+    def test_names_and_kinds_are_checked(self):
+        for body, want in (({"name": "has space", "workflow": {"prompt": "x"}}, "no spaces"),
+                           ({"name": "k", "workflow": {"prompt": "x", "kind": "robot"}}, "chat or agents"),
+                           ({"name": "p", "workflow": {"prompt": "x", "profile": "Nope"}}, "no profile"),
+                           ({"name": "e", "workflow": {"prompt": "  "}}, "needs a prompt")):
+            st, r = self.srv.request("POST", "/api/workflows", dict(body, action="save"))
+            self.assertEqual(st, 400, body)
+            self.assertIn(want, r["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

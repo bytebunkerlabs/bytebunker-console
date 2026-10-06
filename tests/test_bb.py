@@ -131,6 +131,22 @@ class BBTest(unittest.TestCase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_run_a_workflow(self):
+        st, _ = self.srv.request("POST", "/api/workflows", {"action": "save", "name": "greet",
+                                                            "workflow": {"prompt": "Say hello to {{who}}"}})
+        self.assertEqual(st, 200)
+        self.eng.script([{"content": "hello, Ada"}])
+        n = len(self.eng.requests)
+        r = self.bb("run", "greet", "-p", "who=Ada", stdin="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "hello, Ada\n")
+        self.assertEqual(self.eng.requests[n]["body"]["messages"][-1]["content"], "Say hello to Ada")
+        r = self.bb("run", "greet", stdin="")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("-p who=", r.stderr)
+        r = self.bb("workflows")
+        self.assertIn("greet", r.stdout)
+
     def test_doctor(self):
         r = self.bb("doctor")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

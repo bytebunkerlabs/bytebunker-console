@@ -620,11 +620,14 @@ class Runner:
         emit("notice", {"text": text})
 
     # ------------------------------------------------------------ a turn
-    def turn(self, run, emit, sid, req):
+    def turn(self, run, emit, sid, req, out=None):
         """One user turn on session sid. req: text, attachments, model,
         params {temperature, top_p, top_k, repetition_penalty, max_tokens,
         seed, json, stop}, effort, system, skills, tools, client_tools,
-        max_hops, auto_compress, source. Returns the run's result."""
+        tool_policy, yes, interactive, max_hops, auto_compress, source;
+        unattended (a job: a tool that would ask is refused, with the
+        reason); ephemeral (not saved as a session). Returns the run's
+        result; out["message"] gets the finished message."""
         sess = self.d.sessions.get(sid) or {"id": sid, "messages": [], "created": int(time.time() * 1000)}
         messages = sess.setdefault("messages", [])
         text = (req.get("text") or "").strip()
@@ -783,10 +786,14 @@ class Runner:
         if finish == "length":
             bits.append("⚠ stopped at Max tokens — thinking shares the budget; raise it in the panel")
         bot["meta"] = "  ·  ".join(b for b in bits if b)
-        self.save(sid, sess, model, req)
+        if out is not None:
+            out["message"] = bot
+        if not req.get("ephemeral"):
+            self.save(sid, sess, model, req)
         self.d.record_usage({"model": model, "prompt_tokens": (usage or {}).get("prompt_tokens"),
                              "completion_tokens": toks, "ttft_s": ttft, "decode_tok_s": decode,
-                             "estimated": not exact}, source=req.get("source") or "app", session=sid)
+                             "estimated": not exact}, source=req.get("source") or "app", session=sid,
+                            job=req.get("job"), workflow=req.get("workflow"))
         stored = serialize_msg(bot)
         emit("done", {"message": stored, "meta": bot["meta"], "usage": usage})
         return {"ok": not bot.get("error"), "error": bot.get("error") or None, "session": sid,
@@ -808,6 +815,8 @@ class Runner:
                                        [self.d.tool_policy(), req.get("tool_policy") or {}])
             if pol == "ask" and req.get("yes"):
                 pol = "allow"
+            if pol == "ask" and req.get("unattended"):
+                pol = "unattended"
             if pol == "ask":
                 if not req.get("interactive", True):
                     raise ApprovalNeeded(name)
@@ -822,6 +831,9 @@ class Runner:
                     text, is_err = "console could not reach the tool: %s" % e, True
             elif pol == "deny":
                 text, is_err = "this tool is turned off here (its policy is deny)", True
+            elif pol == "unattended":
+                text, is_err = ("not allowed: %s asks before it runs, and a scheduled job never asks. Allow it in "
+                                "the job's profile (tool_policy) to use it here" % name), True
             else:
                 text, is_err = "the user did not allow this call", True
         self.d.trace.log("tool", session=sid, turn=bot.get("turn"), name=name, arguments=args, where=where,

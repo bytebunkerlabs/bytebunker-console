@@ -53,6 +53,12 @@ COMMANDS = [
      "help": "tokens and throughput, 14 days"},
     {"cli": "skills", "slash": None, "args": "", "route": "GET /api/skills", "help": "skills"},
     {"cli": "mcp", "slash": None, "args": "", "route": "GET /api/tools", "help": "MCP servers and their tools"},
+    # workflows: a named prompt with {{params}}, run from the app, bb or a job
+    {"cli": "run", "slash": None, "args": "WORKFLOW [-p KEY=VALUE ...] [--yes]", "route": "POST /api/workflows/<id>/run",
+     "help": "run a workflow and follow it"},
+    {"cli": "workflows", "slash": "/workflows", "args": "", "route": "GET /api/workflows",
+     "help": "the workflows, with what each one asks for"},
+    {"cli": "profiles", "slash": None, "args": "", "route": "GET /api/profiles", "help": "the profiles"},
     # work that runs on its own
     {"cli": "agents", "slash": None, "args": "GOAL [--detach]", "route": "POST /api/agents",
      "help": "give the agents a goal and follow it"},
