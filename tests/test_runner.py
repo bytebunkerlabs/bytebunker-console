@@ -330,5 +330,32 @@ class WorkflowTest(_Base):
             self.assertIn(want, r["error"])
 
 
+class RoleTest(_Base):
+    def test_role_names_resolve_or_say_what_to_do(self):
+        st, r = self.srv.request("POST", "/api/sessions/new/turns", {"text": "hi", "model": "role:fast"})
+        self.assertEqual(st, 400)
+        self.assertIn("Settings, Roles", r["error"])
+        self.srv.request("POST", "/api/settings", {"roles": {"fast": "tiny-model", "big": "nowhere-model"}})
+        self.eng.script([{"content": "fast answer"}])
+        r, evts = self.turn("hi", model="role:fast")
+        self.assertEqual(self.sent(0)["model"], "tiny-model")
+        st, r = self.srv.request("POST", "/api/sessions/new/turns", {"text": "hi", "model": "role:big"})
+        self.assertEqual(st, 400)
+        self.assertIn("no gateway serves it", r["error"])
+        st, r = self.srv.request("POST", "/api/sessions/new/turns", {"text": "hi", "model": "role:huge"})
+        self.assertIn("there is no 'huge' role", r["error"])
+        self.srv.request("POST", "/api/settings", {"roles": {"fast": "", "big": ""}})
+
+    def test_a_job_on_an_unset_role_fails_before_it_starts(self):
+        st, saved = self.srv.request("POST", "/api/jobs", {"action": "save", "job": {
+            "name": "role job", "prompt": "hello", "model": "role:thinking", "schedule": {"kind": "cron", "cron": "0 3 * * *"}}})
+        st, r = self.srv.request("POST", "/api/jobs", {"action": "run_now", "id": saved["job"]["id"]})
+        evts = self.follow(r["run"])
+        self.assertEqual(self.of(evts, "finished")[0]["state"], "error")
+        hist = self.srv.request("GET", "/api/jobs/runs?id=" + saved["job"]["id"])[1]["runs"]
+        self.assertIn("thinking role names no model", hist[0]["error"])
+        self.assertEqual(len(self.eng.requests), self.n0)                 # nothing was sent
+
+
 if __name__ == "__main__":
     unittest.main()

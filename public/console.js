@@ -1500,6 +1500,11 @@
   }
   document.querySelectorAll("#chat-tabs button").forEach((b) => (b.onclick = () => { state.chatView = b.dataset.view; renderMessages(); }));
   document.querySelectorAll("[data-chip]").forEach((b) => (b.onclick = () => send(b.dataset.chip)));
+  // a starter that needs your text fills the box instead of sending
+  document.querySelectorAll("[data-fill]").forEach((b) => (b.onclick = () => {
+    const el = $("input"); el.value = b.dataset.fill + "\n\n"; autosizeInput(); el.focus();
+    el.selectionStart = el.selectionEnd = el.value.length;
+  }));
 
   /* ---------------- sessions ---------------- */
   // Without this, state.session is set once and never cleared, so every later
@@ -2093,6 +2098,21 @@
       try { await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: user.value, host: host.value, rates: { input: parseFloat(rin.value), output: parseFloat(rout.value) } }) }); note.textContent = "saved"; await refreshConfig(); $("who-user").textContent = state.cfg.identity.user || "local"; $("who-host").textContent = state.cfg.identity.host || ""; } catch (e) { note.textContent = e.message; }
     };
     srow.appendChild(save); srow.appendChild(note); rt.appendChild(srow);
+    // roles: what each kind of work runs on; role:fast anywhere a model goes
+    const rc = card("Roles", "what each kind of work runs on: role:fast in a profile, a workflow, a job or bb -m");
+    const roleHelp = { big: "the strongest model, for hard questions", fast: "a quick one, for small steps", vision: "one that reads images", thinking: "one that reasons before it answers" };
+    for (const role of ["big", "fast", "vision", "thinking"]) {
+      const sel = document.createElement("select"); sel.className = "text-input";
+      const o0 = document.createElement("option"); o0.value = ""; o0.textContent = "(none)"; sel.appendChild(o0);
+      const cur = (d.roles || {})[role] || "";
+      for (const id of (state.models || []).concat(cur && !(state.models || []).includes(cur) ? [cur] : [])) {
+        const o = document.createElement("option"); o.value = id; o.textContent = id + ((state.models || []).includes(id) ? "" : "  (not served now)"); sel.appendChild(o);
+      }
+      sel.value = cur;
+      sel.onchange = () => fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles: { [role]: sel.value } }) }).catch(() => {});
+      rc.appendChild(formRow(role + " · " + roleHelp[role], sel));
+    }
+    state.roles = d.roles || {};
     // profiles: the settings a turn runs with (bb -p NAME, a workflow's, a job's)
     const pc = card("Profiles", "named turn settings: bb -p NAME, a workflow's profile, a job's");
     let pd = { profiles: {}, default: "Default" };
@@ -2112,6 +2132,7 @@
       const mt = inputEl("max tokens, e.g. 8192"); mt.type = "number"; mt.value = (p.params || {}).max_tokens || "";
       const md = document.createElement("select"); md.className = "text-input";
       const m0 = document.createElement("option"); m0.value = ""; m0.textContent = "(whatever is picked)"; md.appendChild(m0);
+      for (const r of ["big", "fast", "vision", "thinking"]) { const o = document.createElement("option"); o.value = "role:" + r; o.textContent = "role: " + r + ((d.roles || {})[r] ? " (" + d.roles[r] + ")" : " (not set)"); md.appendChild(o); }
       for (const id of state.models || []) { const o = document.createElement("option"); o.value = id; o.textContent = id; md.appendChild(o); }
       md.value = p.model || "";
       const sy = textareaEl("standing instructions (optional)", 3); sy.value = p.system || "";
@@ -2383,6 +2404,7 @@
     const every = inputEl("minutes"); every.type = "number"; every.min = "1"; every.value = (j.schedule || {}).every_min || 60;
     const prompt = textareaEl("What should the model do each time? Be concrete: what to look at, what to produce, where to write it.", 5); prompt.value = j.prompt || "";
     const model = document.createElement("select"); model.className = "text-input";
+    for (const r of ["fast", "big", "thinking", "vision"]) { const o = document.createElement("option"); o.value = "role:" + r; o.textContent = "role: " + r + (((state.cfg || {}).roles || {})[r] ? " (" + state.cfg.roles[r] + ")" : " (not set)"); model.appendChild(o); }
     for (const m of (state.models || [])) { const o = document.createElement("option"); o.value = m.id || m; o.textContent = m.id || m; model.appendChild(o); }
     model.value = j.model || state.model || "";
     const tools = document.createElement("input"); tools.type = "checkbox"; tools.checked = j.tools !== false;

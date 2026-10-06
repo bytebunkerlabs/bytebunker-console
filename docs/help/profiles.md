@@ -12,7 +12,7 @@ A profile is a set of turn settings with a name: `bb -p Fast`, a workflow's prof
 | Fast | no thinking, shorter answers, at most 8 tool hops |
 | Deep | the most thinking the model offers, long answers |
 
-Make your own, or change these, in [Settings](#settings), **Profiles**. **Make default** applies one to every turn that does not name another; **reset** puts a changed built-in back.
+A profile's model can be a role, `role:fast`, so the profile follows whatever [Settings](#settings) names for it. Make your own, or change these, in [Settings](#settings), **Profiles**. **Make default** applies one to every turn that does not name another; **reset** puts a changed built-in back.
 
 ## Tool rules
 

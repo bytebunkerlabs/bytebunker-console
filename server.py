@@ -576,6 +576,7 @@ def run_job(job, run):
         "system": system, "tools": job.get("tools", True), "max_hops": int(job.get("max_hops") or 12),
         "params": {"max_tokens": 8000, "temperature": 0.3}, "auto_compress": False,
         "unattended": True, "ephemeral": True, "interactive": False, "source": "job", "job": job["id"]})
+    req["model"] = resolve_model(req.get("model")) or None
     out = {}
     res = runner().turn(run, lambda t, d=None: RUNS.emit(run, t, d), "job-" + job["id"], req, out=out)
     msg = out.get("message") or {}
@@ -1183,6 +1184,29 @@ def install_cli():
     return {"ok": True, "written": written, "skipped": skipped, "dir": bindir, "on_path": on_path, "hint": hint}
 
 
+# Roles: what each kind of work runs on, set once in Settings. A model
+# written as role:fast (in a profile, a workflow, a job, bb -m) resolves to
+# the model the role names, and only while a gateway lists it.
+ROLES = ("big", "fast", "vision", "thinking")
+
+
+def resolve_model(model):
+    """role:NAME to the model it names; anything else as it is. ValueError
+    when the role is unset, or its model is not served right now."""
+    if not isinstance(model, str) or not model.startswith("role:"):
+        return model
+    role = model[5:]
+    if role not in ROLES:
+        raise ValueError("there is no %r role (there are %s)" % (role, ", ".join(ROLES)))
+    mid = (CFG.get("roles") or {}).get(role)
+    if not mid:
+        raise ValueError("the %s role names no model yet: set it in Settings, Roles" % role)
+    GW.refresh()
+    if not any(m["id"] == mid for m in GW.models):
+        raise ValueError("the %s role is %s, and no gateway serves it right now" % (role, mid))
+    return mid
+
+
 def default_model():
     """No model named: the one last used that a gateway still lists, else the first listed."""
     GW.refresh()
@@ -1283,6 +1307,7 @@ def start_turn(sid, body, source):
         sid = new_session_id()
     body = dict(body, source=source)
     body = apply_profile(body)
+    body["model"] = resolve_model(body.get("model")) or None
     run = RUNS.start("chat", source, lambda run: runner().turn(run, lambda t, d=None: RUNS.emit(run, t, d), sid, body),
                      title=(body.get("title") or body.get("text") or "").strip()[:80] or "turn",
                      key="session:" + sid, meta={"session": sid, "model": body.get("model") or "", "what": "turns",
@@ -1858,6 +1883,7 @@ class Handler(BaseHTTPRequestHandler):
                 "netcheck": bool(CFG.get("netcheck_ssh")),
                 "warnings": CONFIG_WARNINGS[-5:],
                 "features": CFG.get("features") or {},
+                "roles": CFG.get("roles") or {},
             })
         elif path == "/api/models":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -1874,7 +1900,7 @@ class Handler(BaseHTTPRequestHandler):
                         "uploads_dir": os.path.expanduser(CFG.get("uploads_dir") or os.path.join(DATA, "uploads")),
                         "identity": CFG.get("identity") or {}, "rates": CFG.get("frontier_rates_per_mtok") or {},
                         "python": sys.version.split()[0], "frozen": bool(getattr(sys, "frozen", False)),
-                        "keep_running": bool(CFG.get("keep_running"))})
+                        "keep_running": bool(CFG.get("keep_running")), "roles": CFG.get("roles") or {}})
         elif path == "/api/gateways":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             GW.refresh(force=bool(q.get("refresh")))
@@ -2316,6 +2342,18 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 TRACE.log("settings", action="install_cli", written=res["written"], skipped=res["skipped"])
                 self._json(res)
+                return
+            if isinstance(body.get("roles"), dict):
+                roles = CFG.setdefault("roles", {})
+                for k, v in body["roles"].items():
+                    if k in ROLES:
+                        if v:
+                            roles[k] = str(v)[:200]
+                        else:
+                            roles.pop(k, None)
+                save_config()
+                BUS.publish("config", "roles", roles)
+                self._json({"ok": True, "roles": roles})
                 return
             if "keep_running" in body:
                 CFG["keep_running"] = bool(body["keep_running"])
