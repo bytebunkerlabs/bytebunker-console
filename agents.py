@@ -40,6 +40,14 @@ def agent_cfg(CFG):
     return CFG.get("agents") or {}
 
 
+def agent_timeout(CFG):
+    """Wall-clock cap on one goal, 5 min to 24 h (run_timeout_s, 3 h by default)."""
+    try:
+        return max(300, min(86400, int(agent_cfg(CFG).get("run_timeout_s") or 10800)))
+    except (TypeError, ValueError):
+        return 10800
+
+
 def status(CFG):
     a = agent_cfg(CFG)
     ssh = (a.get("ssh") or "").strip()
@@ -74,7 +82,8 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
              "test -f %s && echo HARNESS_OK || echo NO_HARNESS; "
              "(command -v podman || command -v docker) >/dev/null 2>&1 && echo RUNTIME_OK || echo NO_RUNTIME; "
              "%s --version >/dev/null 2>&1 && echo LAUNCHER_OK || echo NO_LAUNCHER; "
-             "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0])
+             "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s)' %s 2>/dev/null | sort -u | tr '\\n' ' '); "
+             "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0], shlex.quote(script))
     try:
         r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, probe],
                            capture_output=True, text=True, timeout=30)
@@ -94,10 +103,42 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
     if "NO_DIR" in out:
         checks["harness"] = False
     system = out.splitlines()[-1] if out and "_OK" not in out.splitlines()[-1] and "NO_" not in out.splitlines()[-1] else ""
-    return {"ok": all(checks.values()), "checks": checks, "system": system}
+    flags = next((l[6:] for l in out.splitlines() if l.startswith("FLAGS:")), "")
+    return {"ok": all(checks.values()), "checks": checks, "system": system, "harness": _caps_from(flags)}
 
 
-def build_command(CFG, goal):
+def _caps_from(text):
+    """What a harness's run_master.py understands, from its own text."""
+    return {"goal_id": "--goal-id" in text, "proto2": "--proto" in text, "spec": "--spec" in text,
+            "timeout": "--timeout-s" in text, "checked": round(time.time())}
+
+
+def harness_caps(CFG, refresh=False):
+    """The worker's harness abilities, asked once and remembered in config
+    (agents.harness); Test asks again. An older harness gets the old flags."""
+    a = agent_cfg(CFG)
+    if a.get("harness") and not refresh:
+        return a["harness"]
+    script = (a.get("script") or "scripts/run_master.py").strip()
+    directory = (a.get("dir") or "").strip()
+    ssh = (a.get("ssh") or "").strip()
+    text = ""
+    try:
+        if ssh:
+            probe = "cd %s && grep -o -E -- '--(goal-id|proto|spec|timeout-s)' %s 2>/dev/null | sort -u" % (
+                _rq(directory or "~/bytebunker-harness"), shlex.quote(script))
+            text = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, probe],
+                                  capture_output=True, text=True, timeout=20).stdout
+        else:
+            with open(os.path.join(os.path.expanduser(directory), script), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+    except Exception:   # noqa: BLE001 - unknown means the old flags
+        return {}
+    a["harness"] = _caps_from(text)
+    return a["harness"]
+
+
+def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None):
     """Return an argv list to spawn. Raises AgentConfigError when the feature
     is off or unconfigured. The goal is never interpolated into a shell
     unquoted: locally it is its own argv element; over SSH it is shlex-quoted
@@ -118,6 +159,19 @@ def build_command(CFG, goal):
     launcher = (a.get("python") or "uv run").strip()
     script = (a.get("script") or "scripts/run_master.py").strip()
     ssh = (a.get("ssh") or "").strip()
+    # what this harness understands (an older one gets only --goal): the
+    # goal named by the console's run id, a deadline of its own, structured
+    # events, and this run's models in a spec that never sits on a command line
+    caps = caps if caps is not None else (a.get("harness") or {})
+    extra = []
+    if caps.get("goal_id") and run_id and re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", run_id):
+        extra += ["--goal-id", run_id]
+    if caps.get("timeout"):
+        extra += ["--timeout-s", str(max(60, agent_timeout(CFG) - 30))]
+    if caps.get("proto2"):
+        extra += ["--proto", "2"]
+    if caps.get("spec") and spec_path and not ssh:
+        extra += ["--spec", spec_path]
 
     # The master's persona travels as env so the harness picks it up without
     # editing the worker's yaml. Only set when non-empty.
@@ -150,7 +204,9 @@ def build_command(CFG, goal):
         # setsid execs a COMMAND, so env assignments must go through `env`
         # rather than as a shell prefix (setsid would try to run "VAR=x").
         env_prefix = ("env " + "".join("%s=%s " % (k, shlex.quote(v)) for k, v in envs.items())) if envs else ""
-        launch = "%s%s %s --goal %s" % (env_prefix, launcher, shlex.quote(script), shlex.quote(goal))
+        launch = "%s%s %s --goal %s%s%s" % (env_prefix, launcher, shlex.quote(script), shlex.quote(goal),
+                                          "".join(" " + shlex.quote(x) for x in extra),
+                                          ' --spec "$SPEC"' if caps.get("spec") and spec_len else "")
         # Killing the local ssh does NOT stop the remote harness — without a
         # tty the remote command just keeps running, and its slaves with it
         # (measured: two masters and their researchers still alive an hour
@@ -163,7 +219,12 @@ def build_command(CFG, goal):
         # would see EOF at once and kill the run a second in (measured). The
         # real stdin is saved on fd 3 first and handed to the sidecar
         # explicitly; the harness itself correctly gets /dev/null.
-        remote = ("cd %s && exec 3<&0; if command -v setsid >/dev/null 2>&1; then setsid %s & "
+        # a spec (it holds keys) comes first on stdin, exactly spec_len bytes,
+        # into a 0600 file the run reads and the wrapper deletes; the rest of
+        # stdin is the stop channel, as before
+        spec_in = ('SPEC=$(mktemp) && chmod 600 "$SPEC" && head -c %d <&3 > "$SPEC"; ' % int(spec_len)
+                   if caps.get("spec") and spec_len else "")
+        remote = ("cd %s && exec 3<&0; " + spec_in + "if command -v setsid >/dev/null 2>&1; then setsid %s & "
                   "else %s & fi; CPID=$!; "
                   "( cat <&3 >/dev/null; kill -TERM -- -$CPID 2>/dev/null; kill -TERM $CPID 2>/dev/null; "
                   "sleep 8; kill -KILL -- -$CPID 2>/dev/null; kill -KILL $CPID 2>/dev/null; "
@@ -171,13 +232,16 @@ def build_command(CFG, goal):
                   "for rt in podman docker; do command -v $rt >/dev/null 2>&1 && "
                   "$rt ps -q --filter label=bytebunker.pgid=$CPID 2>/dev/null | xargs -r $rt kill >/dev/null 2>&1; done"
                   " ) >/dev/null 2>&1 & "
-                  "SIDE=$!; wait $CPID; RC=$?; pkill -P $SIDE 2>/dev/null; kill $SIDE 2>/dev/null; exit $RC"
+                  # the run is over: quiet the shell before the sidecar goes, or
+                  # its "Terminated" notice lands in the transcript
+                  "SIDE=$!; wait $CPID; RC=$?; exec 2>/dev/null; pkill -P $SIDE; kill $SIDE; "
+                  + ('rm -f "$SPEC"; ' if spec_in else "") + "exit $RC"
                   ) % (qdir, launch, launch)
         return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", ssh, remote]
 
     # local: no shell, goal is a discrete argv element; env via a leading `env`
     env_argv = ["env"] + ["%s=%s" % (k, v) for k, v in envs.items()] if envs else []
-    return env_argv + shlex.split(launcher) + [script, "--goal", goal]
+    return env_argv + shlex.split(launcher) + [script, "--goal", goal] + extra
 
 
 def recent_slaves(CFG, limit=40, goal_id=None):
@@ -698,7 +762,7 @@ def kill_slave(CFG, slave_id):
     return {"ok": out == "killed", "id": slave_id, "result": out}
 
 
-def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
+def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600, stdin_first=""):
     """Run cmd, calling on_line(text) for each stdout line. Returns
     (exit_code, killed). Merges stderr into stdout so a crash is visible.
     A watchdog thread enforces the timeout and honours stop_event, which is
@@ -709,6 +773,14 @@ def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600):
         cmd, cwd=cwd or None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, stdin=subprocess.PIPE,
     )
+    if stdin_first:
+        # first bytes on stdin (a run spec, read by the remote wrapper);
+        # stdin then stays open as the stop channel
+        try:
+            proc.stdin.write(stdin_first)
+            proc.stdin.flush()
+        except OSError:
+            pass
     killed = {"v": False}
     ended = threading.Event()
 

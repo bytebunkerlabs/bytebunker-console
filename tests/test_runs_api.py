@@ -37,6 +37,43 @@ for i in range(n):
 '''
 
 
+# A harness with protocol 2: --goal-id names the goal, --spec carries the
+# run's models (a 0600 file), --proto 2 adds BB_PROTO and BB_EVENT lines,
+# and the exit code says how the goal ended.
+FAKE_HARNESS_V2 = r'''
+import json, os, stat, sys, threading, time
+args = sys.argv[1:]
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+goal, gid, proto = opt("--goal"), opt("--goal-id", "g-made-up"), opt("--proto", "1")
+def ev(type_, **kw):
+    if proto == "2":
+        print("BB_EVENT " + json.dumps(dict(kw, type=type_, goal_id=gid)), flush=True)
+if proto == "2":
+    print("BB_PROTO 2", flush=True)
+print("BB_RUN " + json.dumps({"goal_id": gid, "proto": int(proto)}), flush=True)
+spec = opt("--spec")
+if spec:
+    mode = stat.S_IMODE(os.stat(spec).st_mode)
+    roles = json.load(open(spec))["roles"]
+    print("spec %s: %s" % ("private" if mode == 0o600 else "OPEN", ", ".join("%s=%s" % (r, v["model"]) for r, v in sorted(roles.items()))), flush=True)
+    print("spec file " + spec, flush=True)
+def watch():
+    sys.stdin.read()
+    os._exit(3)
+threading.Thread(target=watch, daemon=True).start()
+ev("goal_accepted", text=goal)
+if goal == "file a job":
+    ev("job_filed", job={"name": "weekly digest", "kind": "chat", "prompt": "digest", "schedule": {"kind": "interval", "every_min": 10080}})
+print("working on it", flush=True)
+if goal == "fail please":
+    ev("run_end", outcome="failed", exit_code=1, reason="no final answer")
+    sys.exit(1)
+ev("final_answer", text="done")
+ev("run_end", outcome="answered", exit_code=0, reason="")
+'''
+
+
 def data(frames):
     return [json.loads(f["data"]) for f in frames]
 
@@ -119,6 +156,64 @@ class JobRunsTest(_ServerCase):
 
 
 @unittest.skipIf(sys.platform == "win32", "a local agents launch goes through env(1); agents never run on the app's host")
+class AgentRunsV2Test(unittest.TestCase):
+    """A harness that speaks protocol 2 and takes a spec."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.eng = FakeEngine(models=[{"id": "fake-model", "max_model_len": 32768}]).start()
+        cls.data = tempfile.mkdtemp()
+        with open(os.path.join(cls.data, "fake_harness_v2.py"), "w") as f:
+            f.write(FAKE_HARNESS_V2)
+        cls.srv = Server(cls.data, {
+            "gateways": [{"name": "lan", "url": cls.eng.url.replace("127.0.0.1", "localhost"), "key": "k-1",
+                          "enabled": True, "agents_url": "http://192.0.2.10:8000/v1"}],
+            "roles": {"fast": "fake-model"},
+            "agents": {"enabled": True, "ssh": "", "dir": cls.data, "python": sys.executable,
+                       "script": "fake_harness_v2.py", "master_model": "fake-model"}})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stop()
+        cls.eng.stop()
+        shutil.rmtree(cls.data, ignore_errors=True)
+
+    def goal(self, text):
+        frames = data(self.srv.sse("/api/agents", method="POST", body={"goal": text},
+                                   until=lambda fr: '"done"' in fr[-1]["data"]))
+        rid = frames[0]["run"]
+        full = [json.loads(f["data"]) for f in self.srv.sse("/api/runs/%s/events" % rid, timeout=10,
+                until=lambda fr: json.loads(fr[-1]["data"])["type"] == "finished")]
+        return rid, frames, full
+
+    def test_the_run_names_the_goal_and_the_spec_stays_private(self):
+        rid, frames, full = self.goal("quick")
+        lines = [f["line"] for f in frames if "line" in f]
+        self.assertIn("spec private: fast=fake-model, master=fake-model", lines)
+        spec_file = next(l for l in lines if l.startswith("spec file "))[10:]
+        self.assertFalse(os.path.exists(spec_file))                     # deleted when the run ended
+        self.assertFalse(any(l.startswith("BB_") for l in lines))        # protocol lines are data, not text
+        types = [e["data"]["type"] for e in full if e["type"] == "agent_event"]
+        self.assertEqual(types, ["goal_accepted", "final_answer", "run_end"])
+        self.assertTrue(all(e["data"]["goal_id"] == rid for e in full if e["type"] == "agent_event"))
+        fin = [e for e in full if e["type"] == "finished"][0]["data"]
+        self.assertEqual((fin["state"], fin["result"]["outcome"], fin["meta"]["goal_id"]), ("done", "answered", rid))
+        with open(os.path.join(self.data, "config.json")) as f:
+            self.assertTrue(json.load(f)["agents"]["harness"]["proto2"])   # asked once, remembered
+
+    def test_a_job_filed_as_an_event_is_filed_once(self):
+        self.goal("file a job")
+        names = [j["name"] for j in self.srv.request("GET", "/api/jobs")[1]["jobs"]]
+        self.assertEqual(names.count("weekly digest"), 1)
+
+    def test_how_the_goal_ended_decides_the_run(self):
+        rid, frames, full = self.goal("fail please")
+        fin = [e for e in full if e["type"] == "finished"][0]["data"]
+        self.assertEqual(fin["state"], "error")
+        self.assertIn("no final answer", fin["error"])
+
+
+@unittest.skipIf(sys.platform == "win32", "a local agents launch goes through env(1); agents never run on the app's host")
 class AgentRunsTest(_ServerCase):
     def test_agent_goal_streams_and_hides_protocol_lines(self):
         frames = data(self.srv.sse("/api/agents", method="POST", body={"goal": "quick"},
@@ -160,7 +255,7 @@ class AgentRunsTest(_ServerCase):
         filed = [f["job"] for f in frames if "job" in f]
         self.assertEqual(filed[0]["name"], "nightly check")
         jobs_now = self.srv.request("GET", "/api/jobs")[1]["jobs"]
-        self.assertIn("agents:sultan", [j["created_by"] for j in jobs_now if j["name"] == "nightly check"])
+        self.assertIn("agents:master", [j["created_by"] for j in jobs_now if j["name"] == "nightly check"])
         evts = data(self.srv.sse("/api/events?topics=jobs&after=%d" % seq, until=lambda fr: len(fr) >= 1))
         self.assertEqual(evts[0]["type"], "saved")
 

@@ -108,10 +108,7 @@ def agent_run_timeout(cfg):
     """Wall-clock cap on one delegated goal. A multi-step goal on a single
     Spark is a 1-2 hour affair; the old fixed 3600 s killed the master while
     it was writing its synthesis after every agent had delivered."""
-    try:
-        return max(300, min(86400, int((cfg.get("agents") or {}).get("run_timeout_s") or 10800)))
-    except (TypeError, ValueError):
-        return 10800
+    return agentmod.agent_timeout(cfg)
 
 
 # What each model can actually do. An OpenAI-compatible gateway normalises the
@@ -486,23 +483,103 @@ def last_used_model():
 AGENT_SLOT = threading.Lock()   # one goal at a time: the harness keys a goal's state by its directory
 
 
+def agents_spec():
+    """This run's models for the harness (--spec): master, thinking and fast,
+    from the Agents screen's choices, else the app's roles (big, thinking,
+    fast); each with its gateway's address and key. An engine on this
+    machine's loopback is left to the worker's own config (the worker cannot
+    reach it); a gateway can name the address agents use (agents_url)."""
+    a = CFG.get("agents") or {}
+    roles = CFG.get("roles") or {}
+    pick = {"master": a.get("master_model") or roles.get("big"),
+            "thinking": a.get("thinking_model") or roles.get("thinking"),
+            "fast": a.get("slave_model") or roles.get("fast")}
+    out = {}
+    for role, model in pick.items():
+        if not model:
+            continue
+        try:
+            mid, gw = GW.resolve(model)
+        except Exception:   # noqa: BLE001
+            mid, gw = model, None
+        r = {"model": mid}
+        if gw:
+            url = gw.get("agents_url") or gw["url"]
+            if (urllib.parse.urlparse(url).hostname or "") not in ("127.0.0.1", "localhost", "::1"):
+                r["base_url"] = url
+                if gw.get("key"):
+                    r["api_key"] = gw["key"]
+        if a.get(role + "_effort"):
+            r["effort"] = a[role + "_effort"]
+        out[role] = r
+    return {"version": 1, "roles": out} if out else None
+
+
 def agent_goal(run, emit, goal, via="app"):
     """One goal on the agents worker, its lines streamed through emit. Shared
     by the Agents screen and agent-kind jobs. Returns (result, lines)."""
-    cmd = agentmod.build_command(CFG, goal)              # AgentConfigError when not set up
+    agentmod.build_command(CFG, goal)                    # AgentConfigError when not set up
+    known = bool((CFG.get("agents") or {}).get("harness"))
+    caps = agentmod.harness_caps(CFG)
+    if caps and not known:
+        save_config()                                     # asked once, remembered
     st = agentmod.status(CFG)
     cwd = None if st["mode"] == "ssh" else os.path.expanduser((CFG.get("agents") or {}).get("dir") or ".")
+    spec = json.dumps(agents_spec()) if caps.get("spec") and agents_spec() else ""
+    spec_path = None
+    if spec and st["mode"] != "ssh":
+        import tempfile
+        fd, spec_path = tempfile.mkstemp(prefix="bb-spec-", suffix=".json")
+        os.chmod(spec_path, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(spec)
+    cmd = agentmod.build_command(CFG, goal, run_id=run.id, caps=caps,
+                                 spec_len=len(spec.encode("utf-8")) if st["mode"] == "ssh" else 0,
+                                 spec_path=spec_path)
     if not AGENT_SLOT.acquire(blocking=False):
+        if spec_path:
+            os.remove(spec_path)
         msg = "another agents goal is running; they run one at a time"
         emit({"error": msg})
         emit({"phase": "done", "exit": None, "killed": "busy"})
         return {"ok": False, "error": msg}, []
     started = time.time()
     captured = []   # full master output, stored so a past run can be reopened
+    end = {}        # protocol 2: run_end says how the goal ended
     try:
         emit({"phase": "start", "id": run.id, "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
 
+        def file_job(spec):
+            try:
+                spec = dict(spec)
+                spec["created_by"] = "agents:" + str(spec.get("created_by") or "master")[:30]
+                job = JOBS.upsert(spec)
+                TRACE.log("job", action="filed_by_agent", id=job["id"], name=job["name"], run=run.id,
+                          schedule=job["schedule"], job_kind=job["kind"], by=spec["created_by"])
+                BUS.publish("jobs", "saved", {"id": job["id"], "by": spec["created_by"]})
+                emit({"job": {"id": job["id"], "name": job["name"], "schedule": job["schedule"], "kind": job["kind"]}})
+                emit({"line": "%s> \U0001f5d3 filed job \"%s\" (%s) \u2014 see the Jobs screen" % (
+                    (CFG.get("agents") or {}).get("master_name") or "Master", job["name"], jobmod.describe_schedule(job))})
+            except (ValueError, KeyError, TypeError) as e:
+                emit({"line": "console: could not file the job the master asked for: %s" % str(e)[:160]})
+
         def on_line(text):
+            if text.startswith("BB_PROTO "):
+                return
+            if text.startswith("BB_EVENT "):
+                # protocol 2: what happens, as data; the human lines carry on alongside
+                try:
+                    evt = json.loads(text[9:])
+                except ValueError:
+                    return
+                if not isinstance(evt, dict):
+                    return
+                RUNS.emit(run, "agent_event", evt)
+                if evt.get("type") == "job_filed" and isinstance(evt.get("job"), dict):
+                    file_job(evt["job"])
+                elif evt.get("type") == "run_end":
+                    end.update(outcome=evt.get("outcome"), exit_code=evt.get("exit_code"), reason=evt.get("reason"))
+                return
             if text.startswith("BB_RUN "):
                 # the harness names the goal it started (its directory on the worker)
                 try:
@@ -515,24 +592,18 @@ def agent_goal(run, emit, goal, via="app"):
             # The master files recurring work by printing one structured line;
             # the agent plane has no other way to reach the console, by design.
             if text.startswith("BB_JOB "):
+                # protocol 1: the master files recurring work as one structured line
                 try:
-                    spec = json.loads(text[7:])
-                    spec["created_by"] = "agents:" + str(spec.get("created_by") or "sultan")[:30]
-                    job = JOBS.upsert(spec)
-                    TRACE.log("job", action="filed_by_agent", id=job["id"], name=job["name"], run=run.id,
-                              schedule=job["schedule"], job_kind=job["kind"], by=spec["created_by"])
-                    BUS.publish("jobs", "saved", {"id": job["id"], "by": spec["created_by"]})
-                    emit({"job": {"id": job["id"], "name": job["name"], "schedule": job["schedule"], "kind": job["kind"]}})
-                    emit({"line": "%s> \U0001f5d3 filed job \"%s\" (%s) \u2014 see the Jobs screen" % (
-                        (CFG.get("agents") or {}).get("master_name") or "Master", job["name"], jobmod.describe_schedule(job))})
-                except (ValueError, KeyError) as e:
+                    file_job(json.loads(text[7:]))
+                except ValueError as e:
                     emit({"line": "console: could not file the job the master asked for: %s" % str(e)[:160]})
                 return
             emit({"line": text})
 
         try:
             code, killed = agentmod.run_streaming(cmd, cwd, on_line, run.cancel_event,
-                                                  timeout_s=agent_run_timeout(CFG))
+                                                  timeout_s=agent_run_timeout(CFG),
+                                                  stdin_first=spec if st["mode"] == "ssh" else "")
         except FileNotFoundError as e:
             emit({"error": "could not launch the harness: %s" % e})
             code, killed = -1, "error"
@@ -543,11 +614,19 @@ def agent_goal(run, emit, goal, via="app"):
         TRACE.log("agent_run", id=run.id, goal=goal[:8000], host=st["host"], mode=st["mode"],
                   isolated=st["isolated"], exit=code, killed=killed or False, via=via,
                   lines=len(captured), output=captured, ms=int((time.time() - started) * 1000))
-        return ({"ok": code == 0, "exit": code, "killed": killed or False, "lines": len(captured),
-                 "error": None if code == 0 else "the harness exited %s%s" % (code, " (%s)" % killed if killed else "")},
-                captured)
+        ok = code == 0 if not end else end.get("outcome") == "answered"
+        error = None if ok else (
+            "the goal ended %s%s" % (end.get("outcome"), ": " + end["reason"] if end.get("reason") else "") if end
+            else "the harness exited %s%s" % (code, " (%s)" % killed if killed else ""))
+        return ({"ok": ok, "exit": code, "killed": killed or False, "lines": len(captured), "error": error,
+                 "outcome": end.get("outcome")}, captured)
     finally:
         AGENT_SLOT.release()
+        if spec_path:
+            try:
+                os.remove(spec_path)
+            except OSError:
+                pass
 
 
 def run_job(job, run):
