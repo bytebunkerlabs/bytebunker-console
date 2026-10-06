@@ -190,6 +190,18 @@ class Monitors:
             fresh = [(t, v) for t, v in self.cache.values() if now - t < max_age]
         return max(fresh, key=lambda tv: tv[0])[1] if fresh else None
 
+    def serving(self, max_age=300):
+        """What dgx-serve says each node serves (rack up's record, the
+        monitor's serving block), by the name the engine serves it under.
+        From the last fetch only: a model's facts never wait on the network."""
+        d = self.latest(max_age)
+        out = {}
+        for n in (d or {}).get("nodes") or []:
+            s = n.get("serving")
+            if isinstance(s, dict) and (s.get("served_name") or s.get("model")):
+                out.setdefault(s.get("served_name") or s.get("model"), dict(s, node=n.get("name")))
+        return out
+
     def engine_stats(self):
         """What every monitored engine is doing right now, summed: the
         playground asks when a stream goes quiet."""

@@ -173,6 +173,26 @@ def caps_for(model_id):
     if hits:
         merged.update(table[max(hits, key=len)])
     base = (model_id or "").rsplit("@", 1)[0]
+    # what dgx-serve says it serves this model with (the monitor's serving block)
+    sv = (MON.serving().get(model_id) or MON.serving().get(base)) if "MON" in globals() else None
+    if sv:
+        if isinstance(sv.get("context"), int) and sv["context"] > 0:
+            merged["ctx"] = sv["context"]
+        for k in ("tools", "vision"):
+            if sv.get(k) is not None:
+                merged[k] = bool(sv[k])
+        dia = sv.get("dialect") or {}
+        if str(dia.get("strip_reasoning")) in ("1", "true", "True"):
+            merged["strip_reasoning"] = True
+        if str(dia.get("echo_reasoning")) in ("1", "true", "True"):
+            merged["strip_reasoning"] = False
+        if dia.get("effort") and "." not in str(dia["effort"]):
+            merged["effort"] = str(dia["effort"]).replace(",", " ").split()
+        if dia.get("thinking"):
+            merged["thinking_switch"] = str(dia["thinking"])
+        if str(dia.get("min_max_tokens") or "").isdigit():
+            merged["min_max_tokens"] = int(dia["min_max_tokens"])
+        merged["served_by"] = sv.get("node")
     served = (GW.served.get(model_id) or GW.served.get(base)) if "GW" in globals() else None
     if served:
         merged["ctx"] = served
@@ -1968,7 +1988,14 @@ class Handler(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
                 GW.refresh(force=bool(q.get("refresh")))
-                self._json({"object": "list", "data": GW.models, "gateways": GW.status,
+                serving = MON.serving()
+                data = GW.models
+                if serving:
+                    # a monitor knows what is really served: a router's other routes are only routes
+                    data = [dict(m, served=(m.get("base_id") or m["id"]) in serving
+                                 or (GW.status.get(m["gateway"]) or {}).get("kind") not in ("litellm",))
+                            for m in GW.models]
+                self._json({"object": "list", "data": data, "gateways": GW.status,
                             "last_used": last_used_model()})
             except Exception as e:   # noqa: BLE001
                 self._json({"error": str(e), "data": []}, 502)
@@ -3222,6 +3249,8 @@ def watch_models():
         every = max(2, _int(CFG.get("models_watch_s"), 30))
         if _LISTENING[0] > 0:
             try:
+                if MON.list():
+                    MON.cluster(0, max_age=every)       # the serving blocks, for caps_for
                 GW.refresh(force=True)
                 sig = _models_signature()
                 if last is not None and sig != last:

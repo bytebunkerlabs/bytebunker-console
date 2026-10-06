@@ -189,6 +189,24 @@ def effort_for(effort, caps):
     return next((lv for lv in nearest if lv in levels), None)
 
 
+def apply_thinking_switch(body, caps, effort):
+    """A model with a thinking switch (dgx-serve's DIALECT_THINKING, a
+    request path such as chat_template_kwargs.enable_thinking): effort off
+    turns it off, any level turns it on, Default leaves it alone."""
+    path = caps.get("thinking_switch")
+    if not path or not effort:
+        return
+    keys = [k for k in str(path).split(".") if k]
+    if not keys:
+        return
+    node = body
+    for k in keys[:-1]:
+        nxt = node.get(k)
+        node[k] = dict(nxt) if isinstance(nxt, dict) else {}
+        node = node[k]
+    node[keys[-1]] = effort != "off"
+
+
 def _fmt_bytes(n):
     if n >= 1048576:
         return "%.1f MB" % (n / 1048576)
@@ -679,6 +697,9 @@ class Runner:
             body["reasoning_effort"] = eff
         if caps.get("ctk"):
             body["chat_template_kwargs"] = caps["ctk"]
+        apply_thinking_switch(body, caps, req.get("effort"))
+        if caps.get("min_max_tokens") and body["max_tokens"] < caps["min_max_tokens"]:
+            body["max_tokens"] = caps["min_max_tokens"]     # it thinks first: less room cuts the answer off
         tools = self.tool_defs(caps, req)
         if tools:
             body["tools"] = tools

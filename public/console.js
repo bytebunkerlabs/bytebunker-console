@@ -17,6 +17,15 @@
     const near = { off: ["none", "minimal"], low: ["minimal"], medium: ["low", "high"], high: ["xhigh", "medium"], max: ["xhigh", "max", "high"] }[effort] || [];
     return near.find((l) => levels.includes(l)) || null;
   }
+  // runner.py apply_thinking_switch: a model with a thinking switch
+  // (dgx-serve's DIALECT_THINKING) is told off or on by the effort setting
+  function applyThinkingSwitch(body, caps, effort) {
+    const keys = String((caps && caps.thinking_switch) || "").split(".").filter(Boolean);
+    if (!keys.length || !effort) return;
+    let node = body;
+    for (const k of keys.slice(0, -1)) { node[k] = Object.assign({}, node[k] || {}); node = node[k]; }
+    node[keys[keys.length - 1]] = effort !== "off";
+  }
   function effortLabel(e) {
     if (typeof e === "number") return OLD_EFFORT_LABEL[e] || String(e);
     return e ? e.charAt(0).toUpperCase() + e.slice(1) : "Default";
@@ -978,6 +987,8 @@
     // Thinking is off by default on vLLM's DeepSeek-V4 path and must be asked
     // for; other models ignore an empty object.
     if (caps.ctk && Object.keys(caps.ctk).length) body.chat_template_kwargs = caps.ctk;
+    applyThinkingSwitch(body, caps, ABSTRACT_EFFORT[P.effort]);
+    if (caps.min_max_tokens && body.max_tokens < caps.min_max_tokens) body.max_tokens = caps.min_max_tokens;
     const tools = toolDefs(caps);
     if (tools) { body.tools = tools; body.tool_choice = "auto"; }
 
@@ -1703,10 +1714,14 @@
     const sel = $("model-select");
     sel.textContent = "";
     const gwNames = [...new Set((data.data || []).map((m) => m.gateway || ""))];
+    // a monitor knows what is really served: those first, a router's other routes after, marked
+    const notServed = (id) => modelInfo(id).served === false;
+    state.models.sort((a, b) => notServed(a) - notServed(b));
     for (const id of state.models) {
       const o = document.createElement("option");
       o.value = id;
-      o.textContent = gwNames.length > 1 ? baseId(id) + "  \u00b7  " + gatewayOf(id) + (modelInfo(id).pinned ? " (direct)" : "") : id;
+      o.textContent = (gwNames.length > 1 ? baseId(id) + "  \u00b7  " + gatewayOf(id) + (modelInfo(id).pinned ? " (direct)" : "") : id) +
+                      (notServed(id) ? "  (configured, not serving)" : "");
       sel.appendChild(o);
     }
     // a gateway's list is what it is configured for, not what is up: start
