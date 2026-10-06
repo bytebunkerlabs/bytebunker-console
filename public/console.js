@@ -1955,6 +1955,20 @@
       try { await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: user.value, host: host.value, rates: { input: parseFloat(rin.value), output: parseFloat(rout.value) } }) }); note.textContent = "saved"; await refreshConfig(); $("who-user").textContent = state.cfg.identity.user || "local"; $("who-host").textContent = state.cfg.identity.host || ""; } catch (e) { note.textContent = e.message; }
     };
     srow.appendChild(save); srow.appendChild(note); rt.appendChild(srow);
+    // the terminal: bb runs on this same server; its chats show up in Sessions
+    const cli = card("Command line", "bb: chat, agents and jobs from a terminal, on this same server");
+    const crow = document.createElement("div"); crow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const cb = document.createElement("button"); cb.type = "button"; cb.className = "ghost-btn"; cb.textContent = "Install command-line tool";
+    const cn = document.createElement("span"); cn.className = "hint";
+    cb.onclick = async () => {
+      cn.textContent = "writing\u2026";
+      try {
+        const r = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "install_cli" }) });
+        const x = await r.json(); if (!r.ok || x.error) throw new Error(x.error || ("HTTP " + r.status));
+        cn.textContent = "installed: " + x.written.join(", ") + (x.skipped.length ? " \u00b7 not written: " + x.skipped.join("; ") : "") + (x.hint ? " \u00b7 " + x.hint : " \u00b7 try: bb \"hello\"");
+      } catch (e) { cn.textContent = e.message; }
+    };
+    crow.appendChild(cb); crow.appendChild(cn); cli.appendChild(crow);
     // updates: only when asked — the app does not phone home on its own
     if (d.desktop) {
       const up = card("Updates", "checked only when you press the button; nothing is downloaded or installed");

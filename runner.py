@@ -265,7 +265,7 @@ class Runner:
     """deps: registry (gateways), caps_for, facts (ModelFacts), mcp (a
     function returning the MCP host), trace, record_usage(evt, **extra),
     sessions, on_session(summary), skill_bodies(names) -> {name: body},
-    write_archive, uploads_root(), engine_stats()."""
+    write_archive, uploads_root(), engine_stats(), default_model()."""
 
     def __init__(self, deps):
         self.d = deps
@@ -594,9 +594,9 @@ class Runner:
         messages = sess.setdefault("messages", [])
         text = (req.get("text") or "").strip()
         atts = list(req.get("attachments") or [])
-        model = req.get("model") or sess.get("model")
+        model = req.get("model") or sess.get("model") or self.d.default_model()
         if not model:
-            raise TurnError("no model: name one, or pick one in the app first")
+            raise TurnError("no model: no gateway lists one. Add a model server on the Gateways screen")
         if not text and not atts:
             raise TurnError("nothing to send")
         params = dict(req.get("params") or {})
@@ -786,7 +786,7 @@ class Runner:
         """The model writes a dense summary of the older part of the
         conversation; the originals go to the archive; the summary takes
         their place. The newest KEEP_RECENT user turns stay verbatim."""
-        model = req.get("model") or sess.get("model")
+        model = req.get("model") or sess.get("model") or self.d.default_model()
         caps = self.caps(model)
         win = caps.get("ctx") or 131072
         lst = [m for m in sess["messages"] if m.get("kind") != "compress"]

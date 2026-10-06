@@ -1090,6 +1090,97 @@ def record_usage(body, **extra):
         append_usage(evt)
 
 
+def install_cli():
+    """Put bb (and bytebunker, its long name) on this user's PATH: a small
+    script that runs this app with --cli, or bb.py from a checkout. bb is
+    also Babashka's command: a bb that is not ours is left alone and only
+    bytebunker is written."""
+    import shutil
+    import stat
+    frozen = getattr(sys, "frozen", False)
+    if os.name == "nt":
+        bindir = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "ByteBunker", "bin")
+        exe = sys.executable
+        twin = os.path.join(os.path.dirname(exe), "ByteBunker-cli.exe")    # the console build: a terminal needs it
+        if frozen and os.path.exists(twin):
+            exe = twin
+        target = ('"%s" --cli %%*' % exe) if frozen else ('"%s" "%s" %%*' % (exe, os.path.join(ROOT, "bb.py")))
+        body, ext = "@echo off\r\nrem ByteBunker's command line (written by the app)\r\n" + target + "\r\n", ".cmd"
+    else:
+        bindir = os.path.expanduser("~/.local/bin")
+        target = ('"%s" --cli "$@"' % sys.executable) if frozen else ('"%s" "%s" "$@"' % (sys.executable, os.path.join(ROOT, "bb.py")))
+        body, ext = "#!/bin/sh\n# ByteBunker's command line (written by the app)\nexec " + target + "\n", ""
+    os.makedirs(bindir, exist_ok=True)
+    written, skipped = [], []
+    for name in ("bytebunker", "bb"):
+        path = os.path.join(bindir, name + ext)
+        other = shutil.which(name)
+        ours = False
+        if os.path.exists(path):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                ours = "ByteBunker" in f.read(4000)
+        if name == "bb" and other and os.path.realpath(other) != os.path.realpath(path) and not ours:
+            skipped.append("bb (%s is already another program's)" % other)
+            continue
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(body)
+        if os.name != "nt":
+            os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        written.append(path)
+    on_path = any(os.path.normcase(os.path.realpath(p)) == os.path.normcase(os.path.realpath(bindir))
+                  for p in (os.environ.get("PATH") or "").split(os.pathsep) if p)
+    hint = None
+    if not on_path:
+        hint = ('add %s to your PATH (System settings, Environment Variables)' % bindir if os.name == "nt"
+                else 'add it to your PATH: echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.%src' % (
+                    "zsh" if "zsh" in (os.environ.get("SHELL") or "") else "bash"))
+    return {"ok": True, "written": written, "skipped": skipped, "dir": bindir, "on_path": on_path, "hint": hint}
+
+
+def default_model():
+    """No model named: the one last used that a gateway still lists, else the first listed."""
+    GW.refresh()
+    return last_used_model() or (GW.models[0]["id"] if GW.models else "")
+
+
+# Profiles: named sets of turn settings, chosen in the app or with bb -p.
+# A request's own settings win over its profile's.
+DEFAULT_PROFILES = {
+    "Default": {"description": "the model's own defaults"},
+    "Fast": {"description": "no thinking, shorter answers, few tool hops",
+             "effort": "off", "max_hops": 8, "params": {"max_tokens": 4096}},
+    "Deep": {"description": "the most thinking the model offers, long answers",
+             "effort": "max", "params": {"max_tokens": 32768}},
+}
+PROFILE_KEYS = ("model", "effort", "params", "system", "skills", "tools", "max_hops", "auto_compress")
+
+
+def profiles():
+    out = {k: dict(v, builtin=True) for k, v in DEFAULT_PROFILES.items()}
+    for name, p in (CFG.get("profiles") or {}).items():
+        if isinstance(p, dict) and isinstance(name, str):
+            base = dict(out.get(name) or {})
+            base.update(p)
+            base["builtin"] = name in DEFAULT_PROFILES
+            out[name] = base
+    return out
+
+
+def apply_profile(body):
+    """The request's settings over its profile's. ValueError for an unknown profile."""
+    name = body.get("profile") or CFG.get("default_profile") or "Default"
+    prof = profiles().get(name)
+    if prof is None:
+        raise ValueError("no profile named %r (bb has: %s)" % (name, ", ".join(sorted(profiles()))))
+    out = {k: v for k, v in prof.items() if k in PROFILE_KEYS}
+    params = dict(prof.get("params") or {})
+    params.update(body.get("params") or {})
+    out.update({k: v for k, v in body.items() if v is not None and k != "params"})
+    out["params"] = params
+    out["profile"] = name
+    return out
+
+
 def runner():
     if not _RUNNER:
         import types
@@ -1098,7 +1189,8 @@ def runner():
             record_usage=record_usage, sessions=SESSIONS,
             on_session=lambda summary: BUS.publish("sessions", "updated", summary),
             skill_bodies=lambda names: skill_catalog().bodies(names),
-            write_archive=write_archive, uploads_root=uploads_root, engine_stats=engine_stats)))
+            write_archive=write_archive, uploads_root=uploads_root, engine_stats=engine_stats,
+            default_model=default_model)))
     return _RUNNER[0]
 
 
@@ -1320,6 +1412,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "no such session"}, 404)
             return
         body["source"] = self._client()
+        try:
+            body = apply_profile(body)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
         emit_to = lambda run: (lambda t, d=None: RUNS.emit(run, t, d))   # noqa: E731
         if what == "turns":
             target = lambda run: runner().turn(run, emit_to(run), sid, body)      # noqa: E731
@@ -1334,6 +1431,42 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "a turn is already running in this session", "run": e.run.id, "session": sid}, 409)
             return
         self._json({"ok": True, "run": run.id, "session": sid}, 202)
+
+    def _profiles_admin(self, body):
+        """{action: save, name, profile} | {action: delete, name} | {action: default, name}.
+        A built-in profile can be changed, and deleting the change restores it."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        name = str(body.get("name") or "").strip()
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}$", name):
+            self._json({"error": "a profile name is letters, digits, spaces, . _ - (40 at most)"}, 400)
+            return
+        mine = CFG.setdefault("profiles", {})
+        action = body.get("action") or "save"
+        if action == "save":
+            prof = body.get("profile") if isinstance(body.get("profile"), dict) else {}
+            clean = {k: prof[k] for k in PROFILE_KEYS + ("description",) if k in prof}
+            if "effort" in clean and clean["effort"] not in runnermod.ABSTRACT_EFFORT + runnermod.EFFORT_LEVELS + (None,):
+                self._json({"error": "effort is one of off, low, medium, high, max"}, 400)
+                return
+            mine[name] = clean
+        elif action == "delete":
+            if name not in mine:
+                self._json({"error": "no saved profile named %r" % name}, 404)
+                return
+            mine.pop(name)
+        elif action == "default":
+            if name not in profiles():
+                self._json({"error": "no profile named %r" % name}, 404)
+                return
+            CFG["default_profile"] = name
+        else:
+            self._json({"error": "unknown action"}, 400)
+            return
+        save_config()
+        BUS.publish("config", "profiles", {"name": name})
+        self._json({"ok": True, "profiles": profiles(), "default": CFG.get("default_profile") or "Default"})
 
     def _client(self):
         """Who started this: "app" unless a client says otherwise (bb sends cli)."""
@@ -1579,6 +1712,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(SESSIONS.list())
         elif path == "/api/events":
             self._events(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
+        elif path == "/api/profiles":
+            self._json({"profiles": profiles(), "default": CFG.get("default_profile") or "Default"})
         elif path == "/api/runs":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             self._json({"runs": RUNS.history(limit=max(1, min(1000, _int((q.get("limit") or [""])[0], 100))),
@@ -1751,6 +1886,11 @@ class Handler(BaseHTTPRequestHandler):
             ok = RUNS.cancel(rid)
             self._json({"ok": ok, "id": rid}, 200 if ok else 409)
             return
+        if path == "/api/profiles":
+            body = self._body()
+            if body is not None:
+                self._profiles_admin(body)
+            return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
                         "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave"):
@@ -1900,6 +2040,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/settings":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
+                return
+            if body.get("action") == "install_cli":
+                try:
+                    res = install_cli()
+                except OSError as e:
+                    self._json({"error": "could not write the command: %s" % e}, 500)
+                    return
+                TRACE.log("settings", action="install_cli", written=res["written"], skipped=res["skipped"])
+                self._json(res)
                 return
             ident = CFG.setdefault("identity", {})
             if "user" in body:

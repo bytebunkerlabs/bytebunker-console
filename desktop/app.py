@@ -47,27 +47,20 @@ if code_root() not in sys.path:
     sys.path.insert(0, code_root())
 from version import VERSION  # noqa: E402  (the one place the version lives)
 import instance as instancemod  # noqa: E402
+import paths as pathsmod  # noqa: E402
 
 
-def home_dir():
-    if os.environ.get("BYTEBUNKER_HOME"):
-        return os.path.abspath(os.path.expanduser(os.environ["BYTEBUNKER_HOME"]))
-    if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/ByteBunker")
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
-        return os.path.join(base, "ByteBunker")
-    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "bytebunker")
+home_dir = pathsmod.home_dir      # one answer for the app, the server and bb
 
 
 def first_run_config(home):
     """A fresh install knows no engines: the UI opens on discovery. Nothing
     rack-specific from the server's own defaults survives this."""
     ws = os.path.join(home, "workspace")
-    servers = {"jobs": {"command": "python3", "args": ["mcp_jobs.py"], "env": {}, "enabled": True}}
-    if sys.platform != "win32":
-        # a shell for the model on your own machine: present, off until you turn it on
-        servers["terminal"] = {"command": "python3", "args": ["mcp_terminal.py", ws], "env": {}, "enabled": False}
+    servers = {"jobs": {"command": "python3", "args": ["mcp_jobs.py"], "env": {}, "enabled": True},
+               # a shell for the model on your own machine (PowerShell on Windows):
+               # present, off until you turn it on
+               "terminal": {"command": "python3", "args": ["mcp_terminal.py", ws], "env": {}, "enabled": False}}
     try:
         user = getpass.getuser()
     except Exception:   # noqa: BLE001
@@ -266,6 +259,10 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["--mcp"]:
         return run_mcp(argv[1:])
+    if argv[:1] == ["--cli"]:
+        # the bb command: the installed shim runs the app binary with --cli
+        import bb
+        return bb.main(argv[1:])
     if argv[:1] in (["--version"], ["-V"]):
         print(APP, VERSION)
         return 0

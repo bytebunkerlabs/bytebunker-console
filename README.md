@@ -143,6 +143,33 @@ ollama serve
 
 ---
 
+## The command line: `bb`
+
+`bb` is ByteBunker in a terminal, on the same server as the app: what you
+ask in a terminal shows up in the app's Sessions as it happens, with the
+same models, tools, skills, profiles, trace log and usage. Install it from
+Settings, **Install command-line tool** (it writes `bb` and `bytebunker` to
+`~/.local/bin`; on Windows, `%LOCALAPPDATA%\ByteBunker\bin`), or run
+`python3 bb.py` from a checkout. It starts the server if none is running.
+
+```
+bb                                  chat here; /help for the slash commands
+bb "what does this error mean?"     one answer; the question is the arguments
+git diff | bb "review this"         piped input is attached to the question
+bb ask -p Fast -e off "…"           a profile (Default, Fast, Deep, yours), an effort level
+bb ask --json "…"                   the answer as JSON, for scripts
+bb sessions ls                      recent sessions, the app's and bb's
+bb agents "goal"                    give the agents a goal and follow it; bb agents stop
+bb jobs ls · bb jobs run JOB        scheduled jobs; run one now and follow it
+bb runs ls · bb runs watch RUN      everything that ran or runs; attach to any of it
+bb models · gateways · cluster · usage · skills · mcp
+bb doctor                           what is reachable, and what to do if not
+```
+
+Ctrl-C stops the turn on the server and keeps what came. Exit codes: 0 ok,
+1 the model or a run failed, 2 usage, 3 cancelled, 4 an approval was needed
+and nobody could answer, 5 no server.
+
 ## Cluster: every node from one rack monitor
 
 The **Cluster** screen draws every machine as a rack unit: a faceplate (what
