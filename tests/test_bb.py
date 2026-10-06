@@ -89,6 +89,14 @@ class BBTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("no profile named", r.stderr)
 
+    def test_a_title_with_newlines_stays_on_one_row(self):
+        self.srv.request("POST", "/api/sessions", {"id": "s-multiline", "title": "#!/bin/sh\nset -e\necho hi",
+                                                   "updated": int(time.time() * 1000), "messages": []})
+        r = self.bb("sessions", "ls")
+        row = [l for l in r.stdout.splitlines() if l.startswith("s-multiline")]
+        self.assertEqual(len(row), 1)
+        self.assertIn("#!/bin/sh set -e echo hi", row[0])
+
     def test_lists(self):
         for args, want in ((["models"], MODEL), (["gateways"], "fake"), (["runs", "ls"], "run"),
                            (["sessions", "ls"], "session"), (["help"], "bb ask")):

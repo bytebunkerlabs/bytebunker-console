@@ -160,7 +160,7 @@ def ask_user(out, question):
 
 def table(rows, headers):
     """Plain columns; the last one takes what is left."""
-    rows = [[("" if v is None else str(v)) for v in r] for r in rows]
+    rows = [[("" if v is None else " ".join(str(v).split())) for v in r] for r in rows]   # one line per cell
     widths = [max([len(h)] + [len(r[i]) for r in rows]) for i, h in enumerate(headers)]
     lines = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip()]
     for r in rows:
