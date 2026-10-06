@@ -20,6 +20,7 @@ datas = [
     (os.path.join(ROOT, "skills"), "skills"),
     (os.path.join(ROOT, "plugins"), "plugins"),
     (os.path.join(ROOT, "config.json.example"), "."),
+    (os.path.join(ROOT, "docs", "help"), os.path.join("docs", "help")),
 ]
 # the console is imported at run time by the launcher, and the built-in MCP
 # servers by --mcp: name them so the analysis bundles them and their imports

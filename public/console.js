@@ -1840,7 +1840,7 @@
     const form = document.createElement("div"); form.hidden = true;
     form.style.cssText = "display:flex;flex-direction:column;gap:10px";
     const name = inputEl("kebab-case name, e.g. netscaler-triage");
-    const desc = inputEl("one line: what it does (the catalog shows this to the Sultan)");
+    const desc = inputEl("one line: what it does (the agents see this in the catalog)");
     const when = inputEl("when to use (optional routing hint)");
     const tools = inputEl("tools allowlist, comma-separated (optional): fetch_url, cve_record, run_shell");
     const model = inputEl("model hint (optional)");
@@ -2367,14 +2367,14 @@
     const j = existing || {};
     const card = document.createElement("div"); card.className = "card"; card.style.gap = "8px";
     const head = document.createElement("div"); head.className = "skill-head";
-    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono">cron or every N minutes \u00b7 one prompt, or one goal for the Sultan</span></div>';
+    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono">cron or every N minutes \u00b7 one prompt, or one goal for the agents</span></div>';
     head.querySelector("b").textContent = existing ? "Edit job" : "New job";
     const tgl = document.createElement("button"); tgl.type = "button"; tgl.className = existing ? "ghost-btn" : "solid-btn"; tgl.textContent = existing ? "Close" : "\uff0b New job";
     head.appendChild(tgl); card.appendChild(head);
     const form = document.createElement("div"); form.hidden = !existing; form.style.cssText = "display:flex;flex-direction:column;gap:8px";
     const name = inputEl("name"); name.value = j.name || "";
     const kind = document.createElement("select"); kind.className = "text-input";
-    for (const [v, l] of [["chat", "chat: one prompt, with tools and skills"], ["agent", "agent: a goal for the Sultan and the court"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; kind.appendChild(o); }
+    for (const [v, l] of [["chat", "chat: one prompt, with tools and skills"], ["agent", "agent: a goal for the agents"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; kind.appendChild(o); }
     kind.value = j.kind || "chat";
     const skind = document.createElement("select"); skind.className = "text-input";
     for (const [v, l] of [["cron", "cron expression"], ["interval", "every N minutes"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; skind.appendChild(o); }
@@ -2392,7 +2392,7 @@
     const hops = inputEl("max tool hops"); hops.type = "number"; hops.min = "1"; hops.max = "30"; hops.value = j.max_hops || 12;
     const chatOnly = [formRow("model", model), toolsRow, formRow("skills", skills), formRow("instructions", sys), formRow("max tool hops", hops)];
     const cronRow = formRow("cron", cron), everyRow = formRow("every (minutes)", every);
-    const sync = () => { const c = kind.value === "chat"; chatOnly.forEach((e) => e.hidden = !c); cronRow.hidden = skind.value !== "cron"; everyRow.hidden = skind.value !== "interval"; prompt.placeholder = c ? "What should the model do each time? Be concrete: what to look at, what to produce, where to write it." : "The goal for the Sultan, as you would type it on the Agents screen."; };
+    const sync = () => { const c = kind.value === "chat"; chatOnly.forEach((e) => e.hidden = !c); cronRow.hidden = skind.value !== "cron"; everyRow.hidden = skind.value !== "interval"; prompt.placeholder = c ? "What should the model do each time? Be concrete: what to look at, what to produce, where to write it." : "The goal for the agents, as you would type it on the Agents screen."; };
     kind.onchange = sync; skind.onchange = sync;
     [formRow("name", name), formRow("type", kind), formRow("schedule", skind), cronRow, everyRow, formRow(kind.value === "chat" ? "prompt" : "goal", prompt)].concat(chatOnly).forEach((e) => form.appendChild(e));
     sync();
@@ -2473,6 +2473,184 @@
       const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap"; pre.style.maxHeight = "420px";
       pre.textContent = r.error ? ("error: " + r.error) : (r.output || "(no output)");
       c.appendChild(pre); pane.appendChild(c);
+    }
+  }
+
+  /* ---------------- help ---------------- */
+  // Guides from docs/help, drawn by a small Markdown subset (no raw HTML):
+  // headings, paragraphs, lists, tables, > callouts, ``` code with a copy
+  // button, ::: mac / windows / linux blocks (yours first), and links:
+  // help:id opens a guide, #screen opens a screen.
+  const help = { guides: null, open: false };
+  function myOS() { const p = (state.cfg && state.cfg.platform) || navigator.platform || ""; return /darwin|mac/i.test(p) ? "mac" : /win/i.test(p) ? "windows" : "linux"; }
+  function helpInline(text, el) {
+    const re = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)\s]+)\)|\*([^*\s][^*]*)\*/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) el.appendChild(document.createTextNode(text.slice(last, m.index)));
+      if (m[1] !== undefined) { const c = document.createElement("code"); c.textContent = m[1]; el.appendChild(c); }
+      else if (m[2] !== undefined) { const b = document.createElement("b"); b.textContent = m[2]; el.appendChild(b); }
+      else if (m[3] !== undefined) {
+        const a = document.createElement("a"); a.textContent = m[3]; const href = m[4];
+        a.onclick = (e) => { e.preventDefault(); if (href.startsWith("help:")) openHelp(href.slice(5)); else if (href.startsWith("#")) { go(href.slice(1)); } else openOut(href); };
+        el.appendChild(a);
+      } else if (m[5] !== undefined) { const i = document.createElement("i"); i.textContent = m[5]; el.appendChild(i); }
+      last = re.lastIndex;
+    }
+    if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
+    return el;
+  }
+  function helpDom(md) {
+    const root = document.createElement("div"); root.className = "help-doc";
+    const lines = md.replace(/\r\n/g, "\n").split("\n");
+    const isBlock = (l) => /^(```|:::|#{1,3} |\s*[-*] |\s*\d+\. |\||> )/.test(l) || !l.trim();
+    let i = 0;
+    const osBlocks = [];
+    const flushOS = () => {
+      if (!osBlocks.length) return;
+      const mine = osBlocks.find((b) => b.os === myOS()) || osBlocks[0];
+      root.appendChild(helpDom(mine.md));
+      const others = osBlocks.filter((b) => b !== mine);
+      if (others.length) {
+        const d = document.createElement("details"); d.className = "os-other";
+        const sm = document.createElement("summary"); sm.textContent = "On " + others.map((b) => ({ mac: "macOS", windows: "Windows", linux: "Linux" }[b.os] || b.os)).join(" or ");
+        d.appendChild(sm);
+        for (const b of others) { const h = document.createElement("h3"); h.textContent = { mac: "macOS", windows: "Windows", linux: "Linux" }[b.os] || b.os; d.appendChild(h); d.appendChild(helpDom(b.md)); }
+        root.appendChild(d);
+      }
+      osBlocks.length = 0;
+    };
+    while (i < lines.length) {
+      const l = lines[i];
+      const osm = /^:::\s*(mac|windows|linux)\s*$/.exec(l);
+      if (osm) {
+        const body = []; i++;
+        while (i < lines.length && !/^:::\s*$/.test(lines[i])) body.push(lines[i++]);
+        i++; osBlocks.push({ os: osm[1], md: body.join("\n") });
+        continue;
+      }
+      if (l.trim()) flushOS();
+      if (/^```/.test(l)) {
+        const body = []; i++;
+        while (i < lines.length && !/^```/.test(lines[i])) body.push(lines[i++]);
+        i++;
+        const w = document.createElement("div"); w.className = "code";
+        const pre = document.createElement("pre"); pre.textContent = body.join("\n");
+        w.appendChild(pre); w.appendChild(copyBtn(() => pre.textContent)); root.appendChild(w);
+        continue;
+      }
+      const h = /^(#{1,3}) (.*)$/.exec(l);
+      if (h) { const el = document.createElement("h" + h[1].length); helpInline(h[2], el); root.appendChild(el); i++; continue; }
+      if (/^\s*([-*]|\d+\.) /.test(l)) {
+        const ordered = /^\s*\d+\. /.test(l);
+        const list = document.createElement(ordered ? "ol" : "ul");
+        while (i < lines.length && /^\s*([-*]|\d+\.) /.test(lines[i])) {
+          let item = lines[i].replace(/^\s*([-*]|\d+\.) /, ""); i++;
+          while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*]|\d+\.) /.test(lines[i])) item += " " + lines[i++].trim();
+          list.appendChild(helpInline(item, document.createElement("li")));
+        }
+        root.appendChild(list); continue;
+      }
+      if (/^\|/.test(l)) {
+        const rows = [];
+        while (i < lines.length && /^\|/.test(lines[i])) rows.push(lines[i++]);
+        const cells = (r) => r.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+        const t = document.createElement("table");
+        rows.forEach((r, n) => {
+          if (n === 1 && /^[\s|:-]+$/.test(r)) return;
+          const tr = document.createElement("tr");
+          for (const c of cells(r)) tr.appendChild(helpInline(c, document.createElement(n === 0 ? "th" : "td")));
+          t.appendChild(tr);
+        });
+        root.appendChild(t); continue;
+      }
+      if (/^> /.test(l)) {
+        const body = [];
+        while (i < lines.length && /^> ?/.test(lines[i]) && lines[i].trim()) body.push(lines[i++].replace(/^> ?/, ""));
+        const text = body.join(" ");
+        const c = document.createElement("div"); c.className = "callout" + (/^\*\*(Warning|Careful|Stop)/.test(text) ? " warn" : "");
+        helpInline(text, c); root.appendChild(c); continue;
+      }
+      if (!l.trim()) { i++; continue; }
+      const para = [l]; i++;
+      while (i < lines.length && !isBlock(lines[i])) para.push(lines[i++]);
+      root.appendChild(helpInline(para.join(" "), document.createElement("p")));
+    }
+    flushOS();
+    return root;
+  }
+  async function helpIndex() {
+    if (!help.guides) { try { help.guides = (await (await fetch("/api/help")).json()).guides || []; } catch (e) { help.guides = []; } }
+    return help.guides;
+  }
+  function showHelp() { $("help-panel").hidden = false; help.open = true; }
+  async function openHelp(id) {
+    showHelp();
+    const body = $("help-body"); body.textContent = "";
+    let g = null;
+    try { const r = await fetch("/api/help/" + encodeURIComponent(id)); if (r.ok) g = await r.json(); } catch (e) {}
+    if (!g) { body.innerHTML = "<div class='hint'>That guide is not here.</div>"; return; }
+    const doc = helpDom("# " + g.title + "\n\n" + g.body);
+    body.appendChild(doc); body.scrollTop = 0;
+  }
+  async function helpHome(query) {
+    showHelp();
+    const body = $("help-body"); body.textContent = "";
+    if (!query) {
+      const h = document.createElement("h2"); h.textContent = "Setup"; h.style.cssText = "font-size:15px;margin:0 0 6px"; body.appendChild(h);
+      const cl = document.createElement("div"); cl.className = "checklist"; body.appendChild(cl);
+      try {
+        const items = (await (await fetch("/api/setup")).json()).items || [];
+        for (const it of items) {
+          const r = document.createElement("div"); r.className = "ci";
+          r.innerHTML = "<span class='mark'></span><b></b><span class='d'></span>";
+          r.querySelector(".mark").textContent = it.ok ? "✓" : (it.optional ? "○" : "✗");
+          r.querySelector(".mark").style.color = it.ok ? "var(--ok)" : (it.optional ? "var(--faint)" : "var(--err)");
+          r.querySelector("b").textContent = it.title; r.querySelector(".d").textContent = it.detail || "";
+          if (!it.ok) {
+            const a = document.createElement("a"); a.className = "linky"; a.textContent = it.action ? it.action.label : "how"; a.style.cursor = "pointer";
+            a.onclick = () => { if (it.action && it.action.screen) go(it.action.screen); if (it.help) openHelp(it.help); };
+            r.appendChild(a);
+          }
+          cl.appendChild(r);
+        }
+      } catch (e) {}
+    }
+    const guides = await helpIndex();
+    const q = (query || "").toLowerCase();
+    const h2 = document.createElement("h2"); h2.textContent = q ? "Guides about “" + query + "”" : "Guides"; h2.style.cssText = "font-size:15px;margin:10px 0 0"; body.appendChild(h2);
+    const list = document.createElement("div"); list.className = "help-list";
+    let n = 0;
+    for (const g of guides) {
+      if (q && !(g.title + " " + g.summary + " " + g.id).toLowerCase().includes(q)) {
+        // the body too, for search: fetched once
+        if (!g._body) { try { g._body = ((await (await fetch("/api/help/" + encodeURIComponent(g.id))).json()).body || "").toLowerCase(); } catch (e) { g._body = ""; } }
+        if (!g._body.includes(q)) continue;
+      }
+      const b = document.createElement("button"); b.type = "button"; b.textContent = g.title;
+      const sm = document.createElement("small"); sm.textContent = g.summary; b.appendChild(sm);
+      b.onclick = () => openHelp(g.id);
+      list.appendChild(b); n++;
+    }
+    if (!n) { const e = document.createElement("div"); e.className = "hint"; e.textContent = "Nothing found."; list.appendChild(e); }
+    body.appendChild(list);
+  }
+  $("help-close").onclick = () => { $("help-panel").hidden = true; help.open = false; };
+  $("nav-help").onclick = () => helpHome();
+  $("help-home").onclick = () => helpHome();
+  let helpSearchT = 0;
+  $("help-search").oninput = (e) => { clearTimeout(helpSearchT); helpSearchT = setTimeout(() => helpHome(e.target.value.trim()), 200); };
+  // a "?" in every screen's header opens its guide
+  async function addHelpButtons() {
+    const guides = await helpIndex();
+    for (const sec of document.querySelectorAll("section.screen")) {
+      const screen = sec.id.replace("screen-", "");
+      const g = guides.find((x) => x.screen === screen);
+      const hdr = sec.querySelector("header");
+      if (!g || !hdr || hdr.querySelector(".help-q")) continue;
+      const b = document.createElement("button"); b.type = "button"; b.className = "help-q"; b.textContent = "?"; b.title = "Help: " + g.title;
+      b.onclick = () => openHelp(g.id);
+      const h1 = hdr.querySelector("h1"); if (h1) h1.after(b); else hdr.appendChild(b);
     }
   }
 
@@ -3221,7 +3399,7 @@
       mc.className = "card live-card"; mc.style.gap = "6px";
       const mh = document.createElement("div"); mh.className = "skill-head";
       mh.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono live-dot'>\u25c6 deciding</span>";
-      mh.querySelector("b").textContent = (d.master_name || "Sultan") + " \u00b7 master";
+      mh.querySelector("b").textContent = (d.master_name || "Master") + " \u00b7 master";
       mh.querySelector(".src").textContent = d.master.length + " recent decisions";
       mc.appendChild(mh);
       const ev = document.createElement("div");
@@ -3292,7 +3470,7 @@
   }
 
   async function stopSlave(id) {
-    if (!confirm("Stop agent " + id + " now? The Sultan will see it end and decide what to do.")) return;
+    if (!confirm("Stop agent " + id + " now? The master will see it end and decide what to do.")) return;
     try {
       const r = await (await fetch("/api/agents/slave", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "kill", id }) })).json();
@@ -4121,7 +4299,7 @@
       const dk = Object.keys(ag.days).sort();
       const card = document.createElement("div");
       card.className = "card";
-      card.innerHTML = '<div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:13.5px;font-weight:600">Agent tokens per day</span><span style="font-size:11.5px;color:var(--faint)">prompt + completion \u00b7 agents, the Sultan, skeptic panels</span></div><div class="bars"></div>';
+      card.innerHTML = '<div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:13.5px;font-weight:600">Agent tokens per day</span><span style="font-size:11.5px;color:var(--faint)">prompt + completion \u00b7 agents, the master, skeptic panels</span></div><div class="bars"></div>';
       const bars = card.querySelector(".bars");
       const tot = (d) => (d.slaves || 0) + (d.master || 0) + (d.panels || 0);
       const mx = Math.max(...dk.map((k) => tot(ag.days[k]))) || 1;
@@ -4133,14 +4311,14 @@
         b.style.height = (18 + (tot(d) / mx) * 82) + "%";
         b.style.background = "transparent";
         const seg = (v, color, label) => { if (!v) return; const s2 = document.createElement("div"); s2.style.cssText = "flex:0 0 " + (v / tot(d) * 100) + "%;background:" + color; s2.title = label + ": " + v.toLocaleString(); b.appendChild(s2); };
-        seg(d.slaves, "var(--accent)", "agents"); seg(d.master, "var(--warn)", "the Sultan"); seg(d.panels, "var(--faint)", "skeptic panels");
+        seg(d.slaves, "var(--accent)", "agents"); seg(d.master, "var(--warn)", "the master"); seg(d.panels, "var(--faint)", "skeptic panels");
         if (i === dk.length - 1) b.classList.add("hot");
         w.querySelector("small").textContent = k;
         b.title = tot(d).toLocaleString() + " tokens";
         bars.appendChild(w);
       });
       const legend = document.createElement("div"); legend.className = "hint"; legend.style.marginTop = "6px";
-      legend.textContent = "agents " + fmtTok(ag.slave_tokens) + " \u00b7 the Sultan " + fmtTok((ag.master_prompt || 0) + (ag.master_completion || 0)) + " (" + fmtTok(ag.master_completion) + " out) \u00b7 panels " + fmtTok(ag.panel_tokens) + " over " + (ag.panels || 0) + " panels";
+      legend.textContent = "agents " + fmtTok(ag.slave_tokens) + " \u00b7 the master " + fmtTok((ag.master_prompt || 0) + (ag.master_completion || 0)) + " (" + fmtTok(ag.master_completion) + " out) \u00b7 panels " + fmtTok(ag.panel_tokens) + " over " + (ag.panels || 0) + " panels";
       card.appendChild(legend);
       box.appendChild(card);
       const mix = (title, obj) => {
@@ -4542,6 +4720,7 @@
     setInterval(pollCluster, 5000);
     startLive();
     renderApprovals();
+    addHelpButtons();
     const deep = location.hash.slice(1);
     if (deep && screens.includes(deep) && deep !== state.screen) go(deep);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);

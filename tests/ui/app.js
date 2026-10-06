@@ -88,6 +88,41 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("live: the finished turn stays, as saved", (end.match(/streaming from the terminal/g) || []).length >= 10 && end.includes("first answer"), end.slice(-120));
   await post(BASE + "/api/settings", { features: { server_runner: false } });
 
+  // ---- Help: the checklist, search, a guide, links between guides, a screen's "?"
+  await page.goto(BASE + "/");
+  await sleep(1200);
+  await page.click("#nav-help");
+  await sleep(1200);
+  const home = await page.locator("#help-body").innerText();
+  check("help: the checklist measures the setup", home.includes("A model server answers") && home.includes("A model to talk to"), home.slice(0, 200));
+  await page.fill("#help-search", "workflow");
+  await sleep(1500);
+  check("help: search finds by content", (await page.locator("#help-body .help-list button").count()) >= 1 &&
+        (await page.locator("#help-body").innerText()).includes("Workflows"));
+  await page.locator("#help-body .help-list button", { hasText: "bb, the command line" }).first().click().catch(() => {});
+  await page.fill("#help-search", "");
+  await page.click("#help-home");
+  await sleep(800);
+  await page.locator("#help-body .help-list button", { hasText: "bb, the command line" }).first().click();
+  await sleep(800);
+  const cli = await page.locator("#help-body").innerText();
+  check("help: a guide renders with code to copy", cli.includes("Install it") && await page.locator("#help-body .code .copy-btn").count() >= 2, cli.slice(0, 120));
+  await page.click("#help-home");
+  await sleep(800);
+  await page.locator("#help-body .help-list button", { hasText: "Workflows" }).first().click();
+  await sleep(800);
+  await page.locator("#help-body a", { hasText: "Profiles" }).first().click();
+  await sleep(800);
+  check("help: help: links open the guide", (await page.locator("#help-body h1").innerText()) === "Profiles");
+  await page.click("#help-close");
+  await page.click('[data-nav="jobs"]');
+  await sleep(600);
+  await page.locator("#screen-jobs .help-q").click();
+  await sleep(800);
+  check("help: a screen's ? opens its guide", (await page.locator("#help-body h1").innerText()) === "Jobs");
+  await page.screenshot({ path: process.env.BB_UI_SHOTS ? process.env.BB_UI_SHOTS + "/help.png" : "/dev/null" }).catch(() => {});
+  await page.click("#help-close");
+
   check("no page or console errors", errors.length === 0, errors.join(" || ").slice(0, 400));
     await browser.close();
   for (const [n, ok, d] of results) console.log((ok ? "ok    " : "FAIL  ") + n + (ok ? "" : "   -> " + d));

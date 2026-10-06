@@ -141,6 +141,36 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 @media (prefers-reduced-motion:reduce){.msg-status .dot{animation:none;opacity:.7}}
 .msg-err{color:var(--err);font-size:13px;white-space:pre-wrap}
 /* degraded, not failed: the turn still produced an answer */
+.help-panel{position:fixed;top:0;right:0;bottom:0;width:min(520px,100vw);z-index:40;background:var(--surface);border-left:1px solid var(--border);box-shadow:-8px 0 30px rgba(0,0,0,.08);display:flex;flex-direction:column}
+.help-top{display:flex;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border)}
+.help-top .text-input{flex:1}
+.help-body{overflow:auto;padding:16px 20px 40px;font-size:13.5px;line-height:1.6}
+.help-doc h1{font-size:19px;margin:4px 0 10px;letter-spacing:-.01em}
+.help-doc h2{font-size:15px;margin:22px 0 6px}
+.help-doc h3{font-size:13.5px;margin:16px 0 4px}
+.help-doc p{margin:8px 0}
+.help-doc ul,.help-doc ol{margin:6px 0;padding-left:22px}
+.help-doc li{margin:3px 0}
+.help-doc code{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:12px;background:var(--chip);padding:1px 5px;border-radius:5px}
+.help-doc .code{position:relative;margin:10px 0}
+.help-doc .code pre{margin:0;padding:11px 13px;background:var(--chip);border-radius:9px;overflow-x:auto;font-size:12px;line-height:1.6;font-family:'Geist Mono',ui-monospace,Menlo,monospace;white-space:pre}
+.help-doc .code .copy-btn{position:absolute;top:6px;right:6px}
+.help-doc .callout{margin:10px 0;padding:8px 12px;border-left:3px solid var(--border);background:var(--chip);border-radius:0 8px 8px 0}
+.help-doc .callout.warn{border-color:var(--warn,#b7791f)}
+.help-doc table{border-collapse:collapse;margin:10px 0;font-size:12.5px;width:100%}
+.help-doc th,.help-doc td{border-bottom:1px solid var(--border);padding:5px 8px;text-align:left;vertical-align:top}
+.help-doc .os-other{margin:8px 0}
+.help-doc .os-other summary{cursor:pointer;color:var(--muted);font-size:12.5px}
+.help-doc a{cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.help-list{display:flex;flex-direction:column;gap:2px;margin-top:10px}
+.help-list button{text-align:left;background:none;border:0;padding:8px 6px;border-radius:8px;cursor:pointer;font:inherit;color:inherit}
+.help-list button:hover{background:var(--chip)}
+.help-list small{display:block;color:var(--muted);font-size:12px}
+.checklist{display:flex;flex-direction:column;gap:6px;margin:6px 0 16px}
+.checklist .ci{display:flex;gap:10px;align-items:baseline;font-size:13px}
+.checklist .ci .mark{width:16px;flex:none}
+.checklist .ci .d{color:var(--muted);font-size:12px;flex:1}
+.help-q{margin-left:8px;width:22px;height:22px;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--muted);cursor:pointer;font-size:12px;line-height:1;flex:none}
 .approvals{position:fixed;right:18px;bottom:18px;z-index:50;display:flex;flex-direction:column;gap:10px;max-width:440px}
 .approval{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,.12);display:flex;flex-direction:column;gap:8px;font-size:12.5px}
 .approval pre{margin:0;max-height:140px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11.5px;background:var(--chip);padding:6px 8px;border-radius:7px}

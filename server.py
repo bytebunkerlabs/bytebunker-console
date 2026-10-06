@@ -1030,6 +1030,89 @@ def upstream_request(path, payload=None, method="GET", model=None, gateway=None)
     return upstreammod.request(GW, path, payload, method, model, gateway)
 
 
+# -------------------------------------------------------------------- help --
+# The Help center: guides in docs/help/*.md, front matter first (id, title,
+# screen, order, summary, platforms), shipped with the app, read offline.
+HELP_DIR = os.path.join(ROOT, "docs", "help")
+
+
+def _front_matter(text):
+    meta, body = {}, text
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end > 0:
+            for line in text[4:end].splitlines():
+                k, sep, v = line.partition(":")
+                if sep:
+                    meta[k.strip()] = v.strip()
+            body = text[end + 4:].lstrip("\n")
+    return meta, body
+
+
+def help_guides():
+    out = []
+    try:
+        names = sorted(os.listdir(HELP_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(HELP_DIR, name), encoding="utf-8") as f:
+                meta, body = _front_matter(f.read())
+        except OSError:
+            continue
+        gid = meta.get("id") or name[:-3]
+        out.append({"id": gid, "title": meta.get("title") or gid, "screen": meta.get("screen") or "",
+                    "summary": meta.get("summary") or "", "order": _int(meta.get("order"), 100),
+                    "platforms": [p.strip() for p in (meta.get("platforms") or "").split(",") if p.strip()],
+                    "body": body})
+    out.sort(key=lambda g: (g["order"], g["title"]))
+    return out
+
+
+def setup_checklist():
+    """What is set up, measured, each with the one thing to do next."""
+    import shutil
+    GW.refresh()
+    gws = GW.gateways()
+    up = [g for g in gws if (GW.status.get(g["name"]) or {}).get("ok")]
+    try:
+        tools = mcp_host().status
+    except Exception:   # noqa: BLE001
+        tools = {}
+    ready_tools = [n for n, st in tools.items() if st.get("state") == "ready"]
+    bindir = os.path.join(os.environ.get("LOCALAPPDATA") or "", "ByteBunker", "bin") if os.name == "nt" \
+        else os.path.expanduser("~/.local/bin")
+    has_bb = any(os.path.exists(os.path.join(bindir, n)) for n in ("bb", "bytebunker", "bb.cmd", "bytebunker.cmd")) \
+        or bool(shutil.which("bytebunker"))
+    items = [
+        {"id": "gateway", "title": "A model server answers", "ok": bool(up),
+         "detail": ("%d of %d answer" % (len(up), len(gws))) if gws else "none added yet",
+         "action": {"label": "Gateways", "screen": "gateways"}, "help": "gateways"},
+        {"id": "models", "title": "A model to talk to", "ok": bool(GW.models),
+         "detail": "%d model%s" % (len(GW.models), "" if len(GW.models) == 1 else "s"),
+         "action": {"label": "Models", "screen": "models"}, "help": "gateways"},
+        {"id": "monitor", "title": "A rack monitor", "optional": True, "ok": bool(MON.list()),
+         "detail": "%d monitor%s" % (len(MON.list()), "" if len(MON.list()) == 1 else "s"),
+         "action": {"label": "Cluster", "screen": "cluster"}, "help": "cluster"},
+        {"id": "tools", "title": "Tools for the model", "optional": True, "ok": bool(ready_tools),
+         "detail": ", ".join(ready_tools) or "no MCP server running",
+         "action": {"label": "MCP", "screen": "mcp"}, "help": "mcp"},
+        {"id": "cli", "title": "bb in your terminal", "optional": True, "ok": has_bb,
+         "detail": "installed" if has_bb else "not installed",
+         "action": {"label": "Settings", "screen": "settings"}, "help": "cli"},
+        {"id": "agents", "title": "An agents worker", "optional": True, "ok": bool((CFG.get("agents") or {}).get("enabled")),
+         "detail": (CFG.get("agents") or {}).get("ssh") or "not connected",
+         "action": {"label": "Agents", "screen": "agents"}, "help": "agents"},
+    ]
+    if CONFIG_WARNINGS:
+        items.insert(0, {"id": "config", "title": "config.json", "ok": False, "detail": CONFIG_WARNINGS[-1],
+                         "action": {"label": "Settings", "screen": "settings"}, "help": "settings"})
+    return items
+
+
 # ------------------------------------------------------------------ runner --
 # Chat turns run on the server (runner.py): the app, bb, jobs and workflows
 # share one engine, one session file, one trace log and one usage ledger.
@@ -1857,6 +1940,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"pending": APPROVALS.list()})
         elif path == "/api/workflows":
             self._json({"workflows": {n: dict(w, params=workflow_params(w)) for n, w in workflows().items()}})
+        elif path == "/api/help":
+            self._json({"guides": [{k: v for k, v in g.items() if k != "body"} for g in help_guides()]})
+        elif path.startswith("/api/help/"):
+            gid = path[len("/api/help/"):]
+            g = next((g for g in help_guides() if g["id"] == gid), None)
+            if g is None:
+                self._json({"error": "no guide %r" % gid}, 404)
+            else:
+                self._json(g)
+        elif path == "/api/setup":
+            self._json({"items": setup_checklist()})
         elif path == "/api/runs":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             self._json({"runs": RUNS.history(limit=max(1, min(1000, _int((q.get("limit") or [""])[0], 100))),

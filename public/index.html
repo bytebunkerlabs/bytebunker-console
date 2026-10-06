@@ -45,6 +45,7 @@
       <button data-nav="cluster"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="2.6" width="12" height="4.4" rx="1.3"/><rect x="2" y="9" width="12" height="4.4" rx="1.3"/><circle cx="4.7" cy="4.8" r="0.75" fill="currentColor" stroke="none"/><circle cx="4.7" cy="11.2" r="0.75" fill="currentColor" stroke="none"/></svg><span>Cluster</span></button>
       <button data-nav="settings"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.6M8 12.5v1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M1.9 8h1.6M12.5 8h1.6M3.7 12.3l1.1-1.1M11.2 4.8l1.1-1.1"/></svg><span>Settings</span></button>
       <button data-nav="usage"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3.2 13V8.4M8 13V3.4M12.8 13v-3.1"/></svg><span>Usage</span></button>
+      <button type="button" id="nav-help"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><circle cx="8" cy="8" r="5.8"/><path d="M6.4 6.3a1.7 1.7 0 0 1 3.2.6c0 1.1-1.6 1.4-1.6 2.5M8 11.4v.1"/></svg><span>Help</span></button>
     </nav>
 
     <div class="side-spacer"></div>
@@ -63,6 +64,10 @@
 
   <main>
     <div class="approvals" id="approvals" hidden></div>
+    <aside class="help-panel" id="help-panel" hidden>
+      <div class="help-top"><input class="text-input" id="help-search" placeholder="Search help"><button type="button" class="ghost-btn" id="help-home">Contents</button><button type="button" class="ghost-btn" id="help-close" aria-label="Close help">✕</button></div>
+      <div class="help-body" id="help-body"></div>
+    </aside>
     <div class="app-banner msg-note" id="app-banner" hidden><span id="app-banner-text"></span><button type="button" class="linky" id="app-banner-close">dismiss</button></div>
     <!-- Playground -->
     <section class="screen on" id="screen-playground">
@@ -260,7 +265,7 @@
       <header><h1>Gateways</h1><span class="sub">Every endpoint the console talks to · models merged, requests routed by name · <span id="gateways-sub">—</span></span></header>
       <div class="scroll agents-grid">
         <div class="agents-left" id="gateways-left"></div>
-        <aside class="agents-detail" id="gateways-detail"><div class="hint">A gateway is any OpenAI-compatible /v1: litellm in front of the Sparks, a vLLM that <span class="mono">rack</span> or a recipe started, Ollama or LM Studio on a laptop. Add one by IP and port, or let Find engines look on this machine, on known hosts, on your tailnet and (optionally) across the LAN.</div></aside>
+        <aside class="agents-detail" id="gateways-detail"><div class="hint">A gateway is any server that answers the OpenAI chat API: an engine dgx-serve runs, or a router in front of several. Add one by address and port, or let Find engines look on this machine, on your tailnet and, if you allow it, on your local network.</div></aside>
       </div>
     </section>
 
