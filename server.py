@@ -61,6 +61,8 @@ import events as eventsmod
 import runs as runsmod
 import sessions as sessmod
 import upstream as upstreammod
+import runner as runnermod
+import model_facts as factsmod
 from version import VERSION
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1074,6 +1076,45 @@ def upstream_request(path, payload=None, method="GET", model=None, gateway=None)
     return upstreammod.request(GW, path, payload, method, model, gateway)
 
 
+# ------------------------------------------------------------------ runner --
+# Chat turns run on the server (runner.py): the app, bb, jobs and workflows
+# share one engine, one session file, one trace log and one usage ledger.
+FACTS = factsmod.ModelFacts(os.path.join(DATA, "model_facts.json"))
+_RUNNER = []
+
+
+def record_usage(body, **extra):
+    evt = sanitize_usage(body)
+    if evt:
+        evt.update({k: v for k, v in extra.items() if v})
+        append_usage(evt)
+
+
+def runner():
+    if not _RUNNER:
+        import types
+        _RUNNER.append(runnermod.Runner(types.SimpleNamespace(
+            registry=GW, caps_for=caps_for, facts=FACTS, mcp=mcp_host, trace=TRACE,
+            record_usage=record_usage, sessions=SESSIONS,
+            on_session=lambda summary: BUS.publish("sessions", "updated", summary),
+            skill_bodies=lambda names: skill_catalog().bodies(names),
+            write_archive=write_archive, uploads_root=uploads_root, engine_stats=engine_stats)))
+    return _RUNNER[0]
+
+
+def new_session_id():
+    n, digits, out = int(time.time() * 1000), "0123456789abcdefghijklmnopqrstuvwxyz", ""
+    while n:
+        n, r = divmod(n, 36)
+        out = digits[r] + out
+    return "s-" + out + uuid_hex(2)
+
+
+def uuid_hex(n):
+    import uuid
+    return uuid.uuid4().hex[:n]
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1259,6 +1300,40 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             if cancel_on_leave and run is not None:
                 RUNS.cancel(rid)
+
+    def _turn(self, path, body):
+        """POST /api/sessions/<id>/turns: one chat turn, run on the server.
+        202 and the run's id at once; the turn streams on
+        /api/runs/<id>/events and is saved to the session when it ends.
+        <id> "new" starts a session. One turn per session at a time.
+        POST /api/sessions/<id>/compress: fold its older turns into a summary."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        sid, _, what = path[len("/api/sessions/"):].rpartition("/")
+        if sid == "new":
+            sid = new_session_id()
+        if not sessmod._ID.match(sid or ""):
+            self._json({"error": "bad session id"}, 400)
+            return
+        if what == "compress" and SESSIONS.get(sid) is None:
+            self._json({"error": "no such session"}, 404)
+            return
+        body["source"] = self._client()
+        emit_to = lambda run: (lambda t, d=None: RUNS.emit(run, t, d))   # noqa: E731
+        if what == "turns":
+            target = lambda run: runner().turn(run, emit_to(run), sid, body)      # noqa: E731
+            title = (body.get("text") or "").strip()[:80] or "turn"
+        else:
+            target = lambda run: runner().compress_session(run, emit_to(run), sid, body)   # noqa: E731
+            title = "compress"
+        try:
+            run = RUNS.start("chat", body["source"], target, title=title, key="session:" + sid,
+                             meta={"session": sid, "model": body.get("model") or "", "what": what})
+        except runsmod.Busy as e:
+            self._json({"error": "a turn is already running in this session", "run": e.run.id, "session": sid}, 409)
+            return
+        self._json({"ok": True, "run": run.id, "session": sid}, 202)
 
     def _client(self):
         """Who started this: "app" unless a client says otherwise (bb sends cli)."""
@@ -1664,6 +1739,11 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/video":  # multipart, not JSON — handled whole
             self._video_post()
+            return
+        if path.startswith("/api/sessions/") and path.endswith(("/turns", "/compress")):
+            body = self._body()
+            if body is not None:
+                self._turn(path, body)
             return
         if path.startswith("/api/runs/") and path.endswith("/cancel"):
             self._drain()

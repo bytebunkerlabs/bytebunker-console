@@ -14,7 +14,7 @@ script is empty, echoes the last user message). A reply can carry:
   tool_calls                   [{"name", "arguments" (dict or str), "id"?}]
   finish_reason                default "tool_calls" when there are tool calls, else "stop"
   status, error                an HTTP error instead of a completion
-  overflow                     {"ctx": N, "requested": M}: vLLM's 400 for a prompt too long
+  overflow                     {"ctx": N, "requested": M, "prompt"?: P}: vLLM's 400 for a prompt too long
   delay                        seconds before the first byte (time to first token)
   stall                        seconds of silence after the first delta (a buffered tool call)
   chunk                        characters per delta (default 4)
@@ -134,9 +134,10 @@ class FakeEngine:
                     time.sleep(float(reply["delay"]))
                 if reply.get("overflow"):
                     o = reply["overflow"]
+                    prompt = o.get("prompt", o["requested"] - 1)
                     msg = ("This model's maximum context length is %d tokens. However, you requested %d tokens "
                            "(%d in the messages, %d in the completion). Please reduce the length of the messages "
-                           "or completion." % (o["ctx"], o["requested"], o["requested"] - 1, 1))
+                           "or completion." % (o["ctx"], o["requested"], prompt, o["requested"] - prompt))
                     return self._json(400, {"object": "error", "message": msg, "type": "BadRequestError",
                                             "code": 400})
                 if reply.get("status"):
