@@ -272,6 +272,9 @@ def server_command():
     return [sys.executable, os.path.join(ROOT, "desktop", "app.py"), "--headless"]
 
 
+IDLE_EXIT = "1800"      # a server bb starts leaves after 30 idle minutes (Settings can keep it)
+
+
 def connect(start=True, out=None):
     """The running server for this user's data folder, started if needed."""
     data = paths.data_dir()
@@ -281,9 +284,9 @@ def connect(start=True, out=None):
     if not start:
         raise BBError("no ByteBunker server is running for %s. Start the app, or run: bb serve" % data, EXIT_NO_SERVER)
     if os.environ.get("BYTEBUNKER_DATA") and not os.environ.get("BYTEBUNKER_HOME"):
-        cmd = [sys.executable, os.path.join(ROOT, "server.py"), "--port", "0"]
+        cmd = [sys.executable, os.path.join(ROOT, "server.py"), "--port", "0", "--idle-exit", IDLE_EXIT]
     else:
-        cmd = server_command()
+        cmd = server_command() + ["--idle-exit", IDLE_EXIT]
     os.makedirs(data, exist_ok=True)
     log = open(os.path.join(data, "server.log"), "ab")
     kw = {"stdin": subprocess.DEVNULL, "stdout": log, "stderr": subprocess.STDOUT}

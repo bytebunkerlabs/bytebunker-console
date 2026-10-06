@@ -2175,6 +2175,11 @@
       } catch (e) { cn.textContent = e.message; }
     };
     crow.appendChild(cb); crow.appendChild(cn); cli.appendChild(crow);
+    const kl = document.createElement("label"); kl.style.cssText = "display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--muted)";
+    const kx = document.createElement("input"); kx.type = "checkbox"; kx.checked = !!d.keep_running;
+    kl.appendChild(kx); kl.appendChild(document.createTextNode("Keep the server running in the background. Otherwise a server bb started leaves after 30 idle minutes, and the next bb starts it again."));
+    kx.onchange = () => fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keep_running: kx.checked }) }).catch(() => {});
+    cli.appendChild(kl);
     // updates: only when asked — the app does not phone home on its own
     if (d.desktop) {
       const up = card("Updates", "checked only when you press the button; nothing is downloaded or installed");

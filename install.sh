@@ -87,6 +87,22 @@ os.replace(tmp, path)
 print("   config:", path)
 PY
 
+# ---------------------------------------------------------------- bb
+# the command line, on this install's data: bytebunker always, bb unless
+# another program (Babashka) has that name
+mkdir -p "$HOME/.local/bin"
+for name in bytebunker bb; do
+  target="$HOME/.local/bin/$name"
+  if [ "$name" = bb ] && command -v bb >/dev/null 2>&1 && ! grep -q ByteBunker "$(command -v bb)" 2>/dev/null; then
+    say "not writing bb: $(command -v bb) is another program's (use bytebunker)"
+    continue
+  fi
+  printf '#!/bin/sh\n# ByteBunker'"'"'s command line (written by install.sh)\nBYTEBUNKER_DATA="%s" exec "%s" "%s" "$@"\n' \
+    "$C/data" "$(command -v python3)" "$C/bb.py" > "$target"
+  chmod +x "$target"
+done
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) say "add ~/.local/bin to your PATH to use bb";; esac
+
 # ---------------------------------------------------------------- service
 URL="http://$BIND:$PORT"
 if [ "$NO_SERVICE" = 1 ]; then
@@ -150,4 +166,5 @@ Next:
   2. Gateways: add your model servers, or let it find them on your network.
   3. Cluster: add a rack monitor (rack monitor up on the rack prints its address).
   4. Agents: connect a separate worker to run goals there.
+  5. In a terminal: bb "hello" (bb help lists everything).
 TXT

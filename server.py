@@ -1247,6 +1247,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _safe(self, handler):
         self._responded = False
+        IDLE["last"] = time.time()
         try:
             handler()
         except (BrokenPipeError, ConnectionResetError):
@@ -1780,7 +1781,8 @@ class Handler(BaseHTTPRequestHandler):
                         "home_dir": os.path.dirname(CONFIG_PATH),
                         "uploads_dir": os.path.expanduser(CFG.get("uploads_dir") or os.path.join(DATA, "uploads")),
                         "identity": CFG.get("identity") or {}, "rates": CFG.get("frontier_rates_per_mtok") or {},
-                        "python": sys.version.split()[0], "frozen": bool(getattr(sys, "frozen", False))})
+                        "python": sys.version.split()[0], "frozen": bool(getattr(sys, "frozen", False)),
+                        "keep_running": bool(CFG.get("keep_running"))})
         elif path == "/api/gateways":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             GW.refresh(force=bool(q.get("refresh")))
@@ -2211,6 +2213,11 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 TRACE.log("settings", action="install_cli", written=res["written"], skipped=res["skipped"])
                 self._json(res)
+                return
+            if "keep_running" in body:
+                CFG["keep_running"] = bool(body["keep_running"])
+                save_config()
+                self._json({"ok": True, "keep_running": CFG["keep_running"]})
                 return
             if isinstance(body.get("features"), dict):
                 # server_runner: the Playground's turns run on the server (runner.py)
@@ -2907,7 +2914,7 @@ class Handler(BaseHTTPRequestHandler):
                       ms=int((time.time() - started) * 1000), **who)
 
 
-def serve(bind=None, port=None):
+def serve(bind=None, port=None, idle_exit=None):
     """Build the HTTP server (not yet serving) and start the job scheduler.
     Used by main() and by the desktop app, which runs it on a thread behind
     a native window. port 0 picks a free port; read it from
@@ -2948,6 +2955,8 @@ def serve(bind=None, port=None):
     os.environ["BB_CONSOLE_PORT"] = str(srv.server_address[1])
     start_scheduler()
     threading.Thread(target=watch_models, name="models", daemon=True).start()
+    if idle_exit:
+        threading.Thread(target=watch_idle, args=(int(idle_exit),), name="idle", daemon=True).start()
     mcp_host()      # servers start in the background, ready before the first chat
     return srv
 
@@ -2955,6 +2964,26 @@ def serve(bind=None, port=None):
 INSTANCE = None
 STARTED = time.time()
 STOPPING = threading.Event()
+IDLE = {"last": time.time()}
+
+
+def watch_idle(limit_s):
+    """A server bb started on demand: gone after limit_s with no request, no
+    app window open (no event stream) and nothing running, unless Settings
+    says to keep it running."""
+    while not STOPPING.wait(max(1, min(30, limit_s // 4))):
+        if CFG.get("keep_running") or _LISTENING[0] > 0 or RUNS.active():
+            IDLE["last"] = time.time()
+            continue
+        if time.time() - IDLE["last"] >= limit_s:
+            TRACE.log("server", action="idle_exit", idle_s=int(time.time() - IDLE["last"]))
+            release_instance()
+            try:
+                if _MCP is not None:
+                    _MCP.stop_all()
+            except Exception:   # noqa: BLE001
+                pass
+            os._exit(0)
 _LISTENING = [0]                 # open /api/events streams: someone to tell about changes
 _LISTEN_LOCK = threading.Lock()
 
@@ -3002,8 +3031,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=CFG.get("port", 8765))
     ap.add_argument("--bind", default=CFG.get("bind", "127.0.0.1"))
+    ap.add_argument("--idle-exit", type=int, help="exit after this many idle seconds (a server bb started)")
     args = ap.parse_args()
-    srv = serve(args.bind, args.port)
+    srv = serve(args.bind, args.port, idle_exit=args.idle_exit)
     print("ByteBunker Console on http://%s:%d  gateways: %s  jobs: %d" %
           (args.bind, srv.server_address[1], ", ".join(g["name"] for g in GW.gateways()) or "none",
            len(JOBS.jobs)))

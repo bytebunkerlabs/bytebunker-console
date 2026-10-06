@@ -215,6 +215,47 @@ class InstallCliTest(unittest.TestCase):
             shutil.rmtree(home, ignore_errors=True)
 
 
+class IdleExitTest(unittest.TestCase):
+    def start(self, data):
+        with open(os.path.join(data, "config.json"), "w") as f:
+            json.dump({"gateways": [], "monitors": []}, f)
+        env = dict(os.environ, BYTEBUNKER_DATA=data, BYTEBUNKER_CONFIG=os.path.join(data, "config.json"))
+        p = subprocess.Popen([sys.executable, os.path.join(ROOT, "server.py"), "--port", "0", "--idle-exit", "4"],
+                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 20
+        while time.time() < deadline and not os.path.exists(os.path.join(data, "instance.json")):
+            time.sleep(0.1)
+        with open(os.path.join(data, "instance.json")) as f:
+            return p, json.load(f)["port"]
+
+    def test_a_server_bb_started_leaves_when_idle(self):
+        data = tempfile.mkdtemp()
+        p, _ = self.start(data)
+        try:
+            p.wait(30)
+            self.assertFalse(os.path.exists(os.path.join(data, "instance.json")))
+        finally:
+            if p.poll() is None:
+                p.kill()
+            shutil.rmtree(data, ignore_errors=True)
+
+    def test_an_open_app_window_keeps_it(self):
+        import http.client
+        data = tempfile.mkdtemp()
+        p, port = self.start(data)
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        try:
+            c.request("GET", "/api/events", headers={"Host": "127.0.0.1:%d" % port})
+            c.getresponse()
+            time.sleep(9)
+            self.assertIsNone(p.poll())                      # a window is listening
+        finally:
+            c.close()
+            p.kill()
+            p.wait(10)
+            shutil.rmtree(data, ignore_errors=True)
+
+
 class CommandTableTest(unittest.TestCase):
     def test_every_command_has_its_handler_and_route(self):
         import bb

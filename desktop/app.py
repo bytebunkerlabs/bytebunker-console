@@ -271,6 +271,7 @@ def main(argv=None):
     port = 0
     if "--port" in argv:
         port = int(argv[argv.index("--port") + 1])
+    idle_exit = int(argv[argv.index("--idle-exit") + 1]) if "--idle-exit" in argv else None
 
     home = prepare_home()
     quiet_subprocesses()
@@ -293,7 +294,7 @@ def main(argv=None):
 
     import server
     try:
-        srv = server.serve("127.0.0.1", port)
+        srv = server.serve("127.0.0.1", port, idle_exit=idle_exit if headless else None)
     except SystemExit as e:               # lost a race with another launch
         existing = running_instance(home)
         if existing and not headless and not smoke_out:
