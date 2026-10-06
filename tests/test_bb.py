@@ -24,7 +24,7 @@ MODEL = "fake-model"
 
 
 def bb_env(data):
-    env = dict(os.environ, BYTEBUNKER_DATA=data, NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1")
+    env = dict(os.environ, BYTEBUNKER_DATA=data, NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1", BB_INTERACTIVE="0")
     env.pop("BYTEBUNKER_HOME", None)
     return env
 
@@ -42,9 +42,9 @@ class BBTest(unittest.TestCase):
         cls.eng.stop()
         shutil.rmtree(cls.data, ignore_errors=True)
 
-    def bb(self, *args, stdin=None, timeout=60):
+    def bb(self, *args, stdin=None, timeout=60, cwd=None):
         return subprocess.run([sys.executable, os.path.join(ROOT, "bb.py")] + list(args), input=stdin,
-                              capture_output=True, text=True, timeout=timeout, env=bb_env(self.data))
+                              capture_output=True, text=True, timeout=timeout, env=bb_env(self.data), cwd=cwd)
 
     def test_ask_streams_the_answer_to_stdout(self):
         self.eng.script([{"content": "four", "reasoning": "2+2"}])
@@ -106,6 +106,30 @@ class BBTest(unittest.TestCase):
         self.assertIn(MODEL, r.stderr)                          # /models lists it
         second = self.eng.requests[n + 1]["body"]["messages"]
         self.assertEqual([m["content"] for m in second], ["hi", "hello there", "and again"])   # one session
+
+    def test_the_model_works_in_bbs_folder(self):
+        folder = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(folder, "todo.txt"), "w") as f:
+                f.write("buy milk\n")
+            self.eng.script([{"tool_calls": [{"name": "ws__read", "arguments": {"path": "todo.txt"}}]},
+                             {"tool_calls": [{"name": "ws__write", "arguments": {"path": "done.txt", "content": "milk bought\n"}}]},
+                             {"content": "done"}])
+            r = self.bb("ask", "-m", MODEL, "--yes", "do the todo", stdin="", cwd=folder)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(folder, "done.txt")) as f:
+                self.assertEqual(f.read(), "milk bought\n")
+            n = len(self.eng.requests)
+            self.assertIn("buy milk", json.dumps(self.eng.requests[n - 2]["body"]["messages"][-1]))   # what ws__read returned
+            # nobody to ask, no --yes: the write is not made and bb says why (exit 4)
+            self.eng.script([{"tool_calls": [{"name": "ws__write", "arguments": {"path": "nope.txt", "content": "x"}}]},
+                             {"content": "never"}])
+            r = self.bb("ask", "-m", MODEL, "write a file", stdin="", cwd=folder)
+            self.assertEqual(r.returncode, 4, r.stderr)
+            self.assertIn("--yes", r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(folder, "nope.txt")))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
     def test_doctor(self):
         r = self.bb("doctor")

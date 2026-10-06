@@ -249,7 +249,7 @@ class FakeEngine:
                 self._usage(body, reply)
             handler.wfile.write(b"data: [DONE]\n\n")
             handler.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, Cut):
+        except (ConnectionError, Cut):         # the client left (Windows says "aborted")
             pass
         finally:
             with self._lock:

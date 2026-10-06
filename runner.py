@@ -32,6 +32,7 @@ import threading
 import time
 import uuid
 
+import approvals
 import upstream
 from traces import StreamCapture
 
@@ -64,6 +65,38 @@ class Cancelled(Exception):
 
 class TurnError(Exception):
     pass
+
+
+class ApprovalNeeded(Exception):
+    """A tool asks before it runs, and this turn's client cannot answer."""
+
+
+class ClientResults:
+    """Tool calls handed to the client that runs them (bb's workspace
+    tools), and their results coming back: POST /api/runs/<id>/tool-results."""
+
+    def __init__(self):
+        self.slots = {}
+        self.lock = threading.Lock()
+
+    def expect(self, run_id, call_id):
+        slot = {"event": threading.Event(), "result": None}
+        with self.lock:
+            self.slots[(run_id, call_id)] = slot
+        return slot
+
+    def deliver(self, run_id, call_id, content, is_error):
+        with self.lock:
+            slot = self.slots.pop((run_id, call_id), None)
+        if slot is None:
+            return False
+        slot["result"] = (str(content), bool(is_error))
+        slot["event"].set()
+        return True
+
+    def drop(self, run_id, call_id):
+        with self.lock:
+            self.slots.pop((run_id, call_id), None)
 
 
 # ------------------------------------------------------------------ helpers --
@@ -265,7 +298,9 @@ class Runner:
     """deps: registry (gateways), caps_for, facts (ModelFacts), mcp (a
     function returning the MCP host), trace, record_usage(evt, **extra),
     sessions, on_session(summary), skill_bodies(names) -> {name: body},
-    write_archive, uploads_root(), engine_stats(), default_model()."""
+    write_archive, uploads_root(), engine_stats(), default_model(),
+    approvals (approvals.Approvals), client_results (ClientResults),
+    tool_policy() -> {pattern: policy}, always_allow(name)."""
 
     def __init__(self, deps):
         self.d = deps
@@ -648,6 +683,7 @@ class Runner:
 
         usage, finish, ttft, span, chunks = None, None, None, None, 0
         tot_toks = tot_rtoks = 0
+        approval_needed = False
         max_hops = max(1, int(req.get("max_hops") or 40))
         last_sig, repeats = "", 0
         try:
@@ -720,6 +756,11 @@ class Runner:
                                  "Tool hops." % max_hops)
         except Cancelled:
             pass
+        except ApprovalNeeded as e:
+            bot["error"] = ("approval needed: %s asks before it runs, and this client cannot answer. Allow it "
+                            "for this turn (bb --yes), allow it in the profile's tool_policy, or run where you "
+                            "can answer" % e)
+            approval_needed = True
         except TurnError as e:
             bot["error"] = "upstream error: " + str(e)
         except Exception as e:   # noqa: BLE001 - a turn's failure is part of its record
@@ -749,18 +790,69 @@ class Runner:
         stored = serialize_msg(bot)
         emit("done", {"message": stored, "meta": bot["meta"], "usage": usage})
         return {"ok": not bot.get("error"), "error": bot.get("error") or None, "session": sid,
-                "turn": bot["turn"], "cancelled": run.cancelled, "tokens": toks}
+                "turn": bot["turn"], "cancelled": run.cancelled, "tokens": toks,
+                "approval_needed": approval_needed}
 
     def call_tool(self, run, emit, sid, bot, call, args, req):
-        """Run one tool call. Returns (content, is_error)."""
+        """Run one tool call where it lives: the client's own tools (bb's
+        workspace) on the client, the rest here after its policy says so.
+        Returns (content, is_error); raises ApprovalNeeded."""
         t0 = time.time()
-        try:
-            text, is_err = self.d.mcp().call(call["name"], args)
-        except Exception as e:   # noqa: BLE001
-            text, is_err = "console could not reach the tool: %s" % e, True
-        self.d.trace.log("tool", session=sid, turn=bot.get("turn"), name=call["name"], arguments=args,
+        name = call["name"]
+        client = set(t["function"]["name"] for t in req.get("client_tools") or [])
+        where = "client" if name in client else "server"
+        if where == "client":
+            text, is_err = self.client_call(run, emit, call, args)
+        else:
+            pol = approvals.policy_for(name, self._annotations(name),
+                                       [self.d.tool_policy(), req.get("tool_policy") or {}])
+            if pol == "ask" and req.get("yes"):
+                pol = "allow"
+            if pol == "ask":
+                if not req.get("interactive", True):
+                    raise ApprovalNeeded(name)
+                decision = self.d.approvals.ask(run, name, args, session=sid)
+                if decision == "always":
+                    self.d.always_allow(name)
+                pol = "allow" if decision in ("allow", "always") else "denied"
+            if pol == "allow":
+                try:
+                    text, is_err = self.d.mcp().call(name, args)
+                except Exception as e:   # noqa: BLE001
+                    text, is_err = "console could not reach the tool: %s" % e, True
+            elif pol == "deny":
+                text, is_err = "this tool is turned off here (its policy is deny)", True
+            else:
+                text, is_err = "the user did not allow this call", True
+        self.d.trace.log("tool", session=sid, turn=bot.get("turn"), name=name, arguments=args, where=where,
                          result=str(text)[:200000], is_error=bool(is_err), ms=int((time.time() - t0) * 1000))
         return text, is_err
+
+    def _annotations(self, name):
+        try:
+            return self.d.mcp().tool_annotations(name)
+        except Exception:   # noqa: BLE001
+            return {}
+
+    def client_call(self, run, emit, call, args):
+        """Hand a call to the client and wait for its answer, as long as a
+        person may take to approve it plus the tool's own time."""
+        cid = call.get("id") or "call_" + uuid.uuid4().hex[:12]
+        slot = self.d.client_results.expect(run.id, cid)
+        emit("client_call", {"call_id": cid, "name": call["name"], "args": args})
+        try:
+            limit = approvals.WAIT_S + min(600, int(args.get("timeout_s") or 60) if isinstance(args, dict) else 60) + 30
+        except (TypeError, ValueError):
+            limit = approvals.WAIT_S + 90
+        deadline = time.time() + limit
+        while not slot["event"].wait(0.25):
+            if run.cancelled:
+                self.d.client_results.drop(run.id, cid)
+                raise Cancelled()
+            if time.time() >= deadline:
+                self.d.client_results.drop(run.id, cid)
+                return "the client did not answer (it may have gone away)", True
+        return slot["result"]
 
     def save(self, sid, sess, model, req):
         msgs = sess["messages"]

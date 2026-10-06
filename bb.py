@@ -33,6 +33,7 @@ import uuid
 ROOT = os.path.dirname(os.path.abspath(__file__))     # the code, from a checkout or inside the app
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+import approvals as approvalsmod  # noqa: E402
 import commands as cmdtable  # noqa: E402
 import instance as instancemod  # noqa: E402
 import paths  # noqa: E402
@@ -123,6 +124,38 @@ def _cols():
         return os.get_terminal_size(sys.stderr.fileno()).columns
     except OSError:
         return 100
+
+
+def can_prompt():
+    """Is there a person to ask? A terminal on stdin, or a controlling
+    terminal behind a pipe. BB_INTERACTIVE=0 says no (scripts, CI)."""
+    if os.environ.get("BB_INTERACTIVE") == "0":
+        return False
+    if sys.stdin.isatty():
+        return True
+    if os.name != "nt":
+        try:
+            with open("/dev/tty"):
+                return True
+        except OSError:
+            return False
+    return False
+
+
+def ask_user(out, question):
+    """A line from the person at the terminal, or None."""
+    out.clear_status()
+    try:
+        if sys.stdin.isatty():
+            return input(question)
+        if os.name != "nt":
+            with open("/dev/tty", "r+") as tty:
+                tty.write(question)
+                tty.flush()
+                return tty.readline().strip()
+    except (OSError, EOFError):
+        return None
+    return None
 
 
 def table(rows, headers):
@@ -306,10 +339,15 @@ def attachment_for(srv, sid, path, name=None, data=None):
 
 
 class TurnView:
-    """Draws one run's events: the answer to stdout, the rest to stderr."""
+    """Draws one run's events: the answer to stdout, the rest to stderr.
+    With a workspace it also runs the calls the model makes to bb's own
+    tools, and answers approvals at the terminal."""
 
-    def __init__(self, out, show_thinking=True, quiet=False):
+    def __init__(self, out, show_thinking=True, quiet=False, srv=None, rid=None, ws=None, yes=False):
         self.out, self.show_thinking, self.quiet = out, show_thinking, quiet
+        self.srv, self.rid, self.ws, self.yes = srv, rid, ws, yes
+        self.allowed = set()          # "always" for bb's own tools, for this bb
+        self.approval_needed = False
         self.wrote = ""
         self.thinking = False
         self.message = None
@@ -370,10 +408,64 @@ class TurnView:
                 o.err(o.bad(self.message["error"]))
             if not self.quiet and d.get("meta"):
                 o.err(o.dim(d["meta"]))
+        elif t == "client_call":
+            self._client_call(d)
+        elif t == "approval":
+            self._approval(d)
+        elif t in ("approved", "denied"):
+            if not self.quiet and d.get("by") not in ("cli",):
+                o.err(o.dim("  %s %s (%s)" % (d.get("tool"), "allowed" if t == "approved" else "not allowed",
+                                              d.get("by") or "")))
         elif t == "finished":
             self.final = d
+            if (d.get("result") or {}).get("approval_needed"):
+                self.approval_needed = True
         elif t == "started":
             self.run = d.get("id")
+
+    def _client_call(self, d):
+        """The model called one of bb's tools: run it here, send the result back."""
+        name, args, cid = d.get("name"), d.get("args") or {}, d.get("call_id")
+        o = self.out
+        if self.ws is None or self.srv is None:
+            return                     # another client's call: not ours to run
+        pol = approvalsmod.policy_for(name, self.ws.annotations(name))
+        if pol == "ask" and (self.yes or name in self.allowed):
+            pol = "allow"
+        if pol == "ask":
+            if not can_prompt():
+                self.approval_needed = True
+                o.err(o.bad("%s asks before it runs, and there is nobody to ask: rerun with --yes to allow it" % name))
+                self.srv.post("/api/runs/%s/tool-results" % self.rid,
+                              {"call_id": cid, "content": "not allowed: nobody could approve it", "is_error": True})
+                self.srv.post("/api/runs/%s/cancel" % self.rid)
+                return
+            ans = (ask_user(o, o.warn("allow %s %s? [y]es, [n]o, [a]lways: " % (name, _brief(args)))) or "").lower()
+            if ans.startswith("a"):
+                self.allowed.add(name)
+            pol = "allow" if ans[:1] in ("y", "a") else "deny"
+        if pol == "allow":
+            text, is_err = self.ws.call(name, args)
+        else:
+            text, is_err = "the user did not allow this call", True
+        self.srv.post("/api/runs/%s/tool-results" % self.rid, {"call_id": cid, "content": text, "is_error": is_err})
+
+    def _approval(self, d):
+        """A server tool asks before it runs: answer from here (the app can too; the first answer wins)."""
+        o = self.out
+        if self.srv is None:
+            return
+        if self.yes:
+            decision = "allow"
+        elif not can_prompt():
+            return                     # the app may answer; after 10 minutes it is a no
+        else:
+            ans = (ask_user(o, o.warn("allow %s %s? [y]es, [n]o, [a]lways: " % (d.get("tool"), _brief(d.get("args"))))) or "").lower()
+            decision = {"y": "allow", "a": "always"}.get(ans[:1], "deny")
+        try:
+            self.srv.post("/api/approvals", {"id": d.get("id"), "decision": decision})
+        except BBError:
+            pass                       # answered elsewhere first
 
     def _newline(self):
         if self.wrote and not self.wrote.endswith("\n"):
@@ -394,6 +486,11 @@ def _drain(srv, rid, view):
             return
 
 
+def _brief(args):
+    t = json.dumps(args, ensure_ascii=False) if not isinstance(args, str) else args
+    return t if len(t) <= 160 else t[:157] + "…"
+
+
 def follow(srv, rid, view, out):
     """Follow a run to its end. Ctrl-C cancels it on the server (a second
     Ctrl-C leaves at once). Returns the exit code."""
@@ -411,6 +508,8 @@ def follow(srv, rid, view, out):
         except BBError:
             pass
     state = (view.final or {}).get("state")
+    if getattr(view, "approval_needed", False):
+        return EXIT_APPROVAL
     if cancelled or state == "cancelled":
         return EXIT_CANCELLED
     if state == "error" or (view.message or {}).get("error"):
@@ -418,7 +517,12 @@ def follow(srv, rid, view, out):
     return EXIT_OK
 
 
-def run_turn(srv, out, sid, req, json_out=False, quiet=False, show_thinking=True):
+def run_turn(srv, out, sid, req, json_out=False, quiet=False, show_thinking=True, ws=None, yes=False):
+    if ws is not None:
+        req["client_tools"] = ws.defs()
+    req["interactive"] = can_prompt()
+    if yes:
+        req["yes"] = True
     try:
         r = srv.post("/api/sessions/%s/turns" % sid, req)
     except BBError as e:
@@ -426,7 +530,8 @@ def run_turn(srv, out, sid, req, json_out=False, quiet=False, show_thinking=True
             raise BBError("a turn is already running in this session (run %s); bb runs watch %s, or bb runs stop %s"
                           % (e.body.get("run"), e.body.get("run"), e.body.get("run")))
         raise
-    view = TurnView(out, show_thinking=show_thinking and not json_out, quiet=quiet or json_out)
+    view = TurnView(out, show_thinking=show_thinking and not json_out, quiet=quiet or json_out,
+                    srv=srv, rid=r["run"], ws=ws, yes=yes)
     if json_out:
         saved = sys.stdout
         sys.stdout = open(os.devnull, "w")
@@ -466,8 +571,15 @@ def cmd_ask(a, out):
         req["tools"] = False
     if a.max_tokens:
         req["params"] = {"max_tokens": a.max_tokens}
-    code, _ = run_turn(srv, out, sid, req, json_out=a.json, quiet=a.quiet, show_thinking=not a.no_thinking)
+    ws = None if a.no_tools or a.no_workspace else workspace_here()
+    code, _ = run_turn(srv, out, sid, req, json_out=a.json, quiet=a.quiet, show_thinking=not a.no_thinking,
+                       ws=ws, yes=a.yes)
     return code
+
+
+def workspace_here():
+    import workspace
+    return workspace.Workspace(os.getcwd())
 
 
 def _models(srv):
@@ -479,6 +591,7 @@ def cmd_chat(a, out):
     srv = connect(out=out)
     st = {"sid": a.session or None, "model": a.model, "effort": a.effort, "profile": a.profile, "tools": True,
           "skills": [], "atts": []}
+    ws = None if a.no_workspace else workspace_here()
     if st["sid"]:
         sess = srv.get("/api/sessions?id=" + urllib.parse.quote(st["sid"]))
         st["model"] = st["model"] or sess.get("model")
@@ -530,7 +643,7 @@ def cmd_chat(a, out):
             req["tools"] = False
         st["atts"] = []
         try:
-            run_turn(srv, out, st["sid"], req)
+            run_turn(srv, out, st["sid"], req, ws=ws if st["tools"] else None, yes=a.yes)
         except BBError as e:
             out.err(out.bad(str(e)))
 
@@ -851,10 +964,13 @@ def parser():
     a.add_argument("--no-thinking", action="store_true")
     a.add_argument("--no-tools", action="store_true")
     a.add_argument("--max-tokens", type=int)
-    a.add_argument("--yes", action="store_true", help="approve tool calls that ask")
+    a.add_argument("--yes", action="store_true", help="allow tool calls that would ask")
+    a.add_argument("--no-workspace", action="store_true", help="no tools in this folder (server tools only)")
     c = sub.add_parser("chat", help="chat in this terminal")
     c.add_argument("session", nargs="?")
     turn_opts(c)
+    c.add_argument("--yes", action="store_true", help="allow tool calls that would ask")
+    c.add_argument("--no-workspace", action="store_true", help="no tools in this folder (server tools only)")
     s = sub.add_parser("sessions")
     s.add_argument("action", choices=("ls", "show"), nargs="?", default="ls")
     s.add_argument("id", nargs="?")
@@ -897,6 +1013,16 @@ def main(argv=None):
         return EXIT_USAGE if e.code else EXIT_OK
     if os.name != "nt":
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # bb ask … | head stays quiet
+    for stream in (sys.stdout, sys.stderr):
+        # a pipe on Windows is cp1252, and a C locale is ASCII: write UTF-8,
+        # and never crash on a character the other side cannot show
+        try:
+            if stream.isatty():
+                stream.reconfigure(errors="replace")
+            else:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
     try:
         return HANDLERS[a.cmd](a, out) or EXIT_OK
     except BBError as e:

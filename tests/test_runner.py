@@ -19,7 +19,7 @@ from fake_engine import FakeEngine  # noqa: E402
 MODEL = "fake-model"
 
 
-class RunnerTest(unittest.TestCase):
+class _Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.eng = FakeEngine(models=[{"id": MODEL, "max_model_len": 32768}, {"id": "tiny-model"}]).start()
@@ -64,6 +64,9 @@ class RunnerTest(unittest.TestCase):
 
     def sent(self, i=0):
         return self.eng.requests[self.n0 + i]["body"]
+
+
+class RunnerTest(_Base):
 
     # ------------------------------------------------------------ the turn
     def test_a_turn_streams_saves_traces_and_counts(self):
@@ -187,6 +190,91 @@ class RunnerTest(unittest.TestCase):
         err = self.of(evts, "done")[0]["message"]["error"]
         self.assertIn("context is full", err)
         self.assertEqual(self.of(evts, "finished")[0]["state"], "error")
+
+
+class ApprovalTest(_Base):
+    """Tools that ask before they run, and tools the client runs itself."""
+    ASKS = "fake__ping_client"          # no annotations: may change things, so it asks
+
+    def call_then_answer(self, **kw):
+        self.eng.script([{"tool_calls": [{"name": self.ASKS, "arguments": {}}]}, {"content": "after the tool"}])
+        return self.turn("use the tool", wait=False, **kw)
+
+    def wait_for(self, rid, type_, timeout=15):
+        frames = self.srv.sse("/api/runs/%s/events" % rid, timeout=timeout,
+                              until=lambda fr: any(json.loads(f["data"])["type"] in (type_, "finished") for f in fr))
+        return [json.loads(f["data"]) for f in frames]
+
+    def test_nobody_to_ask_ends_the_turn(self):
+        r, _ = self.call_then_answer(interactive=False)
+        evts = self.follow(r["run"])
+        fin = self.of(evts, "finished")[0]
+        self.assertEqual((fin["state"], fin["result"]["approval_needed"]), ("error", True))
+        self.assertIn("approval needed", self.of(evts, "done")[0]["message"]["error"])
+
+    def test_allow_runs_it_and_any_client_may_answer(self):
+        r, _ = self.call_then_answer()
+        ask = self.of(self.wait_for(r["run"], "approval"), "approval")[0]
+        self.assertEqual(ask["tool"], self.ASKS)
+        self.assertEqual([p["id"] for p in self.srv.request("GET", "/api/approvals")[1]["pending"]], [ask["id"]])
+        st, _ = self.srv.request("POST", "/api/approvals", {"id": ask["id"], "decision": "allow"})
+        self.assertEqual(st, 200)
+        st, _ = self.srv.request("POST", "/api/approvals", {"id": ask["id"], "decision": "deny"})
+        self.assertEqual(st, 409)                                   # the first answer won
+        evts = self.follow(r["run"])
+        self.assertFalse(self.of(evts, "tool_result")[0]["is_error"])
+        self.assertEqual(self.of(evts, "done")[0]["message"]["content"], "after the tool")
+
+    def test_deny_tells_the_model(self):
+        r, _ = self.call_then_answer()
+        ask = self.of(self.wait_for(r["run"], "approval"), "approval")[0]
+        self.srv.request("POST", "/api/approvals", {"id": ask["id"], "decision": "deny"})
+        evts = self.follow(r["run"])
+        res = self.of(evts, "tool_result")[0]
+        self.assertTrue(res["is_error"])
+        self.assertIn("did not allow", res["content"])
+        self.assertIn("did not allow", self.sent(1)["messages"][-1]["content"])
+
+    def test_always_stops_asking(self):
+        r, _ = self.call_then_answer()
+        ask = self.of(self.wait_for(r["run"], "approval"), "approval")[0]
+        self.srv.request("POST", "/api/approvals", {"id": ask["id"], "decision": "always"})
+        self.follow(r["run"])
+        self.eng.script([{"tool_calls": [{"name": self.ASKS, "arguments": {}}]}, {"content": "no question"}])
+        r2, evts = self.turn("again", interactive=False)
+        self.assertEqual(self.of(evts, "approval"), [])
+        self.assertEqual(self.of(evts, "done")[0]["message"]["content"], "no question")
+        with open(os.path.join(self.data, "config.json")) as f:
+            cfg = json.load(f)
+        self.assertEqual(cfg["tool_policy"][self.ASKS], "allow")
+        cfg["tool_policy"].pop(self.ASKS)                          # the other tests expect it to ask
+        with open(os.path.join(self.data, "config.json"), "w") as f:
+            json.dump(cfg, f)
+
+    def test_yes_and_a_profiles_deny(self):
+        self.eng.script([{"tool_calls": [{"name": self.ASKS, "arguments": {}}]}, {"content": "allowed by yes"}])
+        r, evts = self.turn("go", yes=True, interactive=False)
+        self.assertEqual(self.of(evts, "done")[0]["message"]["content"], "allowed by yes")
+        self.srv.request("POST", "/api/profiles", {"action": "save", "name": "Locked",
+                                                   "profile": {"tool_policy": {"fake__*": "deny"}}})
+        self.eng.script([{"tool_calls": [{"name": "fake__echo", "arguments": {"text": "x"}}]}, {"content": "ok"}])
+        r, evts = self.turn("go", profile="Locked")
+        self.assertIn("turned off", self.of(evts, "tool_result")[0]["content"])
+
+    def test_client_tools_run_on_the_client(self):
+        defs = [{"type": "function", "function": {"name": "ws__read", "description": "read",
+                                                  "parameters": {"type": "object", "properties": {}}}}]
+        self.eng.script([{"tool_calls": [{"name": "ws__read", "arguments": {"path": "a.txt"}}]}, {"content": "read it"}])
+        r, _ = self.turn("read a.txt", wait=False, client_tools=defs)
+        call = self.of(self.wait_for(r["run"], "client_call"), "client_call")[0]
+        self.assertEqual((call["name"], call["args"]), ("ws__read", {"path": "a.txt"}))
+        st, _ = self.srv.request("POST", "/api/runs/%s/tool-results" % r["run"],
+                                 {"call_id": call["call_id"], "content": "file body", "is_error": False})
+        self.assertEqual(st, 200)
+        evts = self.follow(r["run"])
+        self.assertEqual(self.of(evts, "done")[0]["message"]["content"], "read it")
+        self.assertEqual(self.sent(1)["messages"][-1]["content"], "file body")
+        self.assertEqual(self.sent(0)["tools"][-1]["function"]["name"], "ws__read")
 
 
 if __name__ == "__main__":

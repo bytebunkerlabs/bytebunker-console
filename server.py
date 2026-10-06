@@ -63,6 +63,7 @@ import sessions as sessmod
 import upstream as upstreammod
 import runner as runnermod
 import model_facts as factsmod
+import approvals as approvalsmod
 from version import VERSION
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1080,7 +1081,16 @@ def upstream_request(path, payload=None, method="GET", model=None, gateway=None)
 # Chat turns run on the server (runner.py): the app, bb, jobs and workflows
 # share one engine, one session file, one trace log and one usage ledger.
 FACTS = factsmod.ModelFacts(os.path.join(DATA, "model_facts.json"))
+APPROVALS = approvalsmod.Approvals(BUS)
+CLIENT_RESULTS = runnermod.ClientResults()
 _RUNNER = []
+
+
+def always_allow(name):
+    """"Always allow": the tool runs without asking from now on (config tool_policy)."""
+    config_fresh()
+    CFG.setdefault("tool_policy", {})[name] = "allow"
+    save_config()
 
 
 def record_usage(body, **extra):
@@ -1152,7 +1162,7 @@ DEFAULT_PROFILES = {
     "Deep": {"description": "the most thinking the model offers, long answers",
              "effort": "max", "params": {"max_tokens": 32768}},
 }
-PROFILE_KEYS = ("model", "effort", "params", "system", "skills", "tools", "max_hops", "auto_compress")
+PROFILE_KEYS = ("model", "effort", "params", "system", "skills", "tools", "max_hops", "auto_compress", "tool_policy")
 
 
 def profiles():
@@ -1190,7 +1200,8 @@ def runner():
             on_session=lambda summary: BUS.publish("sessions", "updated", summary),
             skill_bodies=lambda names: skill_catalog().bodies(names),
             write_archive=write_archive, uploads_root=uploads_root, engine_stats=engine_stats,
-            default_model=default_model)))
+            default_model=default_model, approvals=APPROVALS, client_results=CLIENT_RESULTS,
+            tool_policy=lambda: CFG.get("tool_policy") or {}, always_allow=always_allow)))
     return _RUNNER[0]
 
 
@@ -1714,6 +1725,8 @@ class Handler(BaseHTTPRequestHandler):
             self._events(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         elif path == "/api/profiles":
             self._json({"profiles": profiles(), "default": CFG.get("default_profile") or "Default"})
+        elif path == "/api/approvals":
+            self._json({"pending": APPROVALS.list()})
         elif path == "/api/runs":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             self._json({"runs": RUNS.history(limit=max(1, min(1000, _int((q.get("limit") or [""])[0], 100))),
@@ -1879,6 +1892,31 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             if body is not None:
                 self._turn(path, body)
+            return
+        if path == "/api/approvals":
+            body = self._body()
+            if body is None:
+                return
+            try:
+                done = APPROVALS.answer(str((body or {}).get("id") or ""), (body or {}).get("decision"), by=self._client())
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            if done is None:
+                self._json({"error": "already answered, or nothing is asking"}, 409)
+                return
+            TRACE.log("approval", id=done["id"], tool=done["tool"], decision=done["decision"], by=done["by"],
+                      session=done.get("session"), run=done.get("run"))
+            self._json({"ok": True, "approval": done})
+            return
+        if path.startswith("/api/runs/") and path.endswith("/tool-results"):
+            body = self._body()
+            if body is None:
+                return
+            rid = path[len("/api/runs/"):-len("/tool-results")]
+            ok = isinstance(body, dict) and CLIENT_RESULTS.deliver(rid, str(body.get("call_id") or ""),
+                                                                   body.get("content") or "", body.get("is_error"))
+            self._json({"ok": ok}, 200 if ok else 404)
             return
         if path.startswith("/api/runs/") and path.endswith("/cancel"):
             self._drain()
