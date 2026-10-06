@@ -25,6 +25,7 @@ Config (config.json):
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -179,7 +180,7 @@ def build_command(CFG, goal):
     return env_argv + shlex.split(launcher) + [script, "--goal", goal]
 
 
-def recent_slaves(CFG, limit=40):
+def recent_slaves(CFG, limit=40, goal_id=None):
     """Read the harness's per-spawn trajectory log so the console can show what
     each agent (slave) actually did. Returns {ok, slaves:[...]} or {ok:False}.
     Read-only tail; never blocks a launch."""
@@ -193,11 +194,20 @@ def recent_slaves(CFG, limit=40):
     # Running slaves stream events to their host-mounted task dir
     # (/tmp/bb-<role>-<id>-*/events.jsonl); files touched in the last 30 min
     # are read too, so a slave shows up WHILE it works, not only after.
-    live_cmd = ("echo ===MASTER===; G=$(ls -td %s/trajectories/goal-*/ 2>/dev/null | head -1); "
+    # The goal on screen: the one the console's run named (BB_RUN), else the
+    # newest goal directory (a harness too old to name its goal). A task dir
+    # is bb-<slave id>-<random>, and a slave id (<role>-<hex>) can hold
+    # dashes ("deep-researcher-1a2b3c4d"): strip the prefix and the random
+    # suffix, never cut by field. podman or docker: whichever is there.
+    if goal_id and re.match(r"^[A-Za-z0-9._-]{1,80}$", goal_id):
+        pick_goal = "G={dir}/trajectories/%s/; " % goal_id
+    else:
+        pick_goal = "G=$(ls -td {dir}/trajectories/goal-*/ {dir}/trajectories/g-*/ 2>/dev/null | head -1); "
+    live_cmd = ("echo ===MASTER===; " + pick_goal +
                 "[ -n \"$G\" ] && tail -n 14 \"$G/master.jsonl\" 2>/dev/null; "
-                "echo ===LIVE===; RUNNING=\" $(podman ps --format '{{.Names}}' 2>/dev/null | tr '\\n' ' ') \"; "
+                "echo ===LIVE===; RUNNING=\" $( (podman ps --format '{{.Names}}'; docker ps --format '{{.Names}}') 2>/dev/null | tr '\\n' ' ') \"; "
                 "for f in $(find /tmp/ -maxdepth 2 -name events.jsonl -mmin -60 -path '*/bb-*' 2>/dev/null | head -12); do "
-                "n=$(basename $(dirname $f) | cut -d- -f2,3); case \"$RUNNING\" in *\" $n \"*) echo \"### $f\"; tail -n 10 \"$f\";; esac; done")
+                "n=$(basename $(dirname $f)); n=${n#bb-}; n=${n%-*}; case \"$RUNNING\" in *\" $n \"*) echo \"### $f\"; tail -n 10 \"$f\";; esac; done")
     if ssh:
         d = directory
         if d == "~":
@@ -206,7 +216,7 @@ def recent_slaves(CFG, limit=40):
             qd = "~/" + shlex.quote(d[2:])
         else:
             qd = shlex.quote(d)
-        remote = "tail -n %d %s/%s 2>/dev/null; %s" % (int(limit), qd, rel, live_cmd % qd)
+        remote = "tail -n %d %s/%s 2>/dev/null; %s" % (int(limit), qd, rel, live_cmd.replace("{dir}", qd))
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", ssh, remote]
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
@@ -221,7 +231,8 @@ def recent_slaves(CFG, limit=40):
         except OSError as e:
             return {"ok": False, "error": str(e)[:150]}
         try:
-            out += subprocess.run(["sh", "-c", live_cmd % shlex.quote(os.path.expanduser(directory))], capture_output=True, text=True, timeout=10).stdout
+            out += subprocess.run(["sh", "-c", live_cmd.replace("{dir}", shlex.quote(os.path.expanduser(directory)))],
+                                  capture_output=True, text=True, timeout=10).stdout
         except (subprocess.TimeoutExpired, OSError):
             pass
     spawn_part, _, rest = out.partition("===MASTER===")
@@ -239,9 +250,9 @@ def recent_slaves(CFG, limit=40):
     for line in live_part.splitlines():
         if line.startswith("### "):
             path = line[4:].strip()
-            base = path.split("/")[-2] if "/" in path else path      # bb-<role>-<id>-<rand>
-            parts = base.split("-")
-            cur = {"name": "-".join(parts[1:3]) if len(parts) >= 3 else base, "path": path, "events": []}
+            base = path.split("/")[-2] if "/" in path else path      # bb-<slave id>-<random>
+            name = base[3:].rsplit("-", 1)[0] if base.startswith("bb-") and base.count("-") >= 2 else base
+            cur = {"name": name, "path": path, "events": []}
             live.append(cur)
             continue
         if cur is None:
@@ -677,7 +688,8 @@ def kill_slave(CFG, slave_id):
         return {"ok": False, "error": "bad slave id"}
     a = agent_cfg(CFG)
     ssh = (a.get("ssh") or "").strip()
-    inner = "podman kill %s >/dev/null 2>&1 && echo killed || echo not-running" % shlex.quote(slave_id)
+    q = shlex.quote(slave_id)
+    inner = ("{ podman kill %s || docker kill %s; } >/dev/null 2>&1 && echo killed || echo not-running" % (q, q))
     cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh, inner] if ssh else ["sh", "-c", inner]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip()

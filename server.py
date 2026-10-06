@@ -1177,6 +1177,8 @@ class Handler(BaseHTTPRequestHandler):
         # a reconnecting browser sends Last-Event-ID; it wins over the URL's after=
         pos = _int(self.headers.get("Last-Event-ID") or (q.get("after") or [""])[0], BUS.seq)
         self._sse_start()
+        with _LISTEN_LOCK:
+            _LISTENING[0] += 1
         try:
             while True:
                 evts, gap, head = BUS.scan(pos, topics)
@@ -1194,6 +1196,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
         except OSError:
             return
+        finally:
+            with _LISTEN_LOCK:
+                _LISTENING[0] -= 1
 
     def _stream_run(self, rid, after=0, legacy=False, cancel_on_leave=False):
         """A run as SSE: everything from its start (or after N) from its file,
@@ -1543,7 +1548,9 @@ class Handler(BaseHTTPRequestHandler):
                             "exit": found.get("exit"), "killed": found.get("killed"),
                             "host": found.get("host"), "ts": found.get("ts")})
         elif path == "/api/agents/slaves":
-            self._json(agentmod.recent_slaves(CFG))
+            # the goal on screen is the running one, when the harness named it (BB_RUN)
+            going = RUNS.active("agents")
+            self._json(agentmod.recent_slaves(CFG, goal_id=going[0].meta.get("goal_id") if going else None))
         elif path == "/api/agents/stats":
             self._json(agentmod.stats(CFG))
         elif path == "/api/agents/slave":
@@ -2539,6 +2546,7 @@ def serve(bind=None, port=None):
     # the built-in jobs MCP server calls the console back on this port
     os.environ["BB_CONSOLE_PORT"] = str(srv.server_address[1])
     start_scheduler()
+    threading.Thread(target=watch_models, name="models", daemon=True).start()
     mcp_host()      # servers start in the background, ready before the first chat
     return srv
 
@@ -2546,6 +2554,32 @@ def serve(bind=None, port=None):
 INSTANCE = None
 STARTED = time.time()
 STOPPING = threading.Event()
+_LISTENING = [0]                 # open /api/events streams: someone to tell about changes
+_LISTEN_LOCK = threading.Lock()
+
+
+def _models_signature():
+    return (tuple(sorted(m["id"] for m in GW.models)),
+            tuple(sorted((n, bool(st.get("ok"))) for n, st in GW.status.items())))
+
+
+def watch_models():
+    """Models come and go as engines start and stop. While an app window is
+    open, look every models_watch_s (30 s) and say when the list changed, so
+    the picker and the Models screen follow without a reload."""
+    last = None
+    while not STOPPING.is_set():
+        every = max(2, _int(CFG.get("models_watch_s"), 30))
+        if _LISTENING[0] > 0:
+            try:
+                GW.refresh(force=True)
+                sig = _models_signature()
+                if last is not None and sig != last:
+                    BUS.publish("models", "changed", {"models": len(sig[0])})
+                last = sig
+            except Exception:   # noqa: BLE001 - a bad probe must not end the watch
+                pass
+        STOPPING.wait(every)
 
 
 def app_version():

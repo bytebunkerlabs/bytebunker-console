@@ -10,6 +10,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -107,6 +109,33 @@ class ChatProxyTest(unittest.TestCase):
         r, raw, events = self.chat({"model": "fake-model", "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(r.status, 200)
         self.assertTrue(events[-1].get("error", "").startswith("the model server closed the stream"), events[-1])
+
+
+class ModelWatchTest(unittest.TestCase):
+    def test_a_model_that_appears_is_announced(self):
+        eng = FakeEngine(models=[{"id": "first-model", "max_model_len": 8192}]).start()
+        data = tempfile.mkdtemp()
+        srv = Server(data, {"gateways": [{"name": "fake", "url": eng.url, "key": "", "enabled": True}],
+                            "models_watch_s": 2})
+        try:
+            seq = srv.request("GET", "/api/runs")[1]["seq"]
+            # an app window listening; then an engine loads a second model
+            got = []
+            t = threading.Thread(target=lambda: got.extend(srv.sse(
+                "/api/events?topics=models&after=%d" % seq, timeout=12,
+                until=lambda fr: len(fr) >= 1)))
+            t.start()
+            time.sleep(2.5)                      # the watch has seen the first list
+            eng.models.append({"id": "second-model", "max_model_len": 8192})
+            t.join(15)
+            self.assertTrue(got, "no models event")
+            self.assertEqual(json.loads(got[0]["data"])["data"]["models"], 2)
+            st, models = srv.request("GET", "/api/models")
+            self.assertEqual(sorted(m["id"] for m in models["data"]), ["first-model", "second-model"])
+        finally:
+            srv.stop()
+            eng.stop()
+            shutil.rmtree(data, ignore_errors=True)
 
 
 if __name__ == "__main__":

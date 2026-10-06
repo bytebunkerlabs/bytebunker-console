@@ -1521,7 +1521,7 @@
   function onLive(topic, fn) { (live.handlers[topic] = live.handlers[topic] || []).push(fn); }
   function startLive() {
     if (live.es || typeof EventSource === "undefined") return;
-    const topics = ["jobs", "sessions", "runs", "usage", "config"];
+    const topics = ["jobs", "sessions", "runs", "usage", "config", "models"];
     const es = new EventSource("/api/events?topics=" + topics.join(","));
     live.es = es;
     const fire = (topic, evt) => { for (const fn of live.handlers[topic] || []) { try { fn(evt); } catch (e) { console.error(e); } } };
@@ -1533,6 +1533,7 @@
   onLive("jobs", () => { if (state.screen === "jobs") renderJobs(true); });
   onLive("sessions", () => { if (state.screen === "sessions") renderSessions(); });
   onLive("usage", () => { if (state.screen === "usage") renderUsage(); });
+  onLive("models", () => loadModels());          // an engine started or stopped somewhere
   onLive("runs", (e) => {
     // a goal started elsewhere (another tab, a job, bb) shows up here
     if (state.screen === "agents" && !state.streaming && e.type === "started" && (e.data || {}).kind === "agents") attachAgentRun();
