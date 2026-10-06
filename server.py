@@ -165,15 +165,24 @@ DEFAULT_CAPS = {
 
 
 def caps_for(model_id):
+    """What a model can do. The window, best source first: what its engine
+    said when it refused a prompt (model_facts), what its engine says it
+    serves (vLLM's max_model_len), then the capability table."""
     table = dict(DEFAULT_CAPS)
     table.update(CFG.get("model_capabilities") or {})
     mid = (model_id or "").lower()
     hits = [k for k in table if k.lower() in mid]
+    merged = dict(CAPS_FALLBACK)
     if hits:
-        merged = dict(CAPS_FALLBACK)
         merged.update(table[max(hits, key=len)])
-        return merged
-    return dict(CAPS_FALLBACK)
+    base = (model_id or "").rsplit("@", 1)[0]
+    served = (GW.served.get(model_id) or GW.served.get(base)) if "GW" in globals() else None
+    if served:
+        merged["ctx"] = served
+    learned = FACTS.ctx(model_id) if "FACTS" in globals() else None
+    if learned:
+        merged["ctx"] = learned
+    return merged
 
 
 def _default_identity():

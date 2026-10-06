@@ -77,6 +77,7 @@ class Registry:
         self.models = []            # [{id, gateway, caps, owned_by, also_on}]
         self.model_map = {}         # id -> gateway name
         self.status = {}            # gateway name -> {ok, models, ms, error, kind}
+        self.served = {}            # model id -> the window its engine says it serves (vLLM max_model_len)
         self.at = 0
 
     def live(self):
@@ -121,11 +122,14 @@ class Registry:
             data = get_json(g["url"] + "/models", g.get("key"), timeout=6)
             ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
             owned = {m.get("id"): m.get("owned_by") for m in (data.get("data") or [])}
+            # vLLM says the window it serves; the capability table only guesses
+            ctx = {m.get("id"): m["max_model_len"] for m in (data.get("data") or [])
+                   if isinstance(m.get("max_model_len"), int) and m["max_model_len"] > 0}
             return g, {"ok": True, "models": len(ids), "ms": int((time.time() - t0) * 1000), "error": None,
-                       "kind": g.get("kind") or detect_kind(g["url"], owned), "url": g["url"]}, ids, owned
+                       "kind": g.get("kind") or detect_kind(g["url"], owned), "url": g["url"]}, ids, owned, ctx
         except Exception as e:   # noqa: BLE001
             return g, {"ok": False, "models": 0, "ms": int((time.time() - t0) * 1000), "error": str(e)[:160],
-                       "kind": g.get("kind") or "", "url": g["url"]}, [], {}
+                       "kind": g.get("kind") or "", "url": g["url"]}, [], {}, {}
 
     def refresh(self, force=False):
         with self._lock:
@@ -135,7 +139,13 @@ class Registry:
             models, model_map, status, pinned = [], {}, {}, []
             if gws:
                 with ThreadPoolExecutor(max_workers=min(8, len(gws))) as pool:
-                    for g, st, ids, owned in pool.map(self._probe, gws):
+                    probed = list(pool.map(self._probe, gws))
+                served = {}
+                for _g, _st, _ids, _owned, ctx in probed:
+                    for mid, n in ctx.items():
+                        served.setdefault(mid, n)
+                self.served = served             # before caps_for reads it below
+                for g, st, ids, owned, _ctx in probed:
                         status[g["name"]] = st
                         if st["kind"] and not g.get("kind"):
                             g["kind"] = st["kind"]

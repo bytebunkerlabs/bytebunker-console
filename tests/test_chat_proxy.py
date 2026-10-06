@@ -111,6 +111,27 @@ class ChatProxyTest(unittest.TestCase):
         self.assertTrue(events[-1].get("error", "").startswith("the model server closed the stream"), events[-1])
 
 
+class ServedWindowTest(unittest.TestCase):
+    def test_the_engines_window_then_what_it_said_when_it_refused(self):
+        eng = FakeEngine(models=[{"id": "windowed", "max_model_len": 24576}]).start()
+        data = tempfile.mkdtemp()
+        srv = Server(data, {"gateways": [{"name": "fake", "url": eng.url, "key": "", "enabled": True}],
+                            "model_capabilities": {"windowed": {"ctx": 1000000}}})
+        try:
+            m = srv.request("GET", "/api/models")[1]["data"][0]
+            self.assertEqual(m["caps"]["ctx"], 24576)                  # the engine, not the table
+            eng.script([{"overflow": {"ctx": 16384, "requested": 20000, "prompt": 9000}}, {"content": "ok"}])
+            st, r = srv.request("POST", "/api/sessions/new/turns", {"text": "hi", "model": "windowed"})
+            srv.sse("/api/runs/%s/events" % r["run"], timeout=20,
+                    until=lambda fr: json.loads(fr[-1]["data"])["type"] == "finished")
+            m = srv.request("GET", "/api/models?refresh=1")[1]["data"][0]
+            self.assertEqual(m["caps"]["ctx"], 16384)                  # what it said when it refused
+        finally:
+            srv.stop()
+            eng.stop()
+            shutil.rmtree(data, ignore_errors=True)
+
+
 class ModelWatchTest(unittest.TestCase):
     def test_a_model_that_appears_is_announced(self):
         eng = FakeEngine(models=[{"id": "first-model", "max_model_len": 8192}]).start()

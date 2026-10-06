@@ -298,7 +298,7 @@ class WorkflowTest(_Base):
         self.assertEqual(self.of(evts, "done")[0]["message"]["content"], "looks fine")
         sent = self.sent(0)
         self.assertEqual(sent["messages"][-1]["content"], "Review this for bugs: x = 1 (focus: correctness)")
-        self.assertEqual(sent["max_tokens"], 32768)                     # the Deep profile
+        self.assertGreater(sent["max_tokens"], 30000)                   # Deep's 32768, clamped to the served window
         sess = self.srv.request("GET", "/api/sessions?id=" + run["session"])[1]
         self.assertEqual(sess["title"], "Review this for bugs: x = 1 (focus: correctness)")
 
