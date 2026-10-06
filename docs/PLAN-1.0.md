@@ -7,7 +7,12 @@ Started 2026-10-05 on the owner's go. Work happens in phase order; dgx-serve (ph
 | Phase | State |
 |---|---|
 | Do first | transcript removed from dgx-spark-serve's tree (history purge awaits the owner); work in progress saved on spark-1 branch `wip/2026-10-05` (local only); dgx-spark-setup no longer resets a live firewall; the engine key waits for the detached launcher (it needs an engine restart) |
-| 0 to 6 | in progress, see below |
+| 0 | done: a scriptable fake engine and fake MCP server; CI on Linux (Python 3.9 and 3.12), macOS and Windows |
+| 1 | done (console 697eabc..bf54222): event bus and `GET /api/events`; server-owned runs (agent goals, rack deploys, recipe deploys, MCP installs, jobs) that outlive their tab, re-attach and cancel; one file per session (hermes's 48 MB `sessions.json` migrated losslessly to 2.45 MB); `upstream.py`; one server per data folder; MCP replies routed by id; a versioned config that keeps outside edits. Glitches fixed with tests: every row of section 4.8 that the runner does not replace, except the agents polling (phase 5, worker monitor). Found and fixed on the way: the `hidden` attribute never hid anything with a display rule (Video studio, the first-run card, Stop); a stream cut mid-reply rendered as complete. Browser journeys (Playwright, not yet in CI) cover Jobs, Agents, Sessions and the Playground |
+| 2 | next: the runner, profiles, workflows, the command table, `bb` |
+| 3 | dgx-serve `dev/1.0` (local commits, not pushed): platform detection, inventory (`rack init`, `rack nodes`), platform flags with `--plan` and `--on`; recipes v2 in progress |
+| Harness | pushed to the harness's main (d33a12e..1696a0e, 179 tests): goals never parsed as commands, `--goal-id`, an exit code per outcome, protocol 2 with `events.jsonl`, `--spec` per role, skill bodies to slaves, platform-aware preflight, the iMessage handle removed. Not deployed to the worker |
+| 4 to 6 | not started |
 
 Decisions taken as recommended (the owner said "build it"): 5 (llama.cpp on Macs), 8 (no LiteLLM by default), 9 (private recipes to an overlay), 10 (tools catalog), 11 (no Linux desktop app), 12 (Video out of 1.0), 13 (support matrix), 14 (an engine on the agent worker allowed, labelled), 15 (a folder per recipe).
 
