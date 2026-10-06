@@ -24,6 +24,7 @@ Streaming honours stream_options.include_usage like vLLM does.
 
 Also: GET /v1/models, GET /metrics (vLLM-style), GET /health.
 Run standalone for browser tests:  python3 tests/fakes/fake_engine.py --port 18999
+(POST /_fake/script with a list of replies scripts it from outside.)
 """
 import argparse
 import json
@@ -113,6 +114,9 @@ class FakeEngine:
                     body = json.loads(raw.decode() or "{}")
                 except ValueError:
                     body = {"_raw": raw.decode("utf-8", "replace")}
+                if self.path == "/_fake/script":             # browser tests script the standalone engine
+                    engine.script(body if isinstance(body, list) else [body])
+                    return self._json(200, {"ok": True})
                 with engine._lock:
                     engine.requests.append({"path": self.path, "headers": dict(self.headers.items()),
                                             "body": body, "t": time.time()})

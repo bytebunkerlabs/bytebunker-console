@@ -51,7 +51,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
+  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "workflows", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
   function go(s) {
     // a screen whose nav entry is hidden (not set up here) is not reachable by link
     const nav = document.querySelector(`[data-nav="${s}"]`);
@@ -69,6 +69,7 @@
     if (s === "plugins") renderPlugins();
     if (s === "mcp") renderMcp();
     if (s === "jobs") renderJobs();
+    if (s === "workflows") renderWorkflows();
     if (s === "gateways") renderGateways();
     if (s === "settings") renderSettings();
     if (s === "agents") renderAgents();
@@ -1474,6 +1475,12 @@
       r.innerHTML = '<span class="t"></span><span class="m mono"></span><span class="m mono"></span><span class="m mono"></span>' +
                     '<span class="w"><span class="when"></span><button class="del" title="Delete">\u2715</button></span>';
       r.children[0].textContent = s.title || "untitled";
+      if (s.source && s.source !== "app") {
+        const chip = document.createElement("span"); chip.className = "src-chip";
+        chip.textContent = s.source === "cli" ? "terminal" : s.source;
+        if (s.cwd) chip.title = "bb, in " + s.cwd;
+        r.children[0].appendChild(chip);
+      }
       r.children[1].textContent = s.model || "";
       r.children[2].textContent = s.turns || 0;
       r.children[3].textContent = (s.chars || 0).toLocaleString();
@@ -1521,7 +1528,7 @@
   function onLive(topic, fn) { (live.handlers[topic] = live.handlers[topic] || []).push(fn); }
   function startLive() {
     if (live.es || typeof EventSource === "undefined") return;
-    const topics = ["jobs", "sessions", "runs", "usage", "config", "models"];
+    const topics = ["jobs", "sessions", "runs", "usage", "config", "models", "approvals"];
     const es = new EventSource("/api/events?topics=" + topics.join(","));
     live.es = es;
     const fire = (topic, evt) => { for (const fn of live.handlers[topic] || []) { try { fn(evt); } catch (e) { console.error(e); } } };
@@ -1534,6 +1541,8 @@
   onLive("sessions", () => { if (state.screen === "sessions") renderSessions(); });
   onLive("usage", () => { if (state.screen === "usage") renderUsage(); });
   onLive("models", () => loadModels());          // an engine started or stopped somewhere
+  onLive("approvals", () => renderApprovals());
+  onLive("config", () => { if (state.screen === "workflows") renderWorkflows(true); });
   onLive("runs", (e) => {
     // a goal started elsewhere (another tab, a job, bb) shows up here
     if (state.screen === "agents" && !state.streaming && e.type === "started" && (e.data || {}).kind === "agents") attachAgentRun();
@@ -1955,6 +1964,64 @@
       try { await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: user.value, host: host.value, rates: { input: parseFloat(rin.value), output: parseFloat(rout.value) } }) }); note.textContent = "saved"; await refreshConfig(); $("who-user").textContent = state.cfg.identity.user || "local"; $("who-host").textContent = state.cfg.identity.host || ""; } catch (e) { note.textContent = e.message; }
     };
     srow.appendChild(save); srow.appendChild(note); rt.appendChild(srow);
+    // profiles: the settings a turn runs with (bb -p NAME, a workflow's, a job's)
+    const pc = card("Profiles", "named turn settings: bb -p NAME, a workflow's profile, a job's");
+    let pd = { profiles: {}, default: "Default" };
+    try { pd = await (await fetch("/api/profiles")).json(); } catch (e) {}
+    const profPost = async (payload) => {
+      const r = await fetch("/api/profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const x = await r.json(); if (!r.ok || x.error) throw new Error(x.error || ("HTTP " + r.status)); return x;
+    };
+    const profForm = (name, p) => {
+      p = p || {};
+      const f = document.createElement("div"); f.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--border);border-radius:9px";
+      const nm = inputEl("Careful"); nm.value = name || ""; if (name) nm.disabled = true;
+      const ds = inputEl("what it is for"); ds.value = p.description || "";
+      const ef = document.createElement("select"); ef.className = "text-input";
+      for (const v of ["", "off", "low", "medium", "high", "max"]) { const o = document.createElement("option"); o.value = v; o.textContent = v || "(the model's default)"; ef.appendChild(o); }
+      ef.value = p.effort || "";
+      const mt = inputEl("max tokens, e.g. 8192"); mt.type = "number"; mt.value = (p.params || {}).max_tokens || "";
+      const md = document.createElement("select"); md.className = "text-input";
+      const m0 = document.createElement("option"); m0.value = ""; m0.textContent = "(whatever is picked)"; md.appendChild(m0);
+      for (const id of state.models || []) { const o = document.createElement("option"); o.value = id; o.textContent = id; md.appendChild(o); }
+      md.value = p.model || "";
+      const sy = textareaEl("standing instructions (optional)", 3); sy.value = p.system || "";
+      const tp = textareaEl("tool rules, one per line:\nterminal__* = ask\nfs__read_* = allow\nweb__* = deny", 3);
+      tp.value = Object.entries(p.tool_policy || {}).map(([k, v]) => k + " = " + v).join("\n");
+      [formRow("name", nm), formRow("description", ds), formRow("effort", ef), formRow("max tokens", mt), formRow("model", md), formRow("system prompt", sy), formRow("tools", tp)].forEach((e) => f.appendChild(e));
+      const r = document.createElement("div"); r.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+      const sv = document.createElement("button"); sv.type = "button"; sv.className = "solid-btn"; sv.textContent = "Save profile";
+      const nt = document.createElement("span"); nt.className = "hint";
+      sv.onclick = async () => {
+        const policy = {};
+        for (const line of tp.value.split("\n")) { const m = /^\s*(\S+)\s*=\s*(allow|ask|deny)\s*$/.exec(line); if (m) policy[m[1]] = m[2]; else if (line.trim()) { nt.textContent = "a tool rule is: pattern = allow, ask or deny"; return; } }
+        const prof = { description: ds.value, effort: ef.value || null, model: md.value || null, system: sy.value || null, tool_policy: policy };
+        if (mt.value) prof.params = { max_tokens: parseInt(mt.value, 10) };
+        try { await profPost({ action: "save", name: nm.value.trim(), profile: prof }); renderSettings(); } catch (e) { nt.textContent = e.message; }
+      };
+      r.appendChild(sv); r.appendChild(nt); f.appendChild(r);
+      return f;
+    };
+    for (const [n, p] of Object.entries(pd.profiles || {})) {
+      const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:baseline;flex-wrap:wrap";
+      const b = document.createElement("b"); b.textContent = n + (n === pd.default ? " (default)" : ""); b.style.fontSize = "12.5px";
+      const sm = document.createElement("span"); sm.className = "hint"; sm.style.flex = "1";
+      sm.textContent = [p.description, p.effort ? "effort " + p.effort : "", (p.params || {}).max_tokens ? fmtTok(p.params.max_tokens) + " tokens" : "", p.model || ""].filter(Boolean).join(" · ");
+      row.appendChild(b); row.appendChild(sm);
+      const mk = (label, fn) => { const x = document.createElement("button"); x.type = "button"; x.className = "linky"; x.textContent = label; x.onclick = fn; row.appendChild(x); };
+      const slot = document.createElement("div");
+      mk("edit", () => { slot.textContent = ""; slot.appendChild(profForm(n, p)); });
+      if (n !== pd.default) mk("make default", async () => { try { await profPost({ action: "default", name: n }); renderSettings(); } catch (e) { alert(e.message); } });
+      if (p.saved) mk(p.builtin ? "reset" : "delete", async () => {
+        if (!confirm(p.builtin ? "Put " + n + " back as it shipped?" : "Delete profile " + n + "?")) return;
+        try { await profPost({ action: "delete", name: n }); renderSettings(); } catch (e) { alert(e.message); }
+      });
+      pc.appendChild(row); pc.appendChild(slot);
+    }
+    const addSlot = document.createElement("div");
+    const addBtn = document.createElement("button"); addBtn.type = "button"; addBtn.className = "ghost-btn"; addBtn.textContent = "＋ New profile";
+    addBtn.onclick = () => { addSlot.textContent = ""; addSlot.appendChild(profForm(null)); };
+    pc.appendChild(addBtn); pc.appendChild(addSlot);
     // the terminal: bb runs on this same server; its chats show up in Sessions
     const cli = card("Command line", "bb: chat, agents and jobs from a terminal, on this same server");
     const crow = document.createElement("div"); crow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
@@ -2263,6 +2330,181 @@
       pre.textContent = r.error ? ("error: " + r.error) : (r.output || "(no output)");
       c.appendChild(pre); pane.appendChild(c);
     }
+  }
+
+  /* ---------------- runs, followed live ---------------- */
+  // A run's events from its start, then live, until it finishes. EventSource
+  // reconnects by itself, so it is closed on "finished" or it would replay.
+  function followRun(rid, on) {
+    const es = new EventSource("/api/runs/" + encodeURIComponent(rid) + "/events");
+    const handle = (e) => { let evt; try { evt = JSON.parse(e.data); } catch (x) { return; } on(evt); if (evt.topic === "runs" && evt.type === "finished") es.close(); };
+    es.addEventListener("output", handle);
+    es.addEventListener("runs", handle);
+    return es;
+  }
+  // a run drawn as text: the answer as it streams, tools and notes as lines
+  function runPane(pre) {
+    let text = "";
+    const draw = () => { pre.textContent = text; pre.scrollTop = pre.scrollHeight; };
+    return (e) => {
+      const d = e.data || {};
+      if (e.type === "delta" && d.content) text += d.content;
+      else if (e.type === "tool_call") text += "\n⚙ " + d.name + " " + oneLine(d.args, 160) + "\n";
+      else if (e.type === "tool_result") text += (d.is_error ? "  ↳ error: " + oneLine(d.content, 200) : "  ↳ " + (d.chars || 0).toLocaleString() + " chars") + "\n";
+      else if (e.type === "notice") text += "\nnote: " + d.text + "\n";
+      else if (e.type === "approval") text += "\n— waiting: " + d.tool + " asks before it runs —\n";
+      else if (e.type === "out" && d.line != null) text += d.line + "\n";
+      else if (e.type === "out" && d.error) text += "error: " + d.error + "\n";
+      else if (e.type === "done") text += (d.message && d.message.error ? "\n" + d.message.error : "") + "\n— " + (d.meta || "done") + " —";
+      else if (e.type === "finished" && d.state !== "done") text += "\n— " + d.state + (d.error ? ": " + d.error : "") + " —";
+      else return;
+      draw();
+    };
+  }
+
+  /* ---------------- approvals ---------------- */
+  // A tool that asks before it runs, in any session (the app's or bb's):
+  // answer here or in the terminal; the first answer wins.
+  async function renderApprovals() {
+    let d = { pending: [] };
+    try { d = await (await fetch("/api/approvals")).json(); } catch (e) { return; }
+    const box = $("approvals"); box.textContent = "";
+    box.hidden = !d.pending.length;
+    for (const a of d.pending) {
+      const c = document.createElement("div"); c.className = "approval";
+      const h = document.createElement("div"); h.innerHTML = "<b></b> asks before it runs<span class='hint'></span>";
+      h.querySelector("b").textContent = a.tool; h.querySelector(".hint").textContent = a.session ? " · session " + a.session : "";
+      const pre = document.createElement("pre"); pre.textContent = prettyJson(JSON.stringify(a.args || {}));
+      const acts = document.createElement("div"); acts.className = "acts";
+      for (const [label, decision, cls] of [["Allow", "allow", "solid-btn"], ["Always allow", "always", "ghost-btn"], ["Deny", "deny", "rate-btn bad"]]) {
+        const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label;
+        b.onclick = async () => {
+          acts.querySelectorAll("button").forEach((x) => x.disabled = true);
+          try { await fetch("/api/approvals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: a.id, decision }) }); } catch (e) {}
+          renderApprovals();
+        };
+        acts.appendChild(b);
+      }
+      c.appendChild(h); c.appendChild(pre); c.appendChild(acts); box.appendChild(c);
+    }
+  }
+
+  /* ---------------- workflows ---------------- */
+  let wfSelected = null, wfDetail = "run";
+  async function wfPost(payload) {
+    const r = await fetch("/api/workflows", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status)); return d;
+  }
+  function workflowForm(name, w) {
+    w = w || {};
+    const card = document.createElement("div"); card.className = "card wf-new"; card.style.gap = "8px";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono">a name you can type: bb run NAME</span></div>';
+    head.querySelector("b").textContent = name ? "Edit " + name : "New workflow";
+    const tgl = document.createElement("button"); tgl.type = "button"; tgl.className = name ? "ghost-btn" : "solid-btn"; tgl.textContent = name ? "Close" : "＋ New workflow";
+    head.appendChild(tgl); card.appendChild(head);
+    const form = document.createElement("div"); form.hidden = !name; form.style.cssText = "display:flex;flex-direction:column;gap:8px";
+    const nm = inputEl("review-diff"); nm.value = name || ""; if (name) nm.disabled = true;
+    const desc = inputEl("what it is for (optional)"); desc.value = w.description || "";
+    const kind = document.createElement("select"); kind.className = "text-input";
+    for (const [v, l] of [["chat", "chat: one turn, with your tools and skills"], ["agents", "agents: a goal for the agents"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; kind.appendChild(o); }
+    kind.value = w.kind || "chat";
+    const prof = document.createElement("select"); prof.className = "text-input";
+    const o0 = document.createElement("option"); o0.value = ""; o0.textContent = "(the default profile)"; prof.appendChild(o0);
+    for (const p of Object.keys(state.profiles || {})) { const o = document.createElement("option"); o.value = p; o.textContent = p; prof.appendChild(o); }
+    prof.value = w.profile || "";
+    const prompt = textareaEl("Review this diff for bugs and risky changes:\n\n{{diff}}", 6); prompt.value = w.prompt || "";
+    const folder = inputEl("a folder bb works in (optional): ~/code/app"); folder.value = w.folder || "";
+    [formRow("name", nm), formRow("description", desc), formRow("type", kind), formRow("profile", prof), formRow("prompt ({{name}} marks a blank)", prompt), formRow("folder", folder)].forEach((e) => form.appendChild(e));
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = name ? "Save changes" : "Create workflow";
+    const note = document.createElement("span"); note.className = "hint";
+    row.appendChild(save); row.appendChild(note); form.appendChild(row); card.appendChild(form);
+    tgl.onclick = () => { if (name) { wfDetail = "run"; renderWorkflows(); } else form.hidden = !form.hidden; };
+    save.onclick = async () => {
+      save.disabled = true; note.textContent = "saving…";
+      const params = (w.params || []).filter((p) => p.default || p.help);
+      try {
+        await wfPost({ action: "save", name: nm.value.trim(), workflow: { description: desc.value, kind: kind.value, profile: prof.value, prompt: prompt.value, folder: folder.value, params } });
+        wfSelected = nm.value.trim(); wfDetail = "run"; renderWorkflows();
+      } catch (e) { note.textContent = e.message; save.disabled = false; }
+    };
+    return card;
+  }
+  async function renderWorkflows(listOnly) {
+    let d = { workflows: {} };
+    try { d = await (await fetch("/api/workflows")).json(); } catch (e) { if (listOnly) return; }
+    try { state.profiles = (await (await fetch("/api/profiles")).json()).profiles || {}; } catch (e) {}
+    const wfs = d.workflows || {};
+    const left = $("workflows-left");
+    if (listOnly && left.querySelector(".wf-new")) left.querySelectorAll(".wf-item").forEach((e) => e.remove());
+    else { left.textContent = ""; left.appendChild(workflowForm(null)); }
+    const names = Object.keys(wfs).sort();
+    $("workflows-sub").textContent = names.length + " workflow" + (names.length === 1 ? "" : "s");
+    if (!names.length) { const e = document.createElement("div"); e.className = "hint wf-item"; e.textContent = "No workflows yet. A code review, a release-notes draft, a log triage: write it once with blanks, run it from here, from a job, or with bb run."; left.appendChild(e); }
+    for (const n of names) {
+      const w = wfs[n];
+      const card = document.createElement("div"); card.className = "card wf-item" + (wfSelected === n ? " skill-card on" : ""); card.style.gap = "6px"; card.style.cursor = "pointer";
+      const head = document.createElement("div"); head.className = "skill-head";
+      head.innerHTML = '<div class="skill-id"><b class="mono"></b><span class="src mono"></span></div>';
+      head.querySelector("b").textContent = n;
+      head.querySelector(".src").textContent = w.kind + (w.profile ? " · " + w.profile : "") + ((w.params || []).length ? " · takes " + w.params.map((p) => p.name).join(", ") : "");
+      const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = w.description || oneLine(w.prompt, 200);
+      const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
+      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = (e) => { e.stopPropagation(); fn(); }; acts.appendChild(b); };
+      mk("run", "solid-btn", () => { wfSelected = n; wfDetail = "run"; showWorkflowRun(n, w); });
+      mk("edit", "ghost-btn", () => { wfSelected = n; wfDetail = "edit"; const pane = $("workflows-detail"); pane.textContent = ""; pane.appendChild(workflowForm(n, w)); });
+      mk("delete", "rate-btn bad", async () => { if (!confirm("Delete workflow " + n + "? Jobs that run it will fail until you pick another.")) return; try { await wfPost({ action: "delete", name: n }); } catch (e) { alert(e.message); } renderWorkflows(); });
+      card.appendChild(head); card.appendChild(desc); card.appendChild(acts);
+      card.onclick = () => { wfSelected = n; wfDetail = "run"; showWorkflowRun(n, w); };
+      left.appendChild(card);
+    }
+    if (wfSelected && wfs[wfSelected] && wfDetail === "run" && !listOnly) showWorkflowRun(wfSelected, wfs[wfSelected]);
+  }
+  function showWorkflowRun(n, w) {
+    const pane = $("workflows-detail"); pane.textContent = "";
+    const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b class="mono"></b><span class="src mono"></span></div>';
+    h.querySelector("b").textContent = n; h.querySelector(".src").textContent = "bb run " + n + (w.params || []).map((p) => " -p " + p.name + "=…").join("");
+    pane.appendChild(h);
+    const inputs = {};
+    for (const p of w.params || []) {
+      const big = /diff|code|text|log|body|content/i.test(p.name);
+      const el = big ? textareaEl(p.help || "", 5) : inputEl(p.help || "");
+      el.value = p.default || ""; inputs[p.name] = el;
+      pane.appendChild(formRow(p.name + (p.help ? " · " + p.help : ""), el));
+    }
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn"; go.textContent = "Run";
+    const note = document.createElement("span"); note.className = "hint";
+    row.appendChild(go); row.appendChild(note); pane.appendChild(row);
+    const pre = preBlock(pane, "output", ""); pre.style.maxHeight = "460px";
+    go.onclick = async () => {
+      const params = {}; for (const k of Object.keys(inputs)) params[k] = inputs[k].value;
+      go.disabled = true; note.textContent = "starting…"; pre.textContent = "";
+      try {
+        const r = await fetch("/api/workflows/" + encodeURIComponent(n) + "/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params }) });
+        const x = await r.json(); if (!r.ok || x.error) throw new Error(x.error || ("HTTP " + r.status));
+        note.textContent = x.kind === "chat" ? "running · saved as a session" : "running on the agents worker";
+        const draw = runPane(pre);
+        followRun(x.run, (e) => {
+          draw(e);
+          if (e.topic === "runs" && e.type === "finished") {
+            go.disabled = false;
+            note.textContent = e.data.state === "done" ? "done" : e.data.state;
+            if (x.session) { const open = document.createElement("button"); open.type = "button"; open.className = "linky"; open.textContent = " open the session"; open.onclick = () => openSessionById(x.session); note.appendChild(open); }
+          }
+        });
+      } catch (e) { note.textContent = e.message; go.disabled = false; }
+    };
+  }
+  async function openSessionById(id) {
+    let full = null;
+    try { const res = await fetch("/api/sessions?id=" + encodeURIComponent(id)); if (res.ok) full = await res.json(); } catch (e) {}
+    if (!full) return;
+    state.session = id; state.messages = (full.messages || []).map((m) => ({ ...m })); state.ctxUsed = null; state.calib = null;
+    setActiveSkills(full.activeSkills || []);
+    if (full.model && state.models.includes(full.model)) { state.model = full.model; $("model-select").value = full.model; servingLine(); }
+    go("playground"); renderMessages();
   }
 
   /* ---------------- MCP screen ---------------- */
@@ -4155,6 +4397,7 @@
     pollCluster();
     setInterval(pollCluster, 5000);
     startLive();
+    renderApprovals();
     const deep = location.hash.slice(1);
     if (deep && screens.includes(deep) && deep !== state.screen) go(deep);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);

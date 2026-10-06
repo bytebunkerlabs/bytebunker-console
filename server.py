@@ -1116,6 +1116,7 @@ def profiles():
             base = dict(out.get(name) or {})
             base.update(p)
             base["builtin"] = name in DEFAULT_PROFILES
+            base["saved"] = True             # in config: a built-in one edited, or the user's own
             out[name] = base
     return out
 
