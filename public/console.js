@@ -3121,7 +3121,7 @@
       try {
         const x = await (await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "show", recipe: sel.value }) })).json();
         note.textContent = "";
-        const pane = recipePane("recipes/" + sel.value + ".env");
+        const pane = recipePane(x.file || ("recipes/" + sel.value + ".env"));
         preBlock(pane, "recipe", x.text || x.error || "");
       } catch (e) { note.textContent = "failed: " + e.message; }
     };

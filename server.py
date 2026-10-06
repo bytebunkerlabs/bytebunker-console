@@ -397,6 +397,47 @@ def shlex_quote(a):
 
 
 _rack_cache = {"at": 0, "val": None}
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def rack_recipes(text):
+    """The recipes a rack lists. dgx-serve 1.0 answers `rack recipes --json`
+    with each recipe's model, platforms and files (yours live outside the
+    checkout); a rack from before 1.0 prints a table, read by its columns."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        d = None
+    if isinstance(d, dict) and isinstance(d.get("recipes"), list):
+        out = []
+        for r in d["recipes"]:
+            vs = r.get("variants") or {}
+            plat = d.get("here") if d.get("here") in vs else next(iter(r.get("platforms") or []), None)
+            v = vs.get(plat) or {}
+            tp = v.get("tensor_parallel") or 1
+            files = [v.get("file") or ""]
+            if r.get("layout") == "v2" and r.get("location"):
+                files.insert(0, r["location"].rstrip("/") + "/model.env")   # what the variant sources
+            out.append({"name": r.get("name") or "", "mode": "TP=%d" % tp if tp > 1 else "solo",
+                        "model": r.get("model") or v.get("model") or v.get("artifact") or "",
+                        "platforms": r.get("platforms") or [], "files": [f for f in files if f]})
+        return out
+    recipes = []
+    for ln in _ANSI.sub("", text).splitlines():
+        tok = ln.strip().split()
+        # "  dsv4-vision-ab   TP=2   orcarouter/DeepSeek-V4-Flash-Vision-Uncensored"
+        if len(tok) >= 2 and re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", tok[0]) and tok[0] != "TEMPLATE":
+            recipes.append({"name": tok[0].replace(".env", ""), "mode": tok[1],
+                            "model": tok[2] if len(tok) > 2 else ""})
+    return recipes
+
+
+def rack_serving(status):
+    """The recipe `rack status` says is serving: 1.0 names it under "serving"
+    ("glm53 (org/model) with vllm under docker ..."), older racks after "serving:"."""
+    m = re.search(r"^serving\s*\n\s+([A-Za-z0-9][A-Za-z0-9._-]*) \(", status, re.M) \
+        or re.search(r"serving:\s*(\S+)", status)
+    return m.group(1) if m else ""
 
 
 def rack_overview(max_age=15):
@@ -410,16 +451,11 @@ def rack_overview(max_age=15):
         return _rack_cache["val"]
     val = {"ok": True, "enabled": True, "host": r["ssh"], "dir": r["dir"]}
     try:
-        out = subprocess.run(rack_cmd(["recipes"]), capture_output=True, text=True, timeout=25)
-        ansi = re.compile(r"\x1b\[[0-9;]*m")
-        val["recipes_raw"] = ansi.sub("", out.stdout + out.stderr).strip()
-        recipes = []
-        for ln in ansi.sub("", out.stdout).splitlines():
-            tok = ln.strip().split()
-            # "  dsv4-vision-ab   TP=2   orcarouter/DeepSeek-V4-Flash-Vision-Uncensored"
-            if len(tok) >= 2 and re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", tok[0]) and tok[0] != "TEMPLATE":
-                recipes.append({"name": tok[0].replace(".env", ""), "mode": tok[1],
-                                "model": tok[2] if len(tok) > 2 else ""})
+        out = subprocess.run(rack_cmd(["recipes", "--json"]), capture_output=True, text=True, timeout=25)
+        recipes = rack_recipes(out.stdout)
+        if not recipes and out.returncode != 0:          # a rack from before 1.0 that refuses --json
+            out = subprocess.run(rack_cmd(["recipes"]), capture_output=True, text=True, timeout=25)
+            recipes = rack_recipes(out.stdout)
         val["recipes"] = recipes
     except Exception as e:   # noqa: BLE001
         val.update(ok=False, error=str(e)[:160])
@@ -427,9 +463,8 @@ def rack_overview(max_age=15):
         return val
     try:
         out = subprocess.run(rack_cmd(["status"]), capture_output=True, text=True, timeout=45)
-        val["status_raw"] = ansi.sub("", out.stdout + out.stderr).strip()[-4000:]
-        m = re.search(r"serving:\s*(\S+)", val["status_raw"])
-        val["serving"] = m.group(1) if m else ""
+        val["status_raw"] = _ANSI.sub("", out.stdout + out.stderr).strip()[-4000:]
+        val["serving"] = rack_serving(val["status_raw"])
     except Exception as e:   # noqa: BLE001
         val["status_raw"] = "rack status failed: %s" % str(e)[:120]
     _rack_cache.update(at=now, val=val)
@@ -2573,10 +2608,18 @@ class Handler(BaseHTTPRequestHandler):
             if not recipe:
                 self._json({"error": "recipe required"}, 400)
                 return
-            inner = "cd %s && cat %s" % (agentmod._rq(r["dir"]), shlex_quote("recipes/%s.env" % recipe))
+            # where rack says the recipe is (1.0: yours live outside the checkout), else the old place
+            files = next((x.get("files") for x in rack_overview().get("recipes") or []
+                          if x.get("name") == recipe and x.get("files")), None)
+            if files:
+                inner = " && ".join("echo %s && cat %s" % (shlex_quote("# " + f), shlex_quote(f)) for f in files)
+            else:
+                files = ["recipes/%s.env" % recipe]
+                inner = "cd %s && cat %s" % (agentmod._rq(r["dir"]), shlex_quote(files[0]))
             out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", r["ssh"], inner],
                                  capture_output=True, text=True, timeout=20)
-            self._json({"ok": out.returncode == 0, "recipe": recipe, "text": (out.stdout or out.stderr)[-20000:]})
+            self._json({"ok": out.returncode == 0, "recipe": recipe, "file": files[-1],
+                        "text": (out.stdout or out.stderr)[-20000:]})
             return
         if action not in ("up", "down", "logs", "status", "bench", "preflight", "gateway"):
             self._json({"error": "unknown action"}, 400)
