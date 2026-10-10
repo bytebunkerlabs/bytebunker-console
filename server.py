@@ -397,7 +397,7 @@ def shlex_quote(a):
 
 
 _rack_cache = {"at": 0, "val": None}
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")        # terminal colour and cursor codes
 
 
 def rack_recipes(text):
@@ -2634,6 +2634,7 @@ class Handler(BaseHTTPRequestHandler):
             captured = []
 
             def on_line(text):
+                text = _ANSI.sub("", text)        # a terminal's colours are noise in the app
                 if len(captured) < 2000:
                     captured.append(text)
                 emit({"line": text})
@@ -2709,6 +2710,7 @@ class Handler(BaseHTTPRequestHandler):
             captured = []
 
             def on_line(text):
+                text = _ANSI.sub("", text)        # a terminal's colours are noise in the app
                 if len(captured) < 2000:
                     captured.append(text)
                 emit({"line": text})

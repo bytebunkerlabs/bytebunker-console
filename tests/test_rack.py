@@ -20,7 +20,7 @@ def script(path, body):
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
 
 
-STATUS_1_0 = """serving
+STATUS_1_0 = """\x1b[1mserving\x1b[0m
   glm53 (org/GLM-Big) with vllm under docker on spark-1 spark-2, since 2026-10-06T15:11:04+00:00
 
 api
@@ -80,6 +80,11 @@ class RackCard(unittest.TestCase):
         self.assertEqual(got, {"glm53": ("TP=2", "org/GLM-Big", ["dgx", "linux"]),
                                "small": ("solo", "org/Small", ["dgx", "mac"])})
         self.assertEqual(d["serving"], "glm53")                 # the recipe, not the engine's served name
+        st, raw = self.srv.request("POST", "/api/rack", {"action": "status"})
+        raw = raw.decode() if isinstance(raw, bytes) else json.dumps(raw)
+        self.assertIn("with vllm under docker", raw)
+        self.assertNotIn("\\u001b", raw)                         # a terminal's colours never reach the app
+        self.assertNotIn("\x1b", raw)
         st, x = self.srv.request("POST", "/api/rack", {"action": "show", "recipe": "glm53"})
         self.assertTrue(x["ok"], x)
         self.assertEqual(x["file"], flat)                        # yours, outside the checkout
