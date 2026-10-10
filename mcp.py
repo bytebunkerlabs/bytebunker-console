@@ -22,6 +22,7 @@ Trust model: an MCP server is a local process with whatever access its args
 grant it — the filesystem server can write anywhere under the roots you pass.
 Scope those roots deliberately; this host does not sandbox them.
 """
+import collections
 import json
 import subprocess
 import threading
@@ -72,6 +73,9 @@ class MCPServer:
         self._pending = {}
         self._reader = None
         self._dead = None                    # why the server stopped answering
+        self._stderr = collections.deque(maxlen=20)   # its last words, for the reason it stopped
+        self._err_reader = None
+        self.created = []                    # folders made for it before it started
 
     # ---- transport ----
     def _write(self, msg):
@@ -138,6 +142,7 @@ class MCPServer:
                     w.event.set()
         except (OSError, ValueError) as e:
             reason = "server stdout failed: %s" % e
+        reason = self._why(reason)
         with self._plock:
             self._dead = reason
             waiting = list(self._pending.values())
@@ -145,6 +150,30 @@ class MCPServer:
         for w in waiting:
             w.msg = {"error": reason}
             w.event.set()
+
+    def _err_loop(self):
+        """Drain stderr (a full pipe would stall the server) and keep its tail."""
+        try:
+            for line in self.proc.stderr:
+                line = line.rstrip()
+                if line.strip():
+                    self._stderr.append(line)
+        except (OSError, ValueError):
+            pass
+
+    def _why(self, reason):
+        """What the server said before it went away, when it said anything."""
+        try:
+            self.proc.wait(timeout=1)
+        except Exception:        # still running: its stdout broke on its own
+            pass
+        if self._err_reader is not None:
+            self._err_reader.join(timeout=1)
+        said = [l.strip() for l in list(self._stderr)[-2:]]
+        if not said:
+            return reason
+        code = self.proc.poll() if self.proc else None
+        return ("exited%s: " % ("" if code is None else " (%d)" % code)) + " · ".join(said)
 
     def _rpc(self, method, params=None, timeout=CALL_TIMEOUT):
         rid, w = self._send(method, params)
@@ -175,6 +204,15 @@ class MCPServer:
         # invisible even when installed. Search the usual install roots.
         env["PATH"] = env.get("PATH", "") + os.pathsep + os.pathsep.join(extra_path())
         env.update(self.spec.get("env") or {})
+        # a folder it is pointed at that is not there yet is made, not refused
+        import mcp_catalog
+        for folder in mcp_catalog.folders_for(self.spec):
+            if not os.path.isdir(folder):
+                try:
+                    os.makedirs(folder, exist_ok=True)
+                except OSError as e:
+                    raise RuntimeError("cannot create %s: %s" % (folder, e.strerror or e))
+                self.created.append(folder)
         # `~` in an argument means the user's home, as it would in a shell —
         # Popen passes it literally, and the filesystem server then roots
         # itself at a directory called "~" that does not exist.
@@ -203,9 +241,11 @@ class MCPServer:
             cmd = [exe] + args
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, cwd=here,
+            stderr=subprocess.PIPE, text=True, bufsize=1, env=env, cwd=here,
             encoding="utf-8", errors="replace",
         )
+        self._err_reader = threading.Thread(target=self._err_loop, name="mcp-err-" + self.name, daemon=True)
+        self._err_reader.start()
         self._reader = threading.Thread(target=self._read_loop, name="mcp-" + self.name, daemon=True)
         self._reader.start()
         self._rpc("initialize", {
@@ -226,7 +266,7 @@ class MCPServer:
                     self.proc.kill()
         except Exception:
             pass
-        for stream in ("stdin", "stdout"):
+        for stream in ("stdin", "stdout", "stderr"):
             try:
                 getattr(self.proc, stream).close()
             except Exception:
@@ -270,7 +310,10 @@ class MCPHost:
         s = MCPServer(name, spec)
         try:
             s.start()
-            return name, s, {"state": "ready", "tools": len(s.tools)}
+            st = {"state": "ready", "tools": len(s.tools)}
+            if s.created:
+                st["created"] = s.created
+            return name, s, st
         except Exception as e:
             s.stop()
             return name, None, {"state": "error", "tools": 0, "error": str(e)[:300]}

@@ -34,6 +34,10 @@ OUTPUT_CAP = 30000          # chars handed back per call; the middle is elided
 CWD_MARK = "\n<<__BB_CWD__>>"   # trailer the wrapper prints so `cd` persists
 
 STATE = {"cwd": os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~")}
+try:
+    os.makedirs(STATE["cwd"], exist_ok=True)   # a folder that is not there yet is made, not refused
+except OSError:
+    pass
 if not os.path.isdir(STATE["cwd"]):
     STATE["cwd"] = os.path.expanduser("~")
 

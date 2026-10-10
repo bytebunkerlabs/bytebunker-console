@@ -121,5 +121,46 @@ class Sync(unittest.TestCase):
             host.stop_all()
 
 
+class WhatItSaid(unittest.TestCase):
+    """A server that cannot start says why, in its own words; one that writes
+    a lot to stderr is not stalled by it; the folder it needs is made."""
+
+    def test_a_server_that_fails_says_what_it_said(self):
+        code = ("import sys; sys.stderr.write('Warning: Cannot access directory /nowhere, skipping\\n"
+                "Error: None of the specified directories are accessible\\n'); sys.exit(1)")
+        host = mcp.MCPHost({"fs": {"command": sys.executable, "args": ["-c", code], "env": {}}})
+        try:
+            st = host.status["fs"]
+            self.assertEqual(st["state"], "error")
+            self.assertIn("exited (1): Warning: Cannot access directory /nowhere, skipping", st["error"])
+            self.assertIn("None of the specified directories are accessible", st["error"])
+        finally:
+            host.stop_all()
+
+    def test_a_noisy_server_is_not_stalled_by_its_stderr(self):
+        code = ("import runpy, sys; sys.stderr.write('x' * 300000 + '\\n'); sys.stderr.flush(); "
+                "sys.argv = [%r, '--tag', 'n']; runpy.run_path(%r, run_name='__main__')" % (FAKE, FAKE))
+        host = mcp.MCPHost({"n": {"command": sys.executable, "args": ["-c", code], "env": {}}})
+        try:
+            self.assertEqual(host.status["n"]["state"], "ready", host.status)
+        finally:
+            host.stop_all()
+
+    def test_the_folder_a_catalog_server_needs_is_made(self):
+        tmp = tempfile.mkdtemp()
+        folder = os.path.join(tmp, "projects", "deep")
+        # laid out like the catalog's filesystem entry: the root is the third argument
+        host = mcp.MCPHost({"fs": {"command": sys.executable, "args": [FAKE, "--tag", folder], "env": {},
+                                   "catalog": "filesystem"}})
+        try:
+            self.assertEqual(host.status["fs"]["state"], "ready", host.status)
+            self.assertTrue(os.path.isdir(folder))
+            self.assertEqual(host.status["fs"]["created"], [folder])
+        finally:
+            host.stop_all()
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

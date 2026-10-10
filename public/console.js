@@ -2934,14 +2934,16 @@
       row.innerHTML = '<span class="d" style="width:8px;height:8px;border-radius:50%;flex:none"></span><b class="mono" style="font-size:13px"></b><span class="s mono" style="font-size:11.5px;color:var(--muted)"></span><span class="cmd mono" style="font-size:11px;color:var(--faint);flex:1;min-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><span class="acts" style="display:flex;gap:6px"></span>';
       row.querySelector(".d").style.background = st.state === "ready" ? "var(--ok)" : st.state === "error" ? "var(--err)" : "var(--faint)";
       row.querySelector("b").textContent = name;
-      row.querySelector(".s").textContent = st.state === "ready" ? st.tools + " tools" : (st.state || "") + (st.error ? " \u00b7 " + st.error.slice(0, 80) : "");
+      const isTerminal = /(^|[\\/])mcp_terminal\.py$/.test((cfg.args || [])[0] || "");
+      row.querySelector(".s").textContent = !on ? (isTerminal ? "off \u00b7 gives the model a shell on this computer" : "off")
+        : st.state === "ready" ? st.tools + " tools" : (st.state || "") + (st.error ? " \u00b7 " + st.error.slice(0, 160) : "");
       row.querySelector(".cmd").textContent = (cfg.command || "") + " " + (cfg.args || []).join(" ");
       row.querySelector(".cmd").title = row.querySelector(".cmd").textContent;
       const acts = row.querySelector(".acts");
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
       mk("tools", "ghost-btn", () => showServerTools(name));
       mk(on ? "disable" : "enable", "ghost-btn", async () => { try { await mcpPost({ action: "toggle", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
-      mk("restart", "ghost-btn", async () => { try { await mcpPost({ action: "restart" }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
+      mk("restart", "ghost-btn", async () => { try { await mcpPost({ action: "restart", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
       const envKeys = Object.keys(cfg.env || {});
       mk("env" + (envKeys.length ? " (" + envKeys.length + ")" : ""), "ghost-btn", () => {
         const pane = mcpPane(name + " \u00b7 environment");
@@ -2976,23 +2978,35 @@
       const st = document.createElement("div"); st.className = "skill-tags mono"; st.textContent = c.status + (c.installed_as ? "  \u00b7  configured as " + c.installed_as : ""); card.appendChild(st);
       const cmdl = document.createElement("div"); cmdl.className = "mono"; cmdl.style.cssText = "font-size:10.5px;color:var(--faint);white-space:pre-wrap"; cmdl.textContent = c.command + " " + c.args.join(" "); card.appendChild(cmdl);
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:2px";
-      const addBtn = document.createElement("button"); addBtn.type = "button"; addBtn.className = c.installed_as ? "ghost-btn" : "solid-btn"; addBtn.textContent = c.installed_as ? "Add another" : "Add";
+      // one terminal: its card turns the built-in on, or moves it, rather than adding a second
+      const again = c.single && c.installed_as ? (c.installed_enabled ? "Change folder" : "Turn on") : null;
+      const addBtn = document.createElement("button"); addBtn.type = "button"; addBtn.className = c.installed_as && !(again === "Turn on") ? "ghost-btn" : "solid-btn"; addBtn.textContent = again || (c.installed_as ? "Add another" : "Add");
       acts.appendChild(addBtn);
       if (c.docs) { const a = document.createElement("a"); a.href = c.docs; a.target = "_blank"; a.rel = "noopener"; a.className = "linky"; a.textContent = "docs"; acts.appendChild(a); }
       card.appendChild(acts);
       const form = document.createElement("div"); form.hidden = true; form.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:4px";
-      const nameIn = inputEl("server name"); nameIn.value = c.installed_as ? c.id + "-2" : c.id;
-      form.appendChild(formRow("name", nameIn));
+      const nameIn = inputEl("server name"); nameIn.value = c.single && c.installed_as ? c.installed_as : c.installed_as ? c.id + "-2" : c.id;
+      if (!again) form.appendChild(formRow("name", nameIn));
       const pin = {}; for (const p of c.params || []) { const i = inputEl(p.help || ""); i.value = p.default || ""; pin[p.name] = i; form.appendChild(formRow(p.label, i)); }
       const ein = {}; for (const e of c.env || []) { const i = inputEl(e.label); i.value = e.default || ""; if (e.secret) i.type = "password"; ein[e.name] = i; form.appendChild(formRow(e.name + (e.secret ? "  \u00b7  stored in config.json" : ""), i)); }
       const row = document.createElement("div"); row.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
-      const go1 = document.createElement("button"); go1.type = "button"; go1.className = "solid-btn"; go1.textContent = "Add";
+      const go1 = document.createElement("button"); go1.type = "button"; go1.className = "solid-btn"; go1.textContent = again || "Add";
       const go2 = document.createElement("button"); go2.type = "button"; go2.className = "ghost-btn"; go2.textContent = (c.install || []).length ? "Install locally + add" : "Add"; if (!(c.install || []).length) go2.hidden = true;
       const note = document.createElement("span"); note.className = "hint"; if (c.install_note) note.textContent = c.install_note;
       row.appendChild(go1); row.appendChild(go2); row.appendChild(note); form.appendChild(row); card.appendChild(form);
       addBtn.onclick = () => { form.hidden = !form.hidden; };
       const payload = () => { const params = {}; for (const k in pin) params[k] = pin[k].value; const env = {}; for (const k in ein) env[k] = ein[k].value; return { id: c.id, name: nameIn.value.trim(), params, env }; };
-      go1.onclick = async () => { go1.disabled = true; try { const r = await mcpPost(Object.assign({ action: "catalog_add" }, payload())); const st2 = (r.servers || {})[nameIn.value.trim()] || {}; note.textContent = st2.state === "ready" ? "added \u00b7 " + st2.tools + " tools" : "added \u00b7 " + (st2.state || "") + (st2.error ? ": " + st2.error.slice(0, 120) : ""); renderMcp(); loadTools(); } catch (e) { note.textContent = e.message; go1.disabled = false; } };
+      go1.onclick = async () => {
+        go1.disabled = true;
+        try {
+          const r = await mcpPost(Object.assign({ action: "catalog_add" }, payload()));
+          const st2 = (r.servers || {})[r.name || nameIn.value.trim()] || {};
+          const made = (st2.created || []).length ? " \u00b7 created " + st2.created.join(", ") : "";
+          note.textContent = st2.state === "ready" ? (again ? "on" : "added") + " \u00b7 " + st2.tools + " tools" + made
+            : "added \u00b7 " + (st2.state || "") + (st2.error ? ": " + st2.error.slice(0, 200) : "");
+          renderMcp(); loadTools();
+        } catch (e) { note.textContent = e.message; go1.disabled = false; }
+      };
       go2.onclick = () => installCatalog(payload(), c);
       grid.appendChild(card);
     }

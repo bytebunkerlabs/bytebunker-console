@@ -26,7 +26,8 @@ CATALOG = [
         "id": "filesystem", "name": "Filesystem", "status": "reference (MCP project)",
         "description": "Read, write, search and move files under one root directory.",
         "runtime": "node", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "{root}"],
-        "params": [{"name": "root", "label": "root directory", "default": "~/projects", "help": "the only tree the model may touch"}],
+        "params": [{"name": "root", "label": "root directory", "default": "~/projects", "kind": "folder",
+                    "help": "the only tree the model may touch; created if missing"}],
         "env": [], "install": ["npm install -g @modelcontextprotocol/server-filesystem"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
     },
@@ -41,7 +42,8 @@ CATALOG = [
         "id": "git", "name": "Git", "status": "reference (MCP project)",
         "description": "Status, diff, log, commit, branch operations on one repository.",
         "runtime": "uv", "command": "uvx", "args": ["mcp-server-git", "--repository", "{repo}"],
-        "params": [{"name": "repo", "label": "repository path", "default": "~/projects/my-repo", "help": "must be a git repository on the console host, or the server exits at start"}],
+        "params": [{"name": "repo", "label": "repository path", "default": "", "kind": "repo",
+                    "help": "a git repository on this machine"}],
         "env": [], "install": ["uv tool install mcp-server-git"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
     },
@@ -64,7 +66,8 @@ CATALOG = [
         "id": "time", "name": "Time", "status": "reference (MCP project)",
         "description": "Current time and timezone conversions.",
         "runtime": "uv", "command": "uvx", "args": ["mcp-server-time", "--local-timezone", "{tz}"],
-        "params": [{"name": "tz", "label": "local timezone", "default": "America/New_York", "help": "IANA name"}],
+        "params": [{"name": "tz", "label": "local timezone", "default_from": "timezone",
+                    "help": "IANA name; this machine's own by default"}],
         "env": [], "install": ["uv tool install mcp-server-time"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
     },
@@ -72,7 +75,8 @@ CATALOG = [
         "id": "sqlite", "name": "SQLite", "status": "archived upstream, still installs",
         "description": "Query and modify one SQLite database file.",
         "runtime": "uv", "command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "{db}"],
-        "params": [{"name": "db", "label": "database file", "default": "~/bytebunker-console/data/notes.db", "help": "created if missing"}],
+        "params": [{"name": "db", "label": "database file", "default": "~/projects/notes.db", "kind": "file",
+                    "help": "created if missing, and its folder too"}],
         "env": [], "install": ["uv tool install mcp-server-sqlite"],
         "docs": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/sqlite",
     },
@@ -150,8 +154,9 @@ CATALOG = [
         "id": "terminal", "name": "Terminal (built-in)", "status": "built-in",
         "description": "The console's own shell tool: runs commands in one working directory, cwd persists between calls.",
         "runtime": "python", "command": "python3", "args": ["mcp_terminal.py", "{root}"],
-        "params": [{"name": "root", "label": "working directory", "default": "~", "help": "where the first command runs; cd moves it"}],
-        "env": [], "install": [],
+        "params": [{"name": "root", "label": "working directory", "default": "~", "kind": "folder",
+                    "help": "where the first command runs; cd moves it; created if missing"}],
+        "env": [], "install": [], "single": True,
         "docs": "",
     },
 ]
@@ -177,9 +182,69 @@ def get(cid):
     return _BY_ID.get(cid)
 
 
+def local_timezone():
+    """This machine's IANA time zone, for servers that ask for one; UTC when it cannot tell."""
+    tz = (os.environ.get("TZ") or "").lstrip(":")
+    if "/" in tz:
+        return tz
+    try:
+        target = os.path.realpath("/etc/localtime")
+    except OSError:
+        target = ""
+    return target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else "UTC"
+
+
+def param_default(p):
+    """A parameter's default, worked out on this machine where it depends on it."""
+    if p.get("default_from") == "timezone":
+        return local_timezone()
+    return p.get("default") or ""
+
+
+def problem(entry, params):
+    """Why these params cannot work, before anything starts; None when they can.
+    A missing folder is not a problem (it is created); a repository must exist."""
+    for p in entry.get("params", []):
+        value = str(params.get(p["name"]) or param_default(p)).strip()
+        if not value:
+            return "%s is required" % p["label"]
+        if p.get("kind") == "repo" and not os.path.exists(os.path.join(os.path.expanduser(value), ".git")):
+            return "%s is not a git repository" % value
+    return None
+
+
+def folders_for(spec):
+    """The folders a configured catalog server needs: its folder parameters,
+    and the folder a file parameter lives in. They are created before it starts."""
+    entry = get(spec.get("catalog") or "")
+    if not entry:
+        return []
+    args = spec.get("args") or []
+    out = []
+    for p in entry.get("params", []):
+        if p.get("kind") not in ("folder", "file"):
+            continue
+        slot = "{%s}" % p["name"]
+        i = next((n for n, a in enumerate(entry["args"]) if a == slot), None)
+        if i is None or i >= len(args) or not str(args[i]).strip():
+            continue
+        path = os.path.expanduser(str(args[i]))
+        out.append(path if p["kind"] == "folder" else os.path.dirname(path))
+    return [p for p in out if p]
+
+
+def builtin_terminal(servers):
+    """The name of the configured built-in terminal (on or off), or None."""
+    for name, spec in (servers or {}).items():
+        args = (spec or {}).get("args") or []
+        if args and os.path.basename(str(args[0])) == "mcp_terminal.py":
+            return name
+    return None
+
+
 def render(entry, params):
     """Fill {placeholders} in args and env defaults from the submitted params."""
-    p = {x["name"]: str(params.get(x["name"]) or x.get("default") or "") for x in entry.get("params", [])}
+    p = {x["name"]: str(params.get(x["name"]) or param_default(x)) for x in entry.get("params", [])}
     args = [a.format(**p) if "{" in a else a for a in entry["args"]]
     return entry["command"], args
 
@@ -201,7 +266,9 @@ def catalog_view(configured):
                 installed_as = name
                 break
         d = {k: v for k, v in c.items()}
+        d["params"] = [dict(p, default=param_default(p)) for p in c.get("params", [])]
         d["installed_as"] = installed_as
+        d["installed_enabled"] = bool(installed_as) and (configured[installed_as] or {}).get("enabled") is not False
         d["requires"] = c["runtime"]
         out.append(d)
     return out

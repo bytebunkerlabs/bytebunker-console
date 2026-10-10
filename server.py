@@ -3052,11 +3052,27 @@ class Handler(BaseHTTPRequestHandler):
             if not entry:
                 self._json({"error": "no such catalog entry"}, 404)
                 return
+            params = body.get("params") or {}
+            why = catmod.problem(entry, params)
+            if why:
+                self._json({"error": why}, 400)
+                return
+            cmd, args = catmod.render(entry, params)
+            builtin = catmod.builtin_terminal(servers) if entry.get("single") else None
+            if builtin:
+                # one terminal: adding it turns the built-in on, in the folder asked for
+                servers[builtin]["args"] = [servers[builtin]["args"][0]] + args[1:]
+                servers[builtin]["enabled"] = True
+                name = builtin
+                TRACE.log("mcp", action="catalog_add", name=name, catalog=entry["id"], builtin=True)
+                save_config()
+                h = mcp_reload(restart=(name,))
+                self._json({"ok": True, "name": name, "servers": h.status, "config": CFG.get("mcp_servers", {})})
+                return
             name = name or entry["id"]
             if not re.match(r"^[A-Za-z0-9_-]{1,32}$", name):
                 self._json({"error": "name must be 1-32 chars: letters, digits, - or _"}, 400)
                 return
-            cmd, args = catmod.render(entry, body.get("params") or {})
             env = {k: str(v) for k, v in (body.get("env") or {}).items() if str(v).strip()}
             for e in entry.get("env", []):
                 if e.get("default") and e["name"] not in env:
@@ -3114,7 +3130,7 @@ class Handler(BaseHTTPRequestHandler):
         save_config()
         # only the server this edit touched restarts; the others keep running
         h = mcp_reload(restart=(name,) if action == "restart" and name else ())
-        self._json({"ok": True, "servers": h.status,
+        self._json({"ok": True, "name": name, "servers": h.status,
                     "config": CFG.get("mcp_servers", {})})
 
     def _mcp_install(self, body):
