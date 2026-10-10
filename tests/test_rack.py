@@ -28,6 +28,7 @@ api
 """
 
 
+@unittest.skipIf(sys.platform == "win32", "the rack side is POSIX shell: a stand-in ssh runs it here")
 class RackCard(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
