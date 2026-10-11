@@ -592,12 +592,13 @@ def _models(srv):
 def recap(sess, out, n=2, width=300):
     """The last question and answer of a chat being continued, so the
     terminal picks up where the app left off."""
-    said = [m for m in sess.get("messages") or [] if m.get("role") in ("user", "assistant")
-            and m.get("kind") != "summary" and isinstance(m.get("content"), str) and m["content"].strip()]
+    said = [m for m in sess.get("messages") or [] if m.get("role") in ("user", "bot", "assistant")
+            and not m.get("kind") and isinstance(m.get("content"), str) and m["content"].strip()]
     for m in said[-n:]:
         text = " ".join(m["content"].split())
         text = text[:width] + "…" if len(text) > width else text
-        out.err(out.dim(("› " if m["role"] == "user" else "  ") + text))
+        mark = ("› " if out.color else "> ") if m["role"] == "user" else "  "     # as the prompt shows it
+        out.err(out.dim(mark + text))
 
 
 def cmd_chat(a, out):
@@ -606,12 +607,11 @@ def cmd_chat(a, out):
     st = {"sid": a.session or None, "model": a.model, "effort": a.effort, "profile": a.profile, "tools": True,
           "skills": [], "atts": [], "project": a.project}
     ws = None if a.no_workspace else workspace_here()
+    sess = None
     if st["sid"]:
         sess = srv.get("/api/sessions?id=" + urllib.parse.quote(st["sid"]))
         st["model"] = st["model"] or sess.get("model")
         st["project"] = st["project"] or sess.get("project")
-        out.err(out.dim("continuing %s · %s · %d messages" % (st["sid"], sess.get("title") or "", len(sess.get("messages") or []))))
-        recap(sess, out)
     try:
         import readline  # noqa: F401  (history and line editing where Python has it)
     except ImportError:
@@ -619,6 +619,9 @@ def cmd_chat(a, out):
     proj = project_here(srv, st["project"])
     out.err(out.dim("ByteBunker %s · %s%s · /help for commands, Ctrl-D to leave" % (
         VERSION, st["model"] or "default model", (" · project " + proj["name"]) if proj else "")))
+    if sess:
+        out.err(out.dim("continuing %s · %s · %d messages" % (st["sid"], sess.get("title") or "", len(sess.get("messages") or []))))
+        recap(sess, out)
     while True:
         try:
             line = input(out.bold("› ") if out.color else "> ")

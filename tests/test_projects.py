@@ -89,6 +89,16 @@ class Projects(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no project named 'Nope'", r.stderr)
 
+    def test_bb_continuing_a_chat_starts_with_its_last_exchange(self):
+        self.eng.script([{"content": "Forty dollars, as 4000 cents."}])
+        sid = self.turn({"text": "what do we owe?", "project": self.pid})
+        r = self.bb("chat", sid, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stderr.splitlines()
+        at = next(i for i, l in enumerate(lines) if l.startswith("continuing " + sid))
+        self.assertIn("project Billing", lines[at - 1])                  # the banner, then the chat
+        self.assertEqual(lines[at + 1:at + 3], ["> what do we owe?", "  Forty dollars, as 4000 cents."])
+
     def test_bb_with_a_project_and_no_command(self):
         r = self.bb("-P", "Billing", cwd=self.tmp)                         # a chat in the project
         self.assertEqual(r.returncode, 0, r.stderr)
