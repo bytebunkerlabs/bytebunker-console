@@ -6,7 +6,7 @@ Hand-off document for the engineer or agent that turns the ByteBunker console in
 
 | Phase | State | Where |
 |---|---|---|
-| 1 Gateways (1.1–1.2) | **done**, verified against the rack, deployed to hermes, merged | `gateways.py`, `server.py`, Gateways screen, `tests/test_gateways.py` (12 tests, Python 3.9 and 3.12) |
+| 1 Gateways (1.1–1.2) | **done**, verified against the rack, deployed to the console host, merged | `gateways.py`, `server.py`, Gateways screen, `tests/test_gateways.py` (12 tests, Python 3.9 and 3.12) |
 | 1.3 live engine stats | **done** — vLLM `/metrics` (running, waiting, KV %, tok/s), Ollama `/api/ps` | Gateways cards, `GET /api/gateways?live=1`, polled every 15 s |
 | 1.4 gateway on records | **done** — chat trace records, usage events, job runs carry `gateway`; agent tokens mapped by model at read time | `server.py` |
 | 2 Desktop shell | **done** — native window, per-OS data dir, first-run discovery, single instance, `--headless`, `--mcp`, `--smoke-gui` | `desktop/app.py` |
@@ -16,7 +16,7 @@ Hand-off document for the engineer or agent that turns the ByteBunker console in
 | 5 polish | **partly** — live health polling, Settings screen (data folder, name, rates, manual update check, export), server restart guard | Settings screen |
 | Cluster (0.2.0) | **done** — one Cluster screen fed by rack monitors (`rack monitor up` in dgx-spark-serve: one endpoint and token per rack); add / find / token / toggle / remove in Cluster › Monitors; the sparkDash screen and the Prometheus node cards are gone; the engine-busy hint reads the monitors | `monitors.py`, Cluster screen, `tests/test_monitors.py`, CI smoke adds a fake monitor |
 
-How it was verified: on this laptop against the rack over the tailnet (migration, add by `host:port`, merged list with `model@gateway`, routing proven by litellm's own request log, discovery, usage per gateway, jobs); on hermes after deploy (all ten MCP servers, chat, worker check); the packaged Mac app locally (HTTP smoke, window smoke, DMG mounted read-only); both packaged apps in CI.
+How it was verified: on this laptop against the rack over the tailnet (migration, add by `host:port`, merged list with `model@gateway`, routing proven by litellm's own request log, discovery, usage per gateway, jobs); on the console host after deploy (all ten MCP servers, chat, worker check); the packaged Mac app locally (HTTP smoke, window smoke, DMG mounted read-only); both packaged apps in CI.
 
 Deviations from the plan, with reasons:
 - `engine_stats()` and `netcheck()` never read `upstream_url` (one reads the engines' own metrics, now through the rack monitors, the other runs `rack net`), so gap 3 in §1 was a non-issue.
@@ -24,7 +24,7 @@ Deviations from the plan, with reasons:
 - Discovery: the laptop's Tailscale peer list held 535 Mullvad exit nodes, so discovery now probes only the user's own tailnet (MagicDNS suffix, no exit-node tags): 6 hosts in ~0.6 s instead of 542 in 29 s. HTTPS on 443 is probed by MagicDNS name. A 401/403 counts as "engine behind a key" only when the body is JSON (a router login page is not an engine).
 - macOS holds the first local-network connections of a new app until the user allows Local Network access: the bundle carries `NSLocalNetworkUsageDescription` and the UI says what to do when a search comes back empty.
 - Windows: the window exe has no usable stdio, so the bundle also ships `ByteBunker-cli.exe` (console subsystem) for `--headless` and for built-in MCP servers; every child process (ssh, npx, uvx, tailscale) gets `CREATE_NO_WINDOW`.
-- Built-in MCP servers always run on the console's own interpreter (`sys.executable`, or the app itself via `--mcp`), on hermes too: no dependency on a `python3` on the PATH.
+- Built-in MCP servers always run on the console's own interpreter (`sys.executable`, or the app itself via `--mcp`), on the console host too: no dependency on a `python3` on the PATH.
 - An explicit `"gateways": []` stays empty (a fresh install); only a config with no `gateways` key migrates from `upstream_url`. Removing the last gateway is therefore allowed.
 - Updates: a manual "Check for updates" button instead of a feed read on start: the app never contacts anything on its own beyond the gateways the user adds.
 - Default model: the last one used, else one a direct engine (vLLM, Ollama, LM Studio, llama.cpp) has loaded, else the first listed. litellm lists every configured route whether or not a backend is up.
@@ -50,12 +50,12 @@ Remaining, in suggested order:
 
 | Piece | State | Where |
 |---|---|---|
-| Console (server + UI) | shipped, running on hermes as a launchd service | `bytebunkerlabs/bytebunker-console` main @ `f3ebc66`; deployed copy on hermes `~/bytebunker-console` (a file copy, not a checkout) |
+| Console (server + UI) | shipped, running on the console host as a launchd service | `bytebunkerlabs/bytebunker-console` main @ `f3ebc66`; deployed copy on the console host `~/bytebunker-console` (a file copy, not a checkout) |
 | Multi-gateway slice | **implemented, committed, NOT deployed, NOT run against the rack** | branch `feat/gateways` @ `9cf054a` (files: `gateways.py`, `server.py`, `public/index.html`, `public/console.js`) |
 | Harness (agents) | shipped, on the worker | `bytebunkerlabs/bytebunker-harness` main @ `d33a12e` (private) |
 | Desktop shell, packaging, installers | not started | — |
 
-Working checkouts on the owner's laptop: `~/bb/bytebunker-console` and `~/bb/bytebunker-harness` (use these; the copies under `~/Documents/AI/` intermittently return EPERM to every reader for minutes, which is a macOS/iCloud effect, not a repo problem). Deploy to hermes with `scp` from `~/bb`; never restart the console while an agent run streams (check `ssh hermes 'ssh agents-worker "pgrep -fc \"python scripts/run_maste[r].py\""'` is 0).
+Working checkouts on the owner's laptop: `~/bb/bytebunker-console` and `~/bb/bytebunker-harness` (use these; the copies under `~/Documents/AI/` intermittently return EPERM to every reader for minutes, which is a macOS/iCloud effect, not a repo problem). Deploy to the console host with `scp` from `~/bb`; never restart the console while an agent run streams (check `ssh console-host 'ssh worker "pgrep -fc \"python scripts/run_maste[r].py\""'` is 0).
 
 ### What the gateways branch contains (review before building on it)
 
@@ -70,7 +70,7 @@ Working checkouts on the owner's laptop: `~/bb/bytebunker-console` and `~/bb/byt
 - UI: Gateways screen (Serving nav), Models screen shows "via <gateway> · kind · vision", model picker labels models with their gateway when more than one gateway is configured, Usage screen has "By gateway".
 
 Known gaps on the branch (do these first):
-1. It has never been run. Deploy to hermes and verify: migration creates the `upstream` gateway from the existing config; `POST /api/gateways {action:add, url:"172.16.25.83:8001"}` adds the 2070 vLLM; `/api/models?refresh=1` shows `qwen3-4b-fast` via the litellm gateway with `also_on` the direct one; `discover` finds spark-1 :4000/:8888 and the worker :8001 over the tailnet; `/api/usage` shows `by_gateway`.
+1. It has never been run. Deploy to the console host and verify: migration creates the `upstream` gateway from the existing config; `POST /api/gateways {action:add, url:"<windows-lan-ip>:8001"}` adds the 2070 vLLM; `/api/models?refresh=1` shows `qwen3-4b-fast` via the litellm gateway with `also_on` the direct one; `discover` finds spark-1 :4000/:8888 and the worker :8001 over the tailnet; `/api/usage` shows `by_gateway`.
 2. `jobs.py`'s runner falls back to `upstream_request("/models")` for a model: switch it to `GW.models`.
 3. `engine_stats()` / `netcheck()` still read `CFG["upstream_url"]`; fine while the first gateway is litellm, wrong otherwise. Make the Cluster "Is it local?" card per gateway kind (vLLM only) or drop it in the app.
 4. Discovery probes plain HTTP only; add `https://` for 443/8443 targets (Tailscale Serve endpoints).
@@ -101,7 +101,7 @@ Why pywebview + PyInstaller rather than Electron or Tauri: the app is Python alr
 ## 3. Phases
 
 ### Phase 1 — Gateways (finish the branch) · 1–2 days
-1. Deploy `feat/gateways` to hermes behind the checks in §1; fix what breaks; merge to main.
+1. Deploy `feat/gateways` to the console host behind the checks in §1; fix what breaks; merge to main.
 2. Fix the four gaps listed above.
 3. Add `kind`-aware extras per gateway: for `vllm`, read `/metrics` (tokens/s, KV %, running/waiting) and show them on the Gateways card (the worker stats script already parses vLLM metrics — reuse `agents.py` `_STATS_PY` parsing logic server-side); for `ollama`, `/api/tags` sizes and `/api/ps` loaded models; for `litellm`, `/model/info` when the key allows.
 4. Per-gateway usage: the usage event already carries `gateway`. Add `gateway` to the trace log's chat records (`TRACE.log("chat", …, gateway=…)`), and to agent spawn records by mapping the model at collection time (console side, `agent_usage`).
@@ -144,8 +144,8 @@ Why pywebview + PyInstaller rather than Electron or Tauri: the app is Python alr
 {
   "bind": "127.0.0.1", "port": 0,
   "gateways": [
-    {"name": "spark-1 litellm", "url": "http://172.16.25.186:4000/v1", "key": "…", "enabled": true, "kind": "litellm"},
-    {"name": "2070 vllm", "url": "http://172.16.25.83:8001/v1", "key": "", "enabled": true, "kind": "vllm"}
+    {"name": "spark-1 litellm", "url": "http://<spark-1-lan-ip>:4000/v1", "key": "…", "enabled": true, "kind": "litellm"},
+    {"name": "2070 vllm", "url": "http://<windows-lan-ip>:8001/v1", "key": "", "enabled": true, "kind": "vllm"}
   ],
   "model_capabilities": {"…": {"tools": true, "effort": [], "ctk": {}, "strip_reasoning": true, "ctx": 131072, "vision": false}},
   "skills_dirs": ["<data>/skills"], "plugins_dirs": ["<data>/plugins"], "plugins": {},
@@ -200,7 +200,7 @@ The scheduler runs only while the app is open. State that on the Jobs screen ("r
 ## 7. Order of work for the implementer
 
 1. Branch `feat/gateways` → deploy, verify, fix, merge (Phase 1.1–1.2).
-2. `server.py` path overrides + `serve()` (Phase 2.1). Keep hermes working: `install.sh` and the launchd plist must not change behaviour.
+2. `server.py` path overrides + `serve()` (Phase 2.1). Keep the console host working: `install.sh` and the launchd plist must not change behaviour.
 3. `desktop/app.py` + `--mcp` + `--headless` (Phase 2.2–2.3). Run from source on the laptop.
 4. PyInstaller spec + local mac build; fix hidden imports; dmg.
 5. GitHub Actions matrix; tag `v0.1.0`; test both artifacts on clean machines.

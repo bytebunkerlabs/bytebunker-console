@@ -31,10 +31,10 @@ The doctrine lives in standing instructions I edit in the console: when to use q
 
 ```mermaid
 flowchart LR
-  subgraph control [Control plane · hermes]
+  subgraph control [Control plane · the console host]
     UI[Console UI] --> SRV[server.py]
   end
-  subgraph agent [Agent plane · agents-worker, WSL2]
+  subgraph agent [Agent plane · worker, WSL2]
     RM[run_master.py<br/>the Sultan] --> C1[(minion)]
     RM --> C2[(minion)]
     RM --> C3[(wazir / Malikah)]
@@ -54,7 +54,7 @@ flowchart LR
 
 **Spawn.** For each agent the Sultan writes a task directory (brief, material, skill bodies, tool allowlist, model name, output cap, context budget, thinking switch) and runs `podman run --network none --userns=keep-id` from the `bytebunker-slave` image, bind-mounting the task directory and a unix socket. The socket is an LLM proxy on the worker that forwards to the gateway, so a container has exactly one way to reach a model and no way to reach anything else. Roles that need the web (`researcher`, `minion` with a research skill) get a bridge network for that spawn only; the worker's allowlist decides which roles may ask.
 
-**Route.** The gateway is litellm on spark-1. Every engine is a name there: `deepseek-v4-vision-uncensored` is the two-Spark tensor-parallel vLLM launched by our `rack` CLI from a recipe file (that recipe is also where the model's default thinking mode lives, `--default-chat-template-kwargs '{"thinking":true, ...}'`, which is why agents have to switch it off explicitly); `qwen3-4b-fast` is the RTX 2070 inside the worker's own WSL2, exposed through a Windows port forward. The harness picks the model per role: `master_model` for the Sultan, `thinking_model` for wazir, Malikah and skeptics, `default_slave_model` for everyone else.
+**Route.** The gateway is litellm on spark-1. Every engine is a name there: `<big-model>` is the two-Spark tensor-parallel vLLM launched by our `rack` CLI from a recipe file (that recipe is also where the model's default thinking mode lives, `--default-chat-template-kwargs '{"thinking":true, ...}'`, which is why agents have to switch it off explicitly); `qwen3-4b-fast` is the RTX 2070 inside the worker's own WSL2, exposed through a Windows port forward. The harness picks the model per role: `master_model` for the Sultan, `thinking_model` for wazir, Malikah and skeptics, `default_slave_model` for everyone else.
 
 **Run.** Inside a container the runner loops gather → act → verify with a per-depth step budget (quick 6, standard 30, deep 60) and a time budget from the spawn. It trims old tool output past a character budget, checkpoints `result.json` every step, nudges at two steps left, offers only `submit_result` on the last step, salvages a truncated or prose submission, and skips its own verifier when out of time, handing the answer back marked unverified. Every step is an event line in `/tmp/bb-<agent>/events.jsonl` on the worker, which the console tails for the live cards.
 

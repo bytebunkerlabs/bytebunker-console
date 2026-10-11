@@ -1,7 +1,7 @@
 name: tests
 
 # Unit and API tests on every push, on the Python versions the server must
-# run on: 3.9 (macOS's system Python, as on hermes) and 3.12 (the app's).
+# run on: 3.9 (macOS's system Python, as on the console host) and 3.12 (the app's).
 # The desktop workflow covers macOS and Windows builds; this one adds Linux,
 # where the headless server and dgx-serve's nodes live.
 on:

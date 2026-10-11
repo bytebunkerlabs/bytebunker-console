@@ -69,13 +69,13 @@ class FakeMonitor:
 class ParseUrl(unittest.TestCase):
     def test_forms(self):
         p = monmod.parse_url
-        self.assertEqual(p("100.90.164.11"), ("http://100.90.164.11:9177", ""))
-        self.assertEqual(p("burhan.tailed338.ts.net:9177"), ("http://burhan.tailed338.ts.net:9177", ""))
+        self.assertEqual(p("100.64.0.10"), ("http://100.64.0.10:9177", ""))
+        self.assertEqual(p("spark-1.example.ts.net:9177"), ("http://spark-1.example.ts.net:9177", ""))
         self.assertEqual(p("http://10.0.0.5:9000/v1/cluster?x=1"), ("http://10.0.0.5:9000", ""))
         self.assertEqual(p("https://mon.example"), ("https://mon.example", ""))
         self.assertEqual(p("http://[fd7a::1]:9177"), ("http://[fd7a::1]:9177", ""))
         # what `rack monitor token` prints as the paste-ready string
-        self.assertEqual(p("http://rack:s3cr%2Ft-_x@100.90.164.11:9177"), ("http://100.90.164.11:9177", "s3cr/t-_x"))
+        self.assertEqual(p("http://rack:s3cr%2Ft-_x@100.64.0.10:9177"), ("http://100.64.0.10:9177", "s3cr/t-_x"))
         for bad in ("", None, "ftp://x", "http://", "http://host:99999"):
             self.assertEqual(p(bad), ("", ""), bad)
 
@@ -92,9 +92,9 @@ class ParseUrl(unittest.TestCase):
 
 class Merge(unittest.TestCase):
     def setUp(self):
-        self.a = FakeMonitor("ta", [node("spark-1", "burhan", gen=27.5, running=2), node("spark-2", "aleem")])
+        self.a = FakeMonitor("ta", [node("spark-1", "spark-1", gen=27.5, running=2), node("spark-2", "spark-2")])
         # the second monitor sees spark-2 again (someone added the worker too)
-        self.b = FakeMonitor("tb", [node("box", gen=3.0, running=1), node("spark-2", "aleem")], cluster="lab")
+        self.b = FakeMonitor("tb", [node("box", gen=3.0, running=1), node("spark-2", "spark-2")], cluster="lab")
         self.dead = FakeMonitor("x", [node("gone")])
         self.dead.close()
 

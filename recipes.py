@@ -31,7 +31,7 @@ VLLM_CUDA = {
                "the harness see it by name.",
     "target": "ssh",
     "params": [
-        _p("host", "ssh host", "", "an ssh alias the console can reach without a password (e.g. agents-worker)"),
+        _p("host", "ssh host", "", "an ssh alias the console can reach without a password (e.g. worker)"),
         _p("model", "Hugging Face model", "Qwen/Qwen3-4B-AWQ", "AWQ/GPTQ 4-bit fits 8 GB; Qwen3 and Llama 3.x support tool calling"),
         _p("served_name", "served model name", "qwen3-4b-fast", "the name litellm, the console and the harness will use"),
         _p("port", "port", "8001", "", "number"),

@@ -45,7 +45,18 @@ class HelpTest(unittest.TestCase):
 
     def test_only_our_products_and_no_private_addresses(self):
         from urllib.parse import urlparse
-        words = re.compile(r"litellm|ollama|lm studio|mo@bunker|leagueofash|hermes|spark-1|172\.16\.|100\.90\.", re.I)
+        # Generic patterns only: a tailnet address (100.64.0.0/10), a private
+        # 172.16-31 or 10.x address, a MagicDNS name. Names that are private
+        # (hosts, users) stay out of this public file: list them one per line
+        # in tests/private-words.txt, which git ignores, and they are checked too.
+        pats = [r"litellm", r"ollama", r"lm studio", r"spark-1",
+                r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b",
+                r"\b172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b", r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b",
+                r"\.ts\.net\b"]
+        private = os.path.join(os.path.dirname(os.path.abspath(__file__)), "private-words.txt")
+        if os.path.exists(private):
+            pats += [re.escape(w.strip()) for w in open(private, encoding="utf-8") if w.strip()]
+        words = re.compile("|".join(pats), re.I)
         for gid, info in guides().items():
             body = info["text"]
             self.assertEqual(words.findall(body), [], info["file"])

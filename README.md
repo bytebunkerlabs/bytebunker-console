@@ -262,7 +262,7 @@ code. This follows the separation NVIDIA's agentic-safety guidance calls for —
 three planes, each on its own host:
 
 - **Model plane** — the Sparks. Serve the LLM only.
-- **Control plane** — this console, on hermes. Launches goals, watches, holds
+- **Control plane** — this console, on the console host. Launches goals, watches, holds
   the kill switch.
 - **Agent plane** — a *dedicated worker host* (not a Spark, not the console).
   Runs the harness and Docker, so a slave gets `--network none` and reaches the
@@ -271,7 +271,7 @@ three planes, each on its own host:
 Point the console at that host with the `agents` config block. It is **disabled
 by default and inert until you set it** — the launcher refuses to run without
 `agents.enabled` and `agents.dir`. Set `agents.ssh` to the worker host; leaving
-it empty runs the harness locally on hermes with **no isolation** (dev only,
+it empty runs the harness locally on the console host with **no isolation** (dev only,
 and the screen says so). Each run is written to the trace log, so agent goals
 feed the same training export as chats.
 

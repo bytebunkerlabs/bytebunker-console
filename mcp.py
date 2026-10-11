@@ -9,7 +9,7 @@ Servers are declared in config.json:
   "mcp_servers": {
     "fs": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/mo/rack"],
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/rack"],
       "env": {},
       "enabled": true
     }

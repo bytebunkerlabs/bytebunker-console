@@ -14,7 +14,7 @@ Event types:
 A session is its last snapshot with every later event applied. Writes for
 one session are serialized; different sessions never contend, and no write
 touches more than one session's file (the old store rewrote every session,
-48 MB on hermes, after every turn).
+48 MB on the console host, after every turn).
 """
 import json
 import os
@@ -28,7 +28,7 @@ STORED_TOOL_TEXT = 65536     # the model sees 20k of a tool result, the screen a
 
 def compact(sess):
     """Cap the stored copy of tool arguments and results. A tool that
-    returned 45 MB made one session 45 MB (measured on hermes) and every save
+    returned 45 MB made one session 45 MB (measured on the console host) and every save
     rewrote it; the model only ever saw 20k characters of it."""
     for m in sess.get("messages") or []:
         for t in m.get("toolUse") or []:

@@ -15,7 +15,7 @@ Config (config.json):
 
     "agents": {
       "enabled": false,               // master switch; false = inert
-      "ssh": "agents-worker",         // agent host over SSH; "" = run locally (NOT isolated)
+      "ssh": "worker",         // agent host over SSH; "" = run locally (NOT isolated)
       "dir": "~/bytebunker-harness",  // the harness checkout on that host
       "python": "uv run",             // launcher; "uv run" or e.g. "python3"
       "script": "scripts/run_master.py"

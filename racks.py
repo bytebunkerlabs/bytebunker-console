@@ -3,7 +3,7 @@
 config.json keeps a list:
 
     "racks": [{"name": "spark-1", "ssh": "you@spark-1", "paired": true,
-               "app": "hermes-3fa2", "gateway": "spark-1", "monitor": "spark-1"}]
+               "app": "laptop-3fa2", "gateway": "spark-1", "monitor": "spark-1"}]
 
 Pairing (Add a rack, bb pair) asks the machine once, with your own ssh, to
 run `rack pair --json --key <this app's key>`: dgx-serve puts the key in its

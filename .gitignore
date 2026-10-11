@@ -7,3 +7,4 @@ desktop/build/
 desktop/dist/
 desktop/build.log
 node_modules/
+tests/private-words.txt

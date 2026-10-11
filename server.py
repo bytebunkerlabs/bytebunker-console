@@ -444,7 +444,7 @@ def rack_recipes(text):
     recipes = []
     for ln in _ANSI.sub("", text).splitlines():
         tok = ln.strip().split()
-        # "  dsv4-vision-ab   TP=2   orcarouter/DeepSeek-V4-Flash-Vision-Uncensored"
+        # "  dsv4            TP=2   deepseek-ai/DeepSeek-V4-Flash-0731"
         if len(tok) >= 2 and re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", tok[0]) and tok[0] != "TEMPLATE":
             recipes.append({"name": tok[0].replace(".env", ""), "mode": tok[1],
                             "model": tok[2] if len(tok) > 2 else ""})

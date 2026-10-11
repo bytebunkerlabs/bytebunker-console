@@ -5,8 +5,8 @@
 | Plane | What runs | Where (reference deployment) | Talks to |
 |---|---|---|---|
 | **Model plane** | vLLM (one tensor-parallel engine across two DGX Sparks) + litellm gateway + the rack monitor (read-only telemetry, :9177) | spark-1 / spark-2 | nothing outbound |
-| **Control plane** | the console (`server.py`, stdlib Python + one JS file) | hermes (Mac mini), launchd | litellm, the worker over ssh, the rack monitor |
-| **Agent plane** | the harness (`run_master.py`, Sultan + court), rootless podman, one container per agent | agents-worker (WSL2 Ubuntu inside a Windows box) | litellm through a unix-socket proxy; the internet only for roles that get `network=true` |
+| **Control plane** | the console (`server.py`, stdlib Python + one JS file) | the console host (Mac mini), launchd | litellm, the worker over ssh, the rack monitor |
+| **Agent plane** | the harness (`run_master.py`, Sultan + court), rootless podman, one container per agent | worker (WSL2 Ubuntu inside a Windows box) | litellm through a unix-socket proxy; the internet only for roles that get `network=true` |
 | **Fast-model plane** | a small model on the worker's own GPU (vLLM, RTX 2070) | same Windows box, WSL2 | registered in litellm, so it is just another model name |
 
 The safety rule that shaped this: **agents never run where a model is served, and the console never runs agent code.** The console launches a goal over ssh and watches; the worker runs it in `--network none` containers; the model hosts only serve tokens.
