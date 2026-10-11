@@ -215,6 +215,17 @@ class AgentRunsV2Test(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == "win32", "a local agents launch goes through env(1); agents never run on the app's host")
 class AgentRunsTest(_ServerCase):
+    def setUp(self):
+        # one goal at a time, and the tests share a server: a test that read its
+        # goal's last frame may return before that run has finished
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            runs = self.srv.request("GET", "/api/runs?limit=50")[1]["runs"]
+            if not any(r.get("kind") == "agents" and r.get("state") in ("queued", "running", "waiting") for r in runs):
+                return
+            time.sleep(0.1)
+        self.fail("an earlier goal never finished")
+
     def test_agent_goal_streams_and_hides_protocol_lines(self):
         frames = data(self.srv.sse("/api/agents", method="POST", body={"goal": "quick"},
                                    until=lambda fr: '"done"' in fr[-1]["data"]))
