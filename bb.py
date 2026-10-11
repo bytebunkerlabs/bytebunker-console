@@ -567,7 +567,7 @@ def cmd_ask(a, out):
     if not text and not atts:
         raise BBError("nothing to ask: bb ask \"your question\" (or pipe something in)", EXIT_USAGE)
     req = {"text": text, "attachments": atts, "cwd": os.getcwd()}
-    for k in ("model", "effort", "profile", "system"):
+    for k in ("model", "effort", "profile", "system", "project"):
         if getattr(a, k, None):
             req[k] = getattr(a, k)
     if a.no_tools:
@@ -589,22 +589,36 @@ def _models(srv):
     return [m["id"] for m in srv.get("/api/models").get("data") or []]
 
 
+def recap(sess, out, n=2, width=300):
+    """The last question and answer of a chat being continued, so the
+    terminal picks up where the app left off."""
+    said = [m for m in sess.get("messages") or [] if m.get("role") in ("user", "assistant")
+            and m.get("kind") != "summary" and isinstance(m.get("content"), str) and m["content"].strip()]
+    for m in said[-n:]:
+        text = " ".join(m["content"].split())
+        text = text[:width] + "…" if len(text) > width else text
+        out.err(out.dim(("› " if m["role"] == "user" else "  ") + text))
+
+
 def cmd_chat(a, out):
     """The REPL: one session, slash commands from the command table."""
     srv = connect(out=out)
     st = {"sid": a.session or None, "model": a.model, "effort": a.effort, "profile": a.profile, "tools": True,
-          "skills": [], "atts": []}
+          "skills": [], "atts": [], "project": a.project}
     ws = None if a.no_workspace else workspace_here()
     if st["sid"]:
         sess = srv.get("/api/sessions?id=" + urllib.parse.quote(st["sid"]))
         st["model"] = st["model"] or sess.get("model")
+        st["project"] = st["project"] or sess.get("project")
         out.err(out.dim("continuing %s · %s · %d messages" % (st["sid"], sess.get("title") or "", len(sess.get("messages") or []))))
+        recap(sess, out)
     try:
         import readline  # noqa: F401  (history and line editing where Python has it)
     except ImportError:
         pass
-    out.err(out.dim("ByteBunker %s · %s · /help for commands, Ctrl-D to leave" % (
-        VERSION, st["model"] or "default model")))
+    proj = project_here(srv, st["project"])
+    out.err(out.dim("ByteBunker %s · %s%s · /help for commands, Ctrl-D to leave" % (
+        VERSION, st["model"] or "default model", (" · project " + proj["name"]) if proj else "")))
     while True:
         try:
             line = input(out.bold("› ") if out.color else "> ")
@@ -639,7 +653,7 @@ def cmd_chat(a, out):
         if not st["sid"]:
             st["sid"] = new_session_id()
         req = {"text": line, "attachments": st["atts"], "cwd": os.getcwd(), "skills": st["skills"]}
-        for k in ("model", "effort", "profile"):
+        for k in ("model", "effort", "profile", "project"):
             if st[k]:
                 req[k] = st[k]
         if not st["tools"]:
@@ -864,7 +878,10 @@ def cmd_agents(a, out):
         raise BBError('bb agents "goal" (or: bb agents ls, bb agents stop)', EXIT_USAGE)
     rid = None
     try:
-        frames = srv.stream("POST", "/api/agents", {"goal": goal})
+        body = {"goal": goal, "cwd": os.getcwd()}
+        if a.project:
+            body["project"] = a.project
+        frames = srv.stream("POST", "/api/agents", body)
         for f in frames:
             d = json.loads(f["data"])
             if d.get("run"):
@@ -916,6 +933,8 @@ def cmd_run(a, out):
         raise BBError("no workflow named %r%s" % (a.workflow, " (there are: %s)" % ", ".join(sorted(wfs)) if wfs else
                                                    "; make one in the app (Workflows)"), EXIT_USAGE)
     body = {"params": params}
+    if a.project:
+        body["project"] = a.project
     view = GenericView(out)
     if wf.get("kind") != "agents":
         folder = os.path.expanduser(wf.get("folder") or "") or os.getcwd()
@@ -951,6 +970,41 @@ def cmd_workflows(a, out):
     rows = [[n, w.get("kind"), w.get("profile") or "", " ".join("%s=" % p["name"] for p in w.get("params") or []),
              (w.get("description") or "")[:50]] for n, w in sorted(wfs.items())]
     out.say(table(rows, ["workflow", "kind", "profile", "takes", ""]))
+    return EXIT_OK
+
+
+def project_here(srv, named=None):
+    """The project bb works in: the one named, else the one this folder is in."""
+    try:
+        ps = srv.get("/api/projects").get("projects") or []
+    except BBError:
+        return None
+    if named:
+        hit = [p for p in ps if p["id"] == named or (p.get("name") or "").lower() == str(named).lower()]
+        if not hit:
+            raise BBError("no project named %r (bb projects lists them)" % named, EXIT_USAGE)
+        return hit[0]
+    here, best = os.path.realpath(os.getcwd()), None
+    for p in ps:
+        root = os.path.realpath(os.path.expanduser(p["folder"])) if p.get("folder") else None
+        if root and (here == root or here.startswith(root.rstrip(os.sep) + os.sep)):
+            if best is None or len(root) > len(best[1]):
+                best = (p, root)
+    return best[0] if best else None
+
+
+def cmd_projects(a, out):
+    srv = connect(out=out)
+    ps = srv.get("/api/projects").get("projects") or []
+    if not ps:
+        out.say("no projects yet: make one in the app (Projects); bb then joins it in its folder")
+        return EXIT_OK
+    here = project_here(srv)
+    rows = [[("* " if here and p["id"] == here["id"] else "  ") + p["name"], p.get("folder") or "", p.get("profile") or "",
+             p.get("chats") or 0, ", ".join(p.get("workflows") or [])[:40]] for p in ps]
+    out.say(table(rows, ["project", "folder", "profile", "chats", "workflows"]))
+    if here:
+        out.err(out.dim("* the project this folder is in: bb works in it here"))
     return EXIT_OK
 
 
@@ -1015,6 +1069,7 @@ def parser():
     p = argparse.ArgumentParser(prog="bb", description="ByteBunker in a terminal.", add_help=True)
     p.add_argument("--version", action="version", version="bb (ByteBunker) " + VERSION)
     sub = p.add_subparsers(dest="cmd")
+    p.commands = sub.choices
 
     def turn_opts(sp):
         sp.add_argument("-m", "--model")
@@ -1022,6 +1077,7 @@ def parser():
         sp.add_argument("-p", "--profile")
         sp.add_argument("-s", "--session", help="continue this session")
         sp.add_argument("--system", help="system prompt for this turn")
+        sp.add_argument("-P", "--project", help="a project by name (default: the one this folder is in)")
     a = sub.add_parser("ask", help="one question")
     a.add_argument("text", nargs="*")
     turn_opts(a)
@@ -1052,6 +1108,7 @@ def parser():
     ag = sub.add_parser("agents")
     ag.add_argument("goal", nargs="*")
     ag.add_argument("--detach", action="store_true", help="start it and return; it runs on the server")
+    ag.add_argument("-P", "--project", help="a project by name (default: the one this folder is in)")
     j = sub.add_parser("jobs")
     j.add_argument("action", choices=("ls", "run"), nargs="?", default="ls")
     j.add_argument("id", nargs="?")
@@ -1061,7 +1118,9 @@ def parser():
     w.add_argument("-s", "--session", help="run it in this session")
     w.add_argument("--yes", action="store_true", help="allow tool calls that would ask")
     w.add_argument("--detach", action="store_true", help="start it and return its run id")
+    w.add_argument("-P", "--project", help="a project by name")
     sub.add_parser("workflows")
+    sub.add_parser("projects")
     sub.add_parser("profiles")
     sub.add_parser("doctor")
     sub.add_parser("serve")
@@ -1071,9 +1130,25 @@ def parser():
 
 HANDLERS = {"ask": cmd_ask, "chat": cmd_chat, "sessions": cmd_sessions, "runs": cmd_runs, "agents": cmd_agents,
             "jobs": cmd_jobs, "doctor": cmd_doctor, "serve": cmd_serve, "help": cmd_help, "run": cmd_run,
-            "workflows": cmd_workflows, "profiles": cmd_profiles,
+            "workflows": cmd_workflows, "profiles": cmd_profiles, "projects": cmd_projects,
             "models": cmd_list, "gateways": cmd_list, "monitors": cmd_list, "cluster": cmd_list,
             "usage": cmd_list, "skills": cmd_list, "mcp": cmd_list}
+
+
+def bare_command(p, argv):
+    """Options with no command in front: ask when a question comes with them, else chat."""
+    ask = p.commands["ask"]
+    takes = {o for act in ask._actions for o in act.option_strings if act.nargs != 0}
+    i = 0
+    while i < len(argv):
+        t = argv[i]
+        if t == "--":
+            return "ask" if i + 1 < len(argv) else "chat"
+        if t.startswith("-") and len(t) > 1:
+            i += 2 if t in takes else 1     # -P Billing, --json
+            continue
+        return "ask"
+    return "chat"
 
 
 def main(argv=None):
@@ -1084,6 +1159,8 @@ def main(argv=None):
         argv = ["chat"]
     elif argv[0] not in HANDLERS and not argv[0].startswith("-"):
         argv = ["ask"] + argv               # bb "question" is bb ask "question"
+    elif argv[0].startswith("-") and argv[0] not in ("-h", "--help", "--version"):
+        argv = [bare_command(p, argv)] + argv   # bb -P Billing chats in a project; bb -p Fast "…" asks
     try:
         a = p.parse_args(argv)
     except SystemExit as e:

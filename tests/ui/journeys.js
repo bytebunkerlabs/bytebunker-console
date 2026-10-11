@@ -79,6 +79,48 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   const chat = await page.locator("#msgs").innerText().catch(() => "");
   check("playground: streamed reply shown", chat.includes("echo: ping from the browser"), chat.slice(0, 160).replace(/\n/g, " | "));
 
+  // ---- Playground: a turn bb adds to the chat open here shows up in it, no reload
+  let open = null;
+  for (let i = 0; i < 30 && !open; i++) {
+    open = (await (await fetch(BASE + "/api/sessions")).json()).find((x) => x.title === "ping from the browser");
+    if (!open) await page.waitForTimeout(200);
+  }
+  if (open) {
+    await post("/api/sessions/" + open.id + "/turns", { text: "ping from the terminal", model: "fake-model", cwd: "/" });
+    await page.waitForTimeout(3000);
+  }
+  const chat2 = await page.locator("#msgs").innerText().catch(() => "");
+  check("playground: a turn from a terminal shows in the open chat", !!open && chat2.includes("echo: ping from the terminal") && chat2.includes("echo: ping from the browser"),
+        chat2.slice(-200).replace(/\n/g, " | "));
+
+  // ---- Projects: made in the form, its folder made, then picked in the Playground
+  const projDir = require("path").join(require("os").tmpdir(), "bb-ui-project-" + Date.now(), "billing");
+  await page.click('[data-nav="projects"]');
+  await page.waitForTimeout(800);
+  await page.click("#new-project");
+  const form = page.locator("#projects-box .card").first();
+  await form.locator("input").nth(0).fill("Billing");
+  await form.locator("input").nth(1).fill(projDir);
+  await form.locator("textarea").fill("Money is integer cents.");
+  await form.locator("button", { hasText: "Create project" }).click();
+  await page.waitForTimeout(1200);
+  const cards = await page.locator("#projects-box").innerText();
+  check("projects: made from the form", cards.includes("Billing") && cards.includes(projDir), cards.slice(0, 200).replace(/\n/g, " | "));
+  check("projects: its folder is made", require("fs").existsSync(projDir), projDir);
+  await page.click('[data-nav="playground"]');
+  await page.waitForTimeout(500);
+  const pick = page.locator("#project-select");
+  check("projects: the Playground's picker has it, chosen", await pick.isVisible() && (await pick.locator("option:checked").innerText()) === "Billing",
+        await pick.isVisible() ? await pick.locator("option:checked").innerText() : "hidden");
+  // ---- Open in terminal: a server with no window of its own gives the command
+  await page.click("#new-chat");
+  await page.click("#terminal-btn");
+  await page.waitForTimeout(800);
+  const helpText = await page.locator("#help-body").innerText().catch(() => "");
+  check("terminal: the command to continue in a terminal", helpText.includes("Continue in a terminal") && /bb chat -P p-[0-9a-f]+/.test(helpText),
+        helpText.slice(0, 200).replace(/\n/g, " | "));
+  try { require("fs").rmSync(require("path").dirname(projDir), { recursive: true, force: true }); } catch (e) {}
+
   check("no page or console errors", errors.length === 0, errors.join(" || ").slice(0, 400));
   await browser.close();
   for (const [n, ok, d] of results) console.log((ok ? "ok    " : "FAIL  ") + n + (ok ? "" : "   -> " + d));

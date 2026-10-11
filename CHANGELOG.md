@@ -3,6 +3,28 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.4.1 — 2026-10-10
+
+### New
+- **Projects.** Related work in one place: a project has a folder, instructions
+  every chat in it follows, and a default profile. Pick one next to the model
+  in the Playground; its chats, from the app and from bb, are kept together,
+  and Sessions can show one project's chats. Its folder is made when it is not
+  there.
+- **bb joins the project of the folder it runs in.** `bb -P name` picks one
+  from anywhere, and `bb projects` lists them, marking the one you are in.
+- **Open in terminal.** Terminal in the Playground continues the chat in bb, in
+  a terminal window in the project's folder, where the model can work on your
+  files with your tools; bb starts by showing the chat's last question and
+  answer. A project's card opens a new chat there.
+- **Workflows can belong to a project** and follow its instructions.
+
+### Fixed
+- **A chat open in the app shows what bb added to it** in a terminal, instead
+  of saving over it with the next turn sent from the app.
+- **Options with no command in front work:** `bb -m model` and `bb -P name`
+  start a chat, as `bb` alone does, instead of a usage error.
+
 ## 0.4.0 — 2026-10-10
 
 ### New

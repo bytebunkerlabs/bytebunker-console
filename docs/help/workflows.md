@@ -27,3 +27,5 @@ A blank with no value and no default is refused before anything runs, with the l
 - **agents**: the prompt becomes a goal for the [agents](help:agents).
 
 The **profile** decides the effort, answer length and tool rules. → [Profiles](help:profiles)
+
+A workflow can belong to a [project](help:projects): its runs follow the project's instructions and are kept with the project's chats.

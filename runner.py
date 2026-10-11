@@ -903,6 +903,8 @@ class Runner:
                "messages": [serialize_msg(m) for m in msgs]}
         if sess.get("cwd") or req.get("cwd"):
             rec["cwd"] = req.get("cwd") or sess.get("cwd")
+        if sess.get("project") or req.get("project"):
+            rec["project"] = req.get("project") or sess.get("project")
         summary = self.d.sessions.put(rec)
         self.d.on_session(summary)
 

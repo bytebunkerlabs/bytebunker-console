@@ -31,6 +31,10 @@ Drop files on the box. Images go to models that read images; text files go inlin
 
 The window is shared by the prompt and the answer. When a conversation nears it, auto-compress writes a summary of the older turns and keeps the originals in the archive. Type `/compress` to do it yourself. If an engine refuses a prompt as too long, its answer names its real window, and ByteBunker believes it from then on.
 
+## Projects and the terminal
+
+Next to the model, pick a [project](help:projects): the chat follows its instructions and is kept with its other chats. **Terminal** opens this chat in [bb](help:cli), in a terminal window in the project's folder, where the model can work on your files with your tools. Each turn bb adds shows here too.
+
 ## Run chats on the server
 
 In [Settings](#settings), **Chats**, you can run the Playground's turns on the ByteBunker server: they keep going when you close the tab, and a turn started from a terminal with [bb](help:cli) in the open session appears here as it streams.

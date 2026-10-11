@@ -5,7 +5,7 @@ screen: sessions
 order: 40
 summary: Every conversation, from the app and from bb, and the record behind it
 ---
-Every chat is saved as a session on this machine. Sessions from a terminal are marked **terminal**, with the folder bb ran in. Click one to continue it in the Playground.
+Every chat is saved as a session on this machine. Sessions from a terminal are marked **terminal**, with the folder bb ran in. Click one to continue it in the Playground. A chat in a [project](help:projects) shows the project's name, and the list can show one project's chats, or those in none.
 
 ## The trace log
 

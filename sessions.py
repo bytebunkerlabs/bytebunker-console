@@ -78,7 +78,8 @@ class SessionStore:
         msgs = sess.get("messages") or []
         return {"id": sess.get("id"), "title": sess.get("title") or "",
                 "model": sess.get("model") or "", "source": sess.get("source") or "app",
-                "cwd": sess.get("cwd"), "created": sess.get("created") or sess.get("updated") or _now(),
+                "cwd": sess.get("cwd"), "project": sess.get("project"),
+                "created": sess.get("created") or sess.get("updated") or _now(),
                 "updated": sess.get("updated") or _now(),
                 "turns": sess.get("turns") if isinstance(sess.get("turns"), int)
                 else sum(1 for m in msgs if m.get("role") == "user"),

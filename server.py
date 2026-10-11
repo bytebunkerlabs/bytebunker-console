@@ -1436,18 +1436,130 @@ def render_workflow(name, params):
     return wf, text
 
 
+# Projects: related work kept together. A project is a name, a folder (where
+# bb works, and where a chat opened in a terminal starts; made when missing),
+# instructions every chat in it follows, and a default profile. Its chats,
+# workflows and runs carry its id, and bb joins the project whose folder it
+# runs in.
+def projects():
+    return {pid: p for pid, p in (CFG.get("projects") or {}).items() if isinstance(p, dict) and isinstance(pid, str)}
+
+
+def _realdir(path):
+    return os.path.realpath(os.path.expanduser(str(path))) if path else None
+
+
+def project_for_folder(cwd):
+    """The project whose folder holds cwd: the innermost one, when folders nest."""
+    here = _realdir(cwd)
+    if not here:
+        return None
+    best = None
+    for pid, p in projects().items():
+        root = _realdir(p.get("folder"))
+        if root and (here == root or here.startswith(root.rstrip(os.sep) + os.sep)):
+            if best is None or len(root) > len(best[1]):
+                best = (pid, root)
+    return best[0] if best else None
+
+
+def project_named(ref):
+    """A project by its id or its name; ValueError names the ones there are."""
+    ps = projects()
+    if ref in ps:
+        return ref
+    hit = [pid for pid, p in ps.items() if (p.get("name") or "").lower() == str(ref).lower()]
+    if hit:
+        return hit[0]
+    raise ValueError("no project named %r (there are: %s)" % (
+        ref, ", ".join(sorted(p.get("name") or k for k, p in ps.items())) or "none yet"))
+
+
+def project_of(body):
+    """The project a piece of work belongs to: the one named, else the one its folder is in."""
+    if body.get("project"):
+        return project_named(body["project"])
+    return project_for_folder(body.get("cwd"))
+
+
+def project_system(pid):
+    p = projects().get(pid) or {}
+    text = (p.get("instructions") or "").strip()
+    return "# Project: %s\n\n%s" % (p.get("name") or pid, text) if text else ""
+
+
+def project_list():
+    counts, last = {}, {}
+    for s in SESSIONS.list():
+        pid = s.get("project")
+        if pid:
+            counts[pid] = counts.get(pid, 0) + 1
+            last[pid] = max(last.get(pid, 0), s.get("updated") or 0)
+    out = []
+    for pid, p in projects().items():
+        out.append(dict(p, id=pid, chats=counts.get(pid, 0), updated=last.get(pid) or p.get("created") or 0,
+                        workflows=sorted(n for n, w in workflows().items() if w.get("project") == pid)))
+    return sorted(out, key=lambda x: -(x["updated"] or 0))
+
+
+def open_terminal(folder, session=None, project=None):
+    """bb in a terminal window on this computer, in folder, continuing session
+    (or a new chat in project). Where there is no window to open (a server
+    reached from a browser), the command to run instead."""
+    import shlex
+    import subprocess
+    folder = os.path.realpath(os.path.expanduser(folder or "~"))
+    os.makedirs(folder, exist_ok=True)                 # a project folder that is not there yet is made
+    args = ["chat"] + (["-P", project] if project and not session else []) + ([session] if session else [])
+    shown = ("cd %s; bb %s" if sys.platform == "win32" else "cd %s && bb %s") % (shlex.quote(folder), " ".join(args))
+    if not os.environ.get("BYTEBUNKER_DESKTOP") or sys.platform not in ("darwin", "win32"):
+        return {"opened": False, "command": shown, "folder": folder}
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        if sys.platform == "win32":
+            twin = os.path.join(os.path.dirname(exe), "ByteBunker-cli.exe")
+            exe = twin if os.path.exists(twin) else exe
+        cli = [exe, "--cli"]
+    else:
+        cli = [sys.executable, os.path.join(ROOT, "bb.py")]
+    if sys.platform == "darwin":
+        # a .command file opens in the user's terminal app, with no permission to ask for
+        d = os.path.join(os.path.dirname(CONFIG_PATH), "terminal")
+        os.makedirs(d, exist_ok=True)
+        script = os.path.join(d, "bb-%s.command" % (session or project or "chat"))
+        with open(script, "w", encoding="utf-8") as f:
+            f.write("#!/bin/bash\n# opened from ByteBunker\nexport BYTEBUNKER_DATA=%s BYTEBUNKER_CONFIG=%s\ncd %s || exit 1\nexec %s\n" % (
+                shlex.quote(DATA), shlex.quote(CONFIG_PATH), shlex.quote(folder), " ".join(shlex.quote(a) for a in cli + args)))
+        os.chmod(script, 0o700)
+        subprocess.Popen(["open", script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        q = lambda s: "'" + str(s).replace("'", "''") + "'"
+        ps = ("$host.UI.RawUI.WindowTitle = 'ByteBunker'; $env:BYTEBUNKER_DATA=%s; $env:BYTEBUNKER_CONFIG=%s; "
+              "Set-Location -LiteralPath %s; & %s") % (q(DATA), q(CONFIG_PATH), q(folder), " ".join(q(a) for a in cli + args))
+        # its own console window (CREATE_NEW_CONSOLE); the app's no-window default must not apply here
+        subprocess.Popen(["powershell", "-NoExit", "-Command", ps], creationflags=0x00000010)
+    return {"opened": True, "command": shown, "folder": folder}
+
+
 def start_turn(sid, body, source):
     """A chat turn as a server-owned run: (run, sid). Busy when the session
     already has one going; ValueError for an unknown profile."""
     if sid == "new":
         sid = new_session_id()
     body = dict(body, source=source)
+    pid = project_of(body)
+    if pid:
+        body["project"] = pid
+        if not body.get("profile") and projects()[pid].get("profile"):
+            body["profile"] = projects()[pid]["profile"]
     body = apply_profile(body)
+    if pid and project_system(pid):
+        body["system"] = "\n\n---\n\n".join(x for x in (project_system(pid), (body.get("system") or "").strip()) if x)
     body["model"] = resolve_model(body.get("model")) or None
     run = RUNS.start("chat", source, lambda run: runner().turn(run, lambda t, d=None: RUNS.emit(run, t, d), sid, body),
                      title=(body.get("title") or body.get("text") or "").strip()[:80] or "turn",
                      key="session:" + sid, meta={"session": sid, "model": body.get("model") or "", "what": "turns",
-                                                 "workflow": body.get("workflow") or None})
+                                                 "workflow": body.get("workflow") or None, "project": pid})
     return run, sid
 
 
@@ -1758,13 +1870,14 @@ class Handler(BaseHTTPRequestHandler):
             source = self._client()
             try:
                 if wf.get("kind") == "agents":
-                    run = start_goal(prompt, source, title=name, meta={"workflow": name})
+                    run = start_goal(prompt, source, title=name, meta={"workflow": name, "project": wf.get("project") or None})
                     TRACE.log("workflow", name=name, workflow_kind="agents", run=run.id, source=source)
                     self._json({"ok": True, "run": run.id, "kind": "agents"}, 202)
                     return
                 req = {k: body.get(k) for k in ("client_tools", "interactive", "yes", "cwd", "model", "effort")
                        if body.get(k) is not None}
-                req.update(text=prompt, profile=wf.get("profile") or body.get("profile"), title=name, workflow=name)
+                req.update(text=prompt, profile=wf.get("profile") or body.get("profile"), title=name, workflow=name,
+                           project=wf.get("project") or body.get("project") or None)
                 run, sid = start_turn(body.get("session") or "new", req, source)
             except agentmod.AgentConfigError as e:
                 self._json({"error": str(e)}, 400)
@@ -1800,12 +1913,15 @@ class Handler(BaseHTTPRequestHandler):
             if wf.get("profile") and wf["profile"] not in profiles():
                 self._json({"error": "no profile named %r" % wf["profile"]}, 400)
                 return
+            if wf.get("project") and wf["project"] not in projects():
+                self._json({"error": "no such project"}, 400)
+                return
             params = [{"name": str(p.get("name")), "help": str(p.get("help") or "")[:200],
                        "default": str(p.get("default") or "")[:2000]}
                       for p in wf.get("params") or [] if isinstance(p, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_-]*$", str(p.get("name") or ""))]
             mine[name] = {"description": str(wf.get("description") or "")[:300], "kind": kind,
                           "profile": wf.get("profile") or "", "prompt": str(wf["prompt"])[:20000], "params": params,
-                          "folder": str(wf.get("folder") or "")[:500]}
+                          "folder": str(wf.get("folder") or "")[:500], "project": wf.get("project") or ""}
         else:
             self._json({"error": "unknown action"}, 400)
             return
@@ -1853,6 +1969,90 @@ class Handler(BaseHTTPRequestHandler):
         """Who started this: "app" unless a client says otherwise (bb sends cli)."""
         c = (self.headers.get("X-BB-Client") or "app").strip().lower()
         return c if re.match(r"^[a-z][a-z0-9-]{0,15}$", c) else "app"
+
+    def _projects_admin(self, body):
+        """POST /api/projects {action: save, project: {id?, name, folder, instructions, profile}} or {action: delete, id}."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        mine = CFG.setdefault("projects", {})
+        action = body.get("action") or "save"
+        if action == "delete":
+            pid = str(body.get("id") or "")
+            if mine.pop(pid, None) is None:
+                self._json({"error": "no such project"}, 404)
+                return
+            save_config()
+            BUS.publish("config", "projects", {"id": pid})
+            TRACE.log("project", action="delete", id=pid)
+            self._json({"ok": True, "projects": project_list()})
+            return
+        if action != "save":
+            self._json({"error": "unknown action"}, 400)
+            return
+        p = body.get("project") if isinstance(body.get("project"), dict) else {}
+        name = str(p.get("name") or "").strip()
+        if not name or len(name) > 60:
+            self._json({"error": "a project needs a name (60 characters at most)"}, 400)
+            return
+        pid = str(p.get("id") or "") or ("p-" + uuid_hex(10))
+        if not re.match(r"^p-[0-9a-f]{4,16}$", pid):
+            self._json({"error": "bad project id"}, 400)
+            return
+        if any((q.get("name") or "").lower() == name.lower() and k != pid for k, q in mine.items()):
+            self._json({"error": "there is already a project named %r" % name}, 400)
+            return
+        folder = str(p.get("folder") or "").strip()
+        if folder:
+            folder = os.path.normpath(folder)                     # ~/a/../b reads as ~/b
+            if not os.path.isabs(os.path.expanduser(folder)):
+                self._json({"error": "the folder is a full path, or starts with ~"}, 400)
+                return
+            try:
+                os.makedirs(os.path.expanduser(folder), exist_ok=True)     # made when it is not there yet
+            except OSError as e:
+                self._json({"error": "cannot create %s: %s" % (folder, e.strerror or e)}, 400)
+                return
+        prof = str(p.get("profile") or "")
+        if prof and prof not in profiles():
+            self._json({"error": "no profile named %r" % prof}, 400)
+            return
+        old = mine.get(pid) or {}
+        mine[pid] = {"name": name, "folder": folder, "instructions": str(p.get("instructions") or "")[:20000],
+                     "profile": prof, "created": old.get("created") or int(time.time() * 1000)}
+        save_config()
+        BUS.publish("config", "projects", {"id": pid})
+        TRACE.log("project", action="save", id=pid, name=name)
+        self._json({"ok": True, "id": pid, "projects": project_list()})
+
+    def _terminal(self, body):
+        """POST /api/terminal {session?, project?, folder?}: bb in a terminal, or the command for one."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        sid = body.get("session") or None
+        if sid and not sessmod._ID.match(str(sid)):
+            self._json({"error": "bad session id"}, 400)
+            return
+        try:
+            pid = project_named(body["project"]) if body.get("project") else None
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        sess = SESSIONS.get(sid) if sid else None
+        if sess and not pid:
+            pid = sess.get("project") if sess.get("project") in projects() else None
+        # where bb last ran for this chat (a subfolder, say), else the project's folder
+        cwd = (sess or {}).get("cwd")
+        folder = str(body.get("folder") or "").strip() or (cwd if cwd and os.path.isdir(cwd) else None) \
+            or (projects().get(pid) or {}).get("folder") or "~"
+        try:
+            res = open_terminal(folder, sid if sess else None, pid)
+        except OSError as e:
+            self._json({"error": "could not open a terminal: %s" % e}, 500)
+            return
+        TRACE.log("terminal", session=sid, project=pid, folder=res["folder"], opened=res["opened"])
+        self._json(res)
 
     def _update_check(self):
         try:
@@ -2183,7 +2383,15 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(sess)
             else:
-                self._json(SESSIONS.list())
+                proj = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("project") or [None])[0]
+                items = SESSIONS.list()
+                if proj == "none":
+                    items = [s for s in items if not s.get("project")]
+                elif proj:
+                    items = [s for s in items if s.get("project") == proj]
+                self._json(items)
+        elif path == "/api/projects":
+            self._json({"projects": project_list()})
         elif path == "/api/events":
             self._events(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         elif path == "/api/profiles":
@@ -2417,7 +2625,7 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
                         "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
-                        "/api/update/apply"):
+                        "/api/update/apply", "/api/projects", "/api/terminal"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -2441,6 +2649,10 @@ class Handler(BaseHTTPRequestHandler):
             self._mcp_admin(body)
         elif path == "/api/update/apply":
             self._update_apply()
+        elif path == "/api/projects":
+            self._projects_admin(body)
+        elif path == "/api/terminal":
+            self._terminal(body)
         elif path == "/api/plugins":
             self._plugin_admin(body)
         elif path == "/api/skills":
@@ -2544,6 +2756,19 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/sessions":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
+                return
+            if body.get("action") == "set_project":
+                sid, pid = str(body.get("id") or ""), body.get("project") or None
+                if not sessmod._ID.match(sid) or SESSIONS.get(sid) is None:
+                    self._json({"error": "no such session"}, 404)
+                    return
+                if pid and pid not in projects():
+                    self._json({"error": "no such project"}, 400)
+                    return
+                SESSIONS.append(sid, "meta", project=pid)
+                summary = next((s for s in SESSIONS.list() if s.get("id") == sid), {"id": sid})
+                BUS.publish("sessions", "updated", summary)
+                self._json({"ok": True, "session": summary})
                 return
             try:
                 summary = SESSIONS.put(body)
@@ -2685,8 +2910,13 @@ class Handler(BaseHTTPRequestHandler):
         except agentmod.AgentConfigError as e:
             self._json({"error": str(e)}, 400)
             return
+        try:
+            pid = project_of(body)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
         self._run_streamed("agents", goal.strip()[:120] or "agents goal",
-                           lambda run, emit: agent_goal(run, emit, goal)[0], key="agents")
+                           lambda run, emit: agent_goal(run, emit, goal)[0], key="agents", meta={"project": pid})
 
     def _rack(self, body):
         """show <recipe>: the recipe's .env; up/down/logs/bench: run rack and

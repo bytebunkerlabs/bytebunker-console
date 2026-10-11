@@ -75,7 +75,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "video", "skills", "plugins", "mcp", "agents", "workflows", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
+  const screens = ["playground", "sessions", "projects", "video", "skills", "plugins", "mcp", "agents", "workflows", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
   function go(s) {
     // a screen whose nav entry is hidden (not set up here) is not reachable by link
     const nav = document.querySelector(`[data-nav="${s}"]`);
@@ -89,6 +89,7 @@
     });
     $("panel").classList.toggle("on", s === "playground" && panelWanted);
     if (s === "sessions") renderSessions();
+    if (s === "projects") renderProjects();
     if (s === "skills") renderSkills();
     if (s === "plugins") renderPlugins();
     if (s === "mcp") renderMcp();
@@ -809,11 +810,15 @@
   // system text. The trace log captures the whole prompt, so a skilled turn is
   // recorded exactly as the model saw it.
   function effectiveSystem() {
+    // the server's order (runner.system_prompt): skills, then the project's
+    // instructions, then this chat's own system prompt
     const parts = [];
     for (const name of state.activeSkills) {
       const body = state.skillBodies[name];
       if (body) parts.push("# Skill: " + name + "\n\n" + body);
     }
+    const ps = projectSystem();
+    if (ps) parts.push(ps);
     if (P.sys.trim()) parts.push(P.sys.trim());
     return parts.join("\n\n---\n\n");
   }
@@ -1144,7 +1149,7 @@
       text, model: state.model, effort: ABSTRACT_EFFORT[P.effort], params,
       attachments: atts.map((a) => { const o = Object.assign({}, a); delete o.dataURL; delete o.status; return o; }),
       system: P.sys, skills: state.activeSkills.slice(), tools: state.toolsOn, max_hops: Math.max(1, P.maxHops | 0),
-      auto_compress: P.autoCompress, interactive: true,
+      auto_compress: P.autoCompress, interactive: true, project: state.project || undefined,
     };
   }
   async function sendViaServer(text, atts) {
@@ -1558,6 +1563,7 @@
         turns: state.messages.length,
         chars: toks,
         activeSkills: state.activeSkills,
+        project: state.project || null,
         updated: Date.now(),
         messages: state.messages.map(serializeMsg),
       }),
@@ -1613,6 +1619,18 @@
       return;
     }
     box.textContent = "";
+    if ((state.projects || []).length) {
+      const frow = document.createElement("div"); frow.style.cssText = "display:flex;gap:8px;align-items:center;margin:0 0 10px";
+      const fsel = document.createElement("select"); fsel.className = "text-input"; fsel.style.maxWidth = "240px";
+      for (const [v, l] of [["", "Every project"], ["none", "No project"]].concat(state.projects.map((p) => [p.id, p.name]))) {
+        const o = document.createElement("option"); o.value = v; o.textContent = l; fsel.appendChild(o);
+      }
+      fsel.value = state.sessionsFilter || "";
+      fsel.onchange = () => { state.sessionsFilter = fsel.value; renderSessions(); };
+      frow.appendChild(fsel); box.appendChild(frow);
+      if (state.sessionsFilter === "none") list = list.filter((s) => !s.project || !projectById(s.project));
+      else if (state.sessionsFilter) list = list.filter((s) => s.project === state.sessionsFilter);
+    }
     const t = document.createElement("div");
     t.className = "table";
     t.innerHTML = '<div class="trow head"><span>Session</span><span>Model</span><span>Turns</span><span>Chars</span><span>Last active</span></div>';
@@ -1622,6 +1640,10 @@
       r.innerHTML = '<span class="t"></span><span class="m mono"></span><span class="m mono"></span><span class="m mono"></span>' +
                     '<span class="w"><span class="when"></span><button class="del" title="Delete">\u2715</button></span>';
       r.children[0].textContent = s.title || "untitled";
+      if (s.project && projectById(s.project)) {
+        const pc = document.createElement("span"); pc.className = "src-chip"; pc.textContent = projectById(s.project).name;
+        r.children[0].appendChild(pc);
+      }
       if (s.source && s.source !== "app") {
         const chip = document.createElement("span"); chip.className = "src-chip";
         chip.textContent = s.source === "cli" ? "terminal" : s.source;
@@ -1640,28 +1662,7 @@
         if (s.id === state.session) newChat();
         renderSessions();
       };
-      r.onclick = async () => {
-        // the list is summaries; the messages come with the one session
-        let full = null;
-        try {
-          const res = await fetch("/api/sessions?id=" + encodeURIComponent(s.id));
-          if (res.ok) full = await res.json();
-        } catch (e) {}
-        if (!full) { alert("This session could not be opened: the server did not return it."); renderSessions(); return; }
-        state.session = s.id;
-        state.messages = (full.messages || []).map((m) => ({ ...m }));
-        state.ctxUsed = null;
-        state.calib = null;
-        setActiveSkills(full.activeSkills || []);
-        if (full.model && state.models.includes(full.model)) {
-          state.model = full.model;
-          $("model-select").value = full.model;
-          servingLine();
-        }
-        go("playground");
-        renderMessages();
-        attachRunningTurn();
-      };
+      r.onclick = async () => { if (!(await openSession(s.id))) renderSessions(); };
       t.appendChild(r);
     }
     box.appendChild(t);
@@ -1686,7 +1687,23 @@
     es.addEventListener("reset", () => { for (const t of topics) fire(t, { type: "reset" }); });
   }
   onLive("jobs", () => { if (state.screen === "jobs") renderJobs(true); });
-  onLive("sessions", () => { if (state.screen === "sessions") renderSessions(); });
+  onLive("sessions", (e) => {
+    if (state.screen === "sessions") renderSessions();
+    // the chat open here grew somewhere else (bb in a terminal, another tab):
+    // show it now, before a turn from here saves over what was added there
+    const d = e.data || {};
+    if (e.type === "updated" && d.id && d.id === state.session && !state.streaming && d.turns !== state.messages.length) reloadOpenChat();
+  });
+  async function reloadOpenChat() {
+    const sid = state.session;
+    let full = null;
+    try { const res = await fetch("/api/sessions?id=" + encodeURIComponent(sid)); if (res.ok) full = await res.json(); } catch (e) {}
+    if (!full || sid !== state.session || state.streaming) return;
+    state.messages = (full.messages || []).map((m) => ({ ...m }));
+    state.ctxUsed = null;
+    state.calib = null;
+    renderMessages();
+  }
   onLive("usage", () => { if (state.screen === "usage") renderUsage(); });
   onLive("models", () => loadModels());          // an engine started or stopped somewhere
   onLive("approvals", () => renderApprovals());
@@ -2859,6 +2876,184 @@
     }
   }
 
+  /* ---------------- projects ---------------- */
+  // A project keeps related work together: a folder (where bb works, and where
+  // a chat opened in a terminal starts), instructions every chat in it follows
+  // and a default profile. The open chat's project shows in the Playground.
+  state.projects = [];
+  try { state.project = localStorage.getItem("bb.project") || ""; } catch (e) { state.project = ""; }
+  const projectById = (id) => (state.projects || []).find((p) => p.id === id) || null;
+  async function loadProjects() {
+    try { state.projects = ((await (await fetch("/api/projects")).json()).projects) || []; } catch (e) { state.projects = []; }
+    if (state.project && !projectById(state.project)) setProject("");
+    syncProjectSelect();
+    return state.projects;
+  }
+  function syncProjectSelect() {
+    const sel = $("project-select"); if (!sel) return;
+    sel.textContent = "";
+    const o0 = document.createElement("option"); o0.value = ""; o0.textContent = "No project"; sel.appendChild(o0);
+    for (const p of state.projects) { const o = document.createElement("option"); o.value = p.id; o.textContent = p.name; sel.appendChild(o); }
+    sel.value = state.project || "";
+    sel.hidden = !state.projects.length;
+  }
+  function setProject(id) {
+    state.project = id || "";
+    try { localStorage.setItem("bb.project", state.project); } catch (e) {}
+    syncProjectSelect();
+  }
+  function projectSystem() {
+    const p = projectById(state.project);
+    return p && (p.instructions || "").trim() ? "# Project: " + p.name + "\n\n" + p.instructions.trim() : "";
+  }
+  async function openTerminal(opts, note) {
+    let r = {};
+    try {
+      const resp = await fetch("/api/terminal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(opts) });
+      r = await resp.json();
+      if (!resp.ok || r.error) throw new Error(r.error || ("HTTP " + resp.status));
+    } catch (e) { alert("Could not open a terminal: " + e.message); return; }
+    if (r.opened) { if (note) note.textContent = "opened in your terminal"; return; }
+    // a server reached from a browser cannot open a window here: the command, to run where it runs
+    const body = $("help-body"); body.textContent = "";
+    const h = document.createElement("h2"); h.textContent = "Continue in a terminal"; h.style.cssText = "font-size:15px;margin:0 0 6px"; body.appendChild(h);
+    body.appendChild(helpDom("This ByteBunker runs on another computer, so it cannot open a window on this one. On the computer it runs on, run:\n\n```\n" + r.command +
+      "\n```\n\nbb picks up this chat, in the project's folder, with the project's instructions and your tools there. Whatever it does shows here as it happens."));
+    showHelp();
+  }
+  async function openSession(sid) {
+    // the list is summaries; the messages come with the one session
+    let full = null;
+    try { const res = await fetch("/api/sessions?id=" + encodeURIComponent(sid)); if (res.ok) full = await res.json(); } catch (e) {}
+    if (!full) { alert("This session could not be opened: the server did not return it."); return false; }
+    state.session = sid;
+    state.messages = (full.messages || []).map((m) => ({ ...m }));
+    state.ctxUsed = null;
+    state.calib = null;
+    setActiveSkills(full.activeSkills || []);
+    if (full.model && state.models.includes(full.model)) { state.model = full.model; $("model-select").value = full.model; servingLine(); }
+    setProject(full.project && projectById(full.project) ? full.project : "");
+    go("playground");
+    renderMessages();
+    attachRunningTurn();
+    return true;
+  }
+  async function renderProjects() {
+    await loadProjects();
+    if (!state.profiles || !Object.keys(state.profiles).length) {
+      try { state.profiles = (await (await fetch("/api/profiles")).json()).profiles || {}; } catch (e) {}
+    }
+    const box = $("projects-box"); box.textContent = "";
+    const n = state.projects.length;
+    $("projects-sub").textContent = n ? n + " project" + (n === 1 ? "" : "s") + " · each with its chats, its folder and its instructions" : "related work in one place: its chats, its folder, its instructions";
+    const formHost = document.createElement("div"); box.appendChild(formHost);
+    $("new-project").onclick = () => projectForm(formHost, null);
+    if (!n) {
+      const e = document.createElement("div"); e.className = "empty-state";
+      e.innerHTML = "<b>No projects yet</b><span>A project keeps related chats together, with a folder bb works in and instructions every chat in it follows. Run bb in its folder and it joins the project.</span>";
+      box.appendChild(e);
+      return;
+    }
+    for (const p of state.projects) box.appendChild(projectCard(p, formHost));
+  }
+  function projectCard(p, formHost) {
+    const card = document.createElement("div"); card.className = "card"; card.style.gap = "8px";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>';
+    head.querySelector("b").textContent = p.name + (p.id === state.project ? "  ·  current" : "");
+    head.querySelector(".src").textContent = [p.chats + " chat" + (p.chats === 1 ? "" : "s"), p.profile ? "profile " + p.profile : "",
+      p.updated ? relTime(p.updated) : ""].filter(Boolean).join("  ·  ");
+    card.appendChild(head);
+    const where = document.createElement("div"); where.className = "mono"; where.style.cssText = "font-size:12px;color:var(--muted);word-break:break-all";
+    where.textContent = p.folder ? "folder  " + p.folder : "no folder: bb joins it with -P \u201c" + p.name + "\u201d";
+    card.appendChild(where);
+    if ((p.instructions || "").trim()) {
+      const d = document.createElement("div"); d.className = "skill-desc";
+      d.textContent = p.instructions.trim().slice(0, 240) + (p.instructions.trim().length > 240 ? "…" : "");
+      card.appendChild(d);
+    }
+    const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center";
+    const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); return b; };
+    const note = document.createElement("span"); note.className = "hint";
+    const list = document.createElement("div"); list.hidden = true; list.style.cssText = "display:flex;flex-direction:column;gap:4px;align-items:flex-start";
+    mk("New chat", "solid-btn", () => { setProject(p.id); newChat(); });
+    mk("Open in terminal", "ghost-btn", () => openTerminal({ project: p.id }, note));
+    mk("Chats", "ghost-btn", async () => { list.hidden = !list.hidden; if (!list.hidden) await fillProjectChats(p, list); });
+    mk("Edit", "ghost-btn", () => projectForm(formHost, p));
+    mk("Delete", "rate-btn bad", async () => {
+      if (!confirm("Delete the project “" + p.name + "”? Its chats stay, without a project, and its folder is not touched.")) return;
+      await fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete", id: p.id }) }).catch(() => {});
+      if (state.project === p.id) setProject("");
+      renderProjects();
+    });
+    acts.appendChild(note);
+    card.appendChild(acts); card.appendChild(list);
+    if ((p.workflows || []).length) { const w = document.createElement("div"); w.className = "hint"; w.textContent = "workflows: " + p.workflows.join(", "); card.appendChild(w); }
+    return card;
+  }
+  async function fillProjectChats(p, list) {
+    list.textContent = "loading…";
+    let items = [];
+    try { items = await (await fetch("/api/sessions?project=" + encodeURIComponent(p.id))).json(); } catch (e) {}
+    list.textContent = "";
+    if (!items.length) {
+      const e = document.createElement("div"); e.className = "hint";
+      e.textContent = "No chats yet. New chat starts one, and so does bb in " + (p.folder || "the project's folder") + ".";
+      list.appendChild(e);
+      return;
+    }
+    for (const s of items) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "linky"; b.style.textAlign = "left";
+      b.textContent = (s.title || "untitled") + "  ·  " + relTime(s.updated || 0) + (s.source === "cli" ? "  ·  terminal" : "");
+      b.onclick = () => openSession(s.id);
+      list.appendChild(b);
+    }
+  }
+  function projectForm(host, p) {
+    p = p || {};
+    host.textContent = "";
+    const card = document.createElement("div"); card.className = "card"; card.style.gap = "8px";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono">bb joins it in its folder; every chat in it follows its instructions</span></div>';
+    head.querySelector("b").textContent = p.id ? "Edit " + p.name : "New project";
+    card.appendChild(head);
+    const nm = inputEl("a name: billing service"); nm.value = p.name || "";
+    const folder = inputEl("its folder: ~/code/billing (made when it is not there)"); folder.value = p.folder || "";
+    const frow = document.createElement("div"); frow.style.cssText = "display:flex;gap:8px;align-items:center;width:100%"; frow.appendChild(folder);
+    const api = window.pywebview && window.pywebview.api;
+    if (api && api.pick_folder) {
+      const pick = document.createElement("button"); pick.type = "button"; pick.className = "ghost-btn"; pick.textContent = "Choose…";
+      pick.onclick = async () => { const f = await api.pick_folder(folder.value || "~"); if (f) folder.value = f; };
+      frow.appendChild(pick);
+    }
+    const instr = textareaEl("What every chat in this project should know: the codebase, its conventions, what to avoid.", 6); instr.value = p.instructions || "";
+    const prof = document.createElement("select"); prof.className = "text-input";
+    const o0 = document.createElement("option"); o0.value = ""; o0.textContent = "(the default profile)"; prof.appendChild(o0);
+    for (const k of Object.keys(state.profiles || {})) { const o = document.createElement("option"); o.value = k; o.textContent = k; prof.appendChild(o); }
+    prof.value = p.profile || "";
+    [formRow("name", nm), formRow("folder", frow), formRow("instructions", instr), formRow("profile", prof)].forEach((e) => card.appendChild(e));
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = p.id ? "Save changes" : "Create project";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "ghost-btn"; cancel.textContent = "Cancel";
+    const note = document.createElement("span"); note.className = "hint";
+    row.appendChild(save); row.appendChild(cancel); row.appendChild(note); card.appendChild(row);
+    host.appendChild(card);
+    cancel.onclick = () => { host.textContent = ""; };
+    save.onclick = async () => {
+      save.disabled = true; note.textContent = "saving…";
+      try {
+        const r = await fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "save", project: { id: p.id, name: nm.value.trim(), folder: folder.value.trim(), instructions: instr.value, profile: prof.value } }) });
+        const d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+        if (!p.id) setProject(d.id);
+        host.textContent = "";
+        renderProjects();
+      } catch (e) { note.textContent = e.message; save.disabled = false; }
+    };
+    nm.focus();
+  }
+
   /* ---------------- workflows ---------------- */
   let wfSelected = null, wfDetail = "run";
   async function wfPost(payload) {
@@ -2885,7 +3080,10 @@
     prof.value = w.profile || "";
     const prompt = textareaEl("Review this diff for bugs and risky changes:\n\n{{diff}}", 6); prompt.value = w.prompt || "";
     const folder = inputEl("a folder bb works in (optional): ~/code/app"); folder.value = w.folder || "";
-    [formRow("name", nm), formRow("description", desc), formRow("type", kind), formRow("profile", prof), formRow("prompt ({{name}} marks a blank)", prompt), formRow("folder", folder)].forEach((e) => form.appendChild(e));
+    const proj = document.createElement("select"); proj.className = "text-input";
+    for (const [v, l] of [["", "(no project)"]].concat((state.projects || []).map((p) => [p.id, p.name]))) { const o = document.createElement("option"); o.value = v; o.textContent = l; proj.appendChild(o); }
+    proj.value = w.project || "";
+    [formRow("name", nm), formRow("description", desc), formRow("type", kind), formRow("profile", prof), formRow("prompt ({{name}} marks a blank)", prompt), formRow("folder", folder), formRow("project", proj)].forEach((e) => form.appendChild(e));
     const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
     const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = name ? "Save changes" : "Create workflow";
     const note = document.createElement("span"); note.className = "hint";
@@ -2895,7 +3093,7 @@
       save.disabled = true; note.textContent = "saving…";
       const params = (w.params || []).filter((p) => p.default || p.help);
       try {
-        await wfPost({ action: "save", name: nm.value.trim(), workflow: { description: desc.value, kind: kind.value, profile: prof.value, prompt: prompt.value, folder: folder.value, params } });
+        await wfPost({ action: "save", name: nm.value.trim(), workflow: { description: desc.value, kind: kind.value, profile: prof.value, prompt: prompt.value, folder: folder.value, project: proj.value, params } });
         wfSelected = nm.value.trim(); wfDetail = "run"; renderWorkflows();
       } catch (e) { note.textContent = e.message; save.disabled = false; }
     };
@@ -4884,6 +5082,20 @@
     renderApprovals();
     addHelpButtons();
     updateNotices();
+    loadProjects();
+    onLive("config", () => loadProjects());
+    $("project-select").onchange = async () => {
+      const id = $("project-select").value;
+      if (state.messages.length && state.session) {
+        // a chat belongs to one project: move this one there, or start a new one in it
+        const name = id ? (projectById(id) || {}).name : "no project";
+        if (confirm("Move this chat to " + (id ? "\u201c" + name + "\u201d" : name) + "?\n\nCancel starts a new chat there instead.")) {
+          await fetch("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "set_project", id: state.session, project: id || null }) }).catch(() => {});
+          setProject(id);
+        } else { setProject(id); newChat(); }
+      } else setProject(id);
+    };
+    $("terminal-btn").onclick = () => openTerminal({ session: state.messages.length ? state.session : null, project: state.project || null });
     const deep = location.hash.slice(1);
     if (deep && screens.includes(deep) && deep !== state.screen) go(deep);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);

@@ -146,6 +146,17 @@ class Bridge:
     def version(self):
         return VERSION
 
+    def pick_folder(self, start=None):
+        """A folder chosen in the system's own dialog, or None."""
+        import webview
+        kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None) or getattr(webview, "FOLDER_DIALOG", None)
+        w = webview.windows[0] if webview.windows else None
+        if w is None or kind is None:
+            return None
+        start = os.path.expanduser(str(start or "~"))
+        res = w.create_file_dialog(kind, directory=start if os.path.isdir(start) else os.path.expanduser("~"))
+        return res[0] if res else None
+
     def quit_for_update(self):
         """Close the window: the update helper is waiting for this app to end."""
         import webview

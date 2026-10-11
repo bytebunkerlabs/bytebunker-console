@@ -35,14 +35,20 @@ If another program already owns `bb`, only `bytebunker` is written.
 ```
 bb                                  chat here; /help for the slash commands
 bb "what does this error mean?"     one answer
+bb -P Billing                       chat in a project
 git diff | bb "review this"         piped input is attached
 bb ask -p Fast -e off "…"           a profile, an effort level
 bb ask --json "…"                   for scripts
 bb run review -p file=app.py        a workflow
 bb sessions ls                      recent sessions, the app's and bb's
+bb projects                         projects; * marks the one this folder is in
 bb agents "goal"                    give the agents a goal and follow it
 bb doctor                           what is reachable, and what to do if not
 ```
+
+## Projects
+
+Run bb inside a [project's](help:projects) folder and it joins the project: its chats are kept with the project's, and they follow the project's instructions and profile. `-P name` picks a project from anywhere. In the app, **Open in terminal** starts bb in a project's folder, or continues the chat open in the Playground.
 
 ## Tools in your folder
 

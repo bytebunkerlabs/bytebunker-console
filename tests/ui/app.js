@@ -109,7 +109,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("help: a guide renders with code to copy", cli.includes("Install it") && await page.locator("#help-body .code .copy-btn").count() >= 2, cli.slice(0, 120));
   await page.click("#help-home");
   await sleep(800);
-  await page.locator("#help-body .help-list button", { hasText: "Workflows" }).first().click();
+  await page.locator("#help-body .help-list button", { hasText: /^Workflows/ }).first().click();   // the title, not a summary that mentions it
   await sleep(800);
   await page.locator("#help-body a", { hasText: "Profiles" }).first().click();
   await sleep(800);

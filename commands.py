@@ -13,9 +13,9 @@ route, so the faces cannot drift apart.
 
 COMMANDS = [
     # chat
-    {"cli": "ask", "slash": None, "args": "TEXT [-m MODEL] [-e EFFORT] [-p PROFILE] [--json]",
+    {"cli": "ask", "slash": None, "args": "TEXT [-m MODEL] [-e EFFORT] [-p PROFILE] [-P PROJECT] [--json]",
      "route": "POST /api/sessions/<id>/turns", "help": "one question, answered here; piped input is attached"},
-    {"cli": "chat", "slash": None, "args": "[SESSION]", "route": "POST /api/sessions/<id>/turns",
+    {"cli": "chat", "slash": None, "args": "[SESSION] [-P PROJECT]", "route": "POST /api/sessions/<id>/turns",
      "help": "chat in this terminal (also: bb with no arguments)"},
     {"cli": None, "slash": "/model", "args": "[MODEL]", "route": "GET /api/models",
      "help": "show the model, or switch to another"},
@@ -59,6 +59,8 @@ COMMANDS = [
     {"cli": "workflows", "slash": "/workflows", "args": "", "route": "GET /api/workflows",
      "help": "the workflows, with what each one asks for"},
     {"cli": "profiles", "slash": None, "args": "", "route": "GET /api/profiles", "help": "the profiles"},
+    {"cli": "projects", "slash": None, "args": "", "route": "GET /api/projects",
+     "help": "the projects; bb joins the one whose folder it runs in (or -P NAME)"},
     # work that runs on its own
     {"cli": "agents", "slash": None, "args": "GOAL [--detach]", "route": "POST /api/agents",
      "help": "give the agents a goal and follow it"},
