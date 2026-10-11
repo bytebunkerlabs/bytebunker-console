@@ -26,7 +26,7 @@ datas = [
 # the console is imported at run time by the launcher, and the built-in MCP
 # servers by --mcp: name them so the analysis bundles them and their imports
 hidden = ["server", "version", "instance", "paths", "commands", "bb", "approvals", "workspace", "events", "runs", "sessions", "upstream", "runner", "model_facts",
-          "gateways", "monitors", "jobs", "agents", "recipes", "skills", "traces",
+          "gateways", "monitors", "racks", "jobs", "agents", "recipes", "skills", "traces",
           "mcp", "mcp_catalog", "mcp_jobs", "mcp_terminal", "updater", "changelog"]
 
 a = Analysis(
