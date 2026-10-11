@@ -42,10 +42,10 @@ class Changelog(unittest.TestCase):
 
     def test_release_notes_for_ci(self):
         script = os.path.join(ROOT, "desktop", "release_notes.py")
-        r = subprocess.run([sys.executable, script, VERSION], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, script, VERSION], capture_output=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), changelog.section(VERSION)["body"])
-        r = subprocess.run([sys.executable, script, "99.0.0"], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, script, "99.0.0"], capture_output=True, encoding="utf-8")
         self.assertEqual(r.returncode, 1)
         self.assertIn("no section for 99.0.0", r.stderr)
 

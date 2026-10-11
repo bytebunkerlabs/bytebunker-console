@@ -231,24 +231,30 @@ if ($Relaunch) { Start-Process -FilePath $Relaunch }
 '''
 
 
-def start_swap(pid, current, new, backup, log, relaunch, workdir):
-    """Start the helper, detached from this process, which it outlives."""
+def swap_command(pid, current, new, backup, log, relaunch, workdir):
+    """The helper's script, written into workdir, and the command that runs it."""
     os.makedirs(workdir, exist_ok=True)
     if sys.platform == "win32":
         script = os.path.join(workdir, "swap.ps1")
         with open(script, "w", encoding="utf-8") as f:
             f.write(SWAP_PS1)
-        flags = 0x00000008 | 0x00000200 | 0x08000000   # DETACHED_PROCESS, NEW_PROCESS_GROUP, NO_WINDOW
-        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
                "-AppPid", str(pid), "-Current", current, "-New", new, "-Backup", backup, "-Log", log]
-        if relaunch:
-            cmd += ["-Relaunch", relaunch[0]]
-        kw = {"creationflags": flags}
+        return cmd + (["-Relaunch", relaunch[0]] if relaunch else [])
+    script = os.path.join(workdir, "swap.sh")
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(SWAP_SH)
+    return ["/bin/sh", script, str(pid), current, new, backup, log] + list(relaunch or [])
+
+
+def start_swap(pid, current, new, backup, log, relaunch, workdir):
+    """Start the helper, which outlives this process."""
+    cmd = swap_command(pid, current, new, backup, log, relaunch, workdir)
+    if sys.platform == "win32":
+        # no window, its own process group; a child outlives its parent on Windows
+        # anyway (DETACHED_PROCESS would leave PowerShell without the console it wants)
+        kw = {"creationflags": 0x08000000 | 0x00000200}
     else:
-        script = os.path.join(workdir, "swap.sh")
-        with open(script, "w", encoding="utf-8") as f:
-            f.write(SWAP_SH)
-        cmd = ["/bin/sh", script, str(pid), current, new, backup, log] + list(relaunch or [])
         kw = {"start_new_session": True}
     # what the helper itself says (a shell error, say) is kept for a failure banner
     with open(os.path.join(workdir, "swap.out"), "ab") as out:

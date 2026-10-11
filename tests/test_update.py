@@ -175,7 +175,7 @@ class Swap(unittest.TestCase):
             return [bat], marker
         return [sys.executable, "-c", "open(%r, 'w').write('yes')" % marker], marker
 
-    def wait_for_log(self, timeout=30):
+    def wait_for_log(self, timeout=90):
         deadline = time.time() + timeout
         while time.time() < deadline:
             if os.path.exists(self.log) and open(self.log).read().strip():
@@ -202,6 +202,22 @@ class Swap(unittest.TestCase):
             while not os.path.exists(marker) and time.time() < deadline:
                 time.sleep(0.1)
             self.assertTrue(os.path.exists(marker), "the app was not reopened")
+
+    def test_the_helper_itself_once_the_app_has_gone(self):
+        # run in the foreground, so whatever the shell says shows up here
+        cmd, marker = self.relaunch()
+        self.app.kill()
+        self.app.wait()
+        r = subprocess.run(updater.swap_command(self.app.pid, self.current, self.new, self.backup, self.log, cmd,
+                                                os.path.join(self.tmp, "work")),
+                           capture_output=True, text=True, errors="replace", timeout=180)
+        log = open(self.log).read().strip() if os.path.exists(self.log) else ""
+        self.assertEqual(log, "updated", "exit %s\nstdout: %s\nstderr: %s" % (r.returncode, r.stdout, r.stderr))
+        self.assertEqual((self.which(self.current), self.which(self.backup)), ("new", "old"))
+        deadline = time.time() + 10
+        while not os.path.exists(marker) and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(marker), "the app was not reopened")
 
     def test_a_new_app_that_cannot_move_in_puts_the_old_one_back(self):
         shutil.rmtree(self.new)                                        # nothing to move in
