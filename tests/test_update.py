@@ -168,8 +168,11 @@ class Swap(unittest.TestCase):
 
     def relaunch(self):
         marker = os.path.join(self.tmp, "relaunched")
-        if sys.platform == "win32":
-            return [sys.executable], None          # the helper starts it; there is no file to see
+        if sys.platform == "win32":                # the helper starts one program: a script that leaves a mark
+            bat = os.path.join(self.tmp, "relaunch.bat")
+            with open(bat, "w") as f:
+                f.write('@echo yes> "%s"\r\n' % marker)
+            return [bat], marker
         return [sys.executable, "-c", "open(%r, 'w').write('yes')" % marker], marker
 
     def wait_for_log(self, timeout=30):
@@ -178,7 +181,8 @@ class Swap(unittest.TestCase):
             if os.path.exists(self.log) and open(self.log).read().strip():
                 return open(self.log).read().strip()
             time.sleep(0.2)
-        self.fail("the helper wrote nothing")
+        said = os.path.join(self.tmp, "work", "swap.out")
+        self.fail("the helper wrote nothing; it said: %s" % (open(said, errors="replace").read() if os.path.exists(said) else "-"))
 
     def which(self, d):
         with open(os.path.join(d, "which")) as f:

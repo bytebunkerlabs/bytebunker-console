@@ -17,7 +17,8 @@ def main(argv):
     if not s:
         sys.stderr.write("CHANGELOG.md has no section for %s\n" % argv[0])
         return 1
-    print(s["body"])
+    # UTF-8 whatever the console's code page (Windows' cp1252 has no "→")
+    sys.stdout.buffer.write((s["body"] + "\n").encode("utf-8"))
     return 0
 
 

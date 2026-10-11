@@ -204,11 +204,12 @@ fi
 SWAP_PS1 = r'''param([int]$AppPid, [string]$Current, [string]$New, [string]$Backup, [string]$Log, [string]$Relaunch)
 # ByteBunker's updater: wait for the app to quit, move it aside, move the new
 # one in, then start whichever is in place.
-$deadline = (Get-Date).AddSeconds(120)
-while (Get-Process -Id $AppPid -ErrorAction SilentlyContinue) {
-  if ((Get-Date) -gt $deadline) { Add-Content -Path $Log -Value "the app did not quit: nothing was changed"; exit 1 }
-  Start-Sleep -Milliseconds 200
-}
+# wait on the process itself: an exited process whose handle someone still
+# holds can linger in the process list, and polling it would wait it out
+try {
+  $proc = [System.Diagnostics.Process]::GetProcessById($AppPid)
+  if (-not $proc.WaitForExit(120000)) { Add-Content -Path $Log -Value "the app did not quit: nothing was changed"; exit 1 }
+} catch { }                                    # gone already
 $done = $false
 for ($i = 0; $i -lt 30 -and -not $done; $i++) {
   try {
@@ -239,16 +240,19 @@ def start_swap(pid, current, new, backup, log, relaunch, workdir):
             f.write(SWAP_PS1)
         flags = 0x00000008 | 0x00000200 | 0x08000000   # DETACHED_PROCESS, NEW_PROCESS_GROUP, NO_WINDOW
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
-               "-AppPid", str(pid), "-Current", current, "-New", new, "-Backup", backup, "-Log", log,
-               "-Relaunch", relaunch[0] if relaunch else ""]
-        return subprocess.Popen(cmd, creationflags=flags, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
-    script = os.path.join(workdir, "swap.sh")
-    with open(script, "w", encoding="utf-8") as f:
-        f.write(SWAP_SH)
-    return subprocess.Popen(["/bin/sh", script, str(pid), current, new, backup, log] + list(relaunch or []),
-                            start_new_session=True, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+               "-AppPid", str(pid), "-Current", current, "-New", new, "-Backup", backup, "-Log", log]
+        if relaunch:
+            cmd += ["-Relaunch", relaunch[0]]
+        kw = {"creationflags": flags}
+    else:
+        script = os.path.join(workdir, "swap.sh")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(SWAP_SH)
+        cmd = ["/bin/sh", script, str(pid), current, new, backup, log] + list(relaunch or [])
+        kw = {"start_new_session": True}
+    # what the helper itself says (a shell error, say) is kept for a failure banner
+    with open(os.path.join(workdir, "swap.out"), "ab") as out:
+        return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out, close_fds=True, **kw)
 
 
 def relaunch_command(location):
