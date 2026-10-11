@@ -25,6 +25,17 @@ h, r, eport, sport = sys.argv[1:5]
 src = open(os.path.join(r, "tests", "test_runs_api.py")).read()
 harness = src.split("FAKE_HARNESS = r'''", 1)[1].split("'''", 1)[0]
 open(os.path.join(h, "fake_harness.py"), "w").write(harness)
+# Add a rack: test_racks.py's stand-in ssh and rack; its engine and monitor on dead ports,
+# so pairing finds neither and this suite's own gateway is left as it is
+src = open(os.path.join(r, "tests", "test_racks.py")).read()
+fake = os.path.join(h, "rackfake")
+os.makedirs(os.path.join(fake, "bin"))
+os.makedirs(os.path.join(fake, "home"))
+for name, var in (("ssh", "SSH"), ("rack", "RACK")):
+    body = src.split(var + " = r'''", 1)[1].split("'''", 1)[0]
+    path = os.path.join(fake, "bin", name)
+    open(path, "w").write(body.replace("__F__", fake).replace("__EPORT__", "9").replace("__MPORT__", "9"))
+    os.chmod(path, 0o755)
 json.dump({"gateways": [{"name": "fake", "url": "http://127.0.0.1:%s/v1" % eport, "key": "", "enabled": True}],
            "monitors": [], "port": int(sport),
            "agents": {"enabled": True, "ssh": "", "dir": h, "python": sys.executable, "script": "fake_harness.py"},
@@ -32,7 +43,7 @@ json.dump({"gateways": [{"name": "fake", "url": "http://127.0.0.1:%s/v1" % eport
            "model_capabilities": {"fake-model": {"effort": ["low", "medium", "high"]}}},
           open(os.path.join(h, "config.json"), "w"))
 PYEOF
-BYTEBUNKER_DATA="$H/data" BYTEBUNKER_CONFIG="$H/config.json" "$PY" -c "import sys; sys.path.insert(0, '$R'); import server; srv = server.serve('127.0.0.1', $SERVER_PORT); srv.serve_forever()" > "$H/server.log" 2>&1 &
+PATH="$H/rackfake/bin:$PATH" BYTEBUNKER_DATA="$H/data" BYTEBUNKER_CONFIG="$H/config.json" "$PY" -c "import sys; sys.path.insert(0, '$R'); import server; srv = server.serve('127.0.0.1', $SERVER_PORT); srv.serve_forever()" > "$H/server.log" 2>&1 &
 SPID=$!
 for i in $(seq 1 100); do curl -s -o /dev/null "$BB_UI_BASE/api/hello" && break; sleep 0.1; done
 for i in $(seq 1 100); do curl -s "$BB_UI_BASE/api/tools" | grep -q fake__echo && break; sleep 0.1; done

@@ -1011,6 +1011,105 @@ def cmd_projects(a, out):
     return EXIT_OK
 
 
+def rack_frames(srv, path, body, out, progress=False):
+    """A rack run streamed in this request, its lines as they come (on
+    stderr when they are progress, not output). Returns (exit code, every
+    object seen)."""
+    code, seen, rid = EXIT_FAILED, [], None
+    try:
+        for f in srv.stream("POST", path, body):
+            try:
+                o = json.loads(f["data"])
+            except ValueError:
+                continue
+            seen.append(o)
+            if o.get("run"):
+                rid = o["run"]
+            elif o.get("line") is not None:
+                out.err(out.dim(o["line"])) if progress else out.say(o["line"])
+            elif o.get("error"):
+                out.err(out.bad("error: " + o["error"]))
+            elif o.get("phase") == "start":
+                out.err(out.dim("%s on %s" % (o.get("cmd"), o.get("rack") or o.get("host"))))
+            elif o.get("phase") == "done":
+                code = EXIT_OK if o.get("exit") == 0 else EXIT_FAILED
+                break
+    except KeyboardInterrupt:
+        if rid and body.get("action") in ("up", "down"):
+            out.err(out.warn("\nit goes on on the server: bb runs watch %s (bb runs stop %s to stop it)" % (rid, rid)))
+        return EXIT_CANCELLED, seen
+    return code, seen
+
+
+def cmd_racks(a, out):
+    srv = connect(out=out)
+    rs = srv.get("/api/racks").get("racks") or []
+    if not rs:
+        out.say("no rack yet: bb pair you@host (or Add a rack, in the app's Recipes)")
+        return EXIT_OK
+    rows = [[r["name"], r["ssh"], "this app's key" if r["paired"] else "your ssh, " + (r.get("dir") or "~/dgx/dgx-spark-serve"),
+             r.get("platform") or "", r.get("gateway") or "", r.get("monitor") or ""] for r in rs]
+    out.say(table(rows, ["rack", "ssh", "reached with", "platform", "gateway", "monitor"]))
+    return EXIT_OK
+
+
+def cmd_pair(a, out):
+    """bb pair user@host: Add a rack, from here. The machine is asked once
+    with your ssh; dgx-serve there adds this app's key (rack only), and the
+    engine and the monitor it reports are added when they answer from here."""
+    srv = connect(out=out)
+    code, seen = rack_frames(srv, "/api/racks", {"action": "pair", "target": a.target}, out, progress=True)
+    need = next((o["needs_key"] for o in seen if o.get("needs_key")), None)
+    if need:
+        out.err(out.warn("your ssh to %s wants a password, so ByteBunker cannot sign in by itself. On %s, run this "
+                         "once (it adds this app's key, allowed to run rack and nothing else), then bb pair %s again:"
+                         % (a.target, a.target, a.target)))
+        out.say(need["command"])
+        return EXIT_FAILED
+    found = next((o["found"] for o in seen if o.get("found")), None)
+    if not found:
+        return code if code != EXIT_OK else EXIT_FAILED
+    e, m, s = found["engine"], found["monitor"], found["engine"].get("serving") or {}
+    out.err("%s · %s · dgx-serve %s" % (found["name"], found["platform"], found["rack_version"]))
+    out.err("  engine   " + (e["url"] + ("  serving " + (s.get("recipe") or s.get("model") or "") if s else "  nothing serving yet")
+                             if e["url"] else "not reachable from here (tried %s)" % ", ".join(found.get("tried") or [])))
+    out.err("  monitor  " + (m["url"] or ("running, but not reachable from here" if m["running"]
+                                          else "not running (on the rack: rack monitor up)")))
+    r = srv.post("/api/racks", {"action": "save", "pairing": found["pairing"],
+                                "gateway": not a.no_gateway, "monitor": not a.no_monitor})["rack"]
+    added = [x for x in ("gateway " + r["gateway"] if r.get("gateway") else "",
+                         "monitor " + r["monitor"] if r.get("monitor") else "") if x]
+    out.say("paired %s%s" % (r["name"], (": " + ", ".join(added)) if added else ""))
+    return EXIT_OK
+
+
+def cmd_deploy(a, out):
+    """bb deploy ls|status|up|down|logs: what a rack serves, from here."""
+    srv = connect(out=out)
+    if a.action == "ls":
+        d = srv.get("/api/rack" + ("?rack=" + urllib.parse.quote(a.rack) if a.rack else ""))
+        if not d.get("ok"):
+            raise BBError(d.get("error") or "the rack did not answer")
+        rows = [[("* " if r["name"] == d.get("serving") else "  ") + r["name"], r.get("mode") or "", r.get("model") or "",
+                 ", ".join(r.get("platforms") or [])] for r in d.get("recipes") or []]
+        out.say(table(rows, ["recipe", "mode", "model", "platforms"]) if rows else "no recipes on " + d["name"])
+        out.err(out.dim("%s (%s): %s" % (d["name"], d["host"], "* serving now" if d.get("serving") else "nothing serving")))
+        return EXIT_OK
+    if a.action == "up" and not a.recipe:
+        raise BBError("bb deploy up RECIPE (bb deploy ls lists them)", EXIT_USAGE)
+    if a.action in ("up", "down") and not a.yes:
+        name = a.rack or ((srv.get("/api/racks").get("racks") or [{}])[0].get("name") or "the rack")
+        what = ("rack up %s on %s: whatever it serves now stops" % (a.recipe, name) if a.action == "up"
+                else "rack down on %s: serving stops on every node" % name)
+        if not can_prompt():
+            out.err(out.warn(what + ". Rerun with --yes to go ahead."))
+            return EXIT_APPROVAL
+        if not (ask_user(out, out.warn(what + ". Go ahead? [y/N] ")) or "").lower().startswith("y"):
+            return EXIT_CANCELLED
+    code, _ = rack_frames(srv, "/api/rack", {"action": a.action, "recipe": a.recipe or "", "rack": a.rack or None}, out)
+    return code
+
+
 def cmd_profiles(a, out):
     srv = connect(out=out)
     d = srv.get("/api/profiles")
@@ -1124,6 +1223,16 @@ def parser():
     w.add_argument("-P", "--project", help="a project by name")
     sub.add_parser("workflows")
     sub.add_parser("projects")
+    sub.add_parser("racks", help="the racks this app drives")
+    pr = sub.add_parser("pair", help="add a rack: pair with it over ssh")
+    pr.add_argument("target", help="user@host, or a host from ~/.ssh/config")
+    pr.add_argument("--no-gateway", action="store_true", help="do not add its engine as a gateway")
+    pr.add_argument("--no-monitor", action="store_true", help="do not add its monitor")
+    dp = sub.add_parser("deploy", help="what a rack serves: ls, status, up, down, logs")
+    dp.add_argument("action", choices=("ls", "status", "up", "down", "logs"), nargs="?", default="ls")
+    dp.add_argument("recipe", nargs="?")
+    dp.add_argument("-r", "--rack", help="which rack (default: the first)")
+    dp.add_argument("--yes", action="store_true", help="up and down without asking")
     sub.add_parser("profiles")
     sub.add_parser("doctor")
     sub.add_parser("serve")
@@ -1134,6 +1243,7 @@ def parser():
 HANDLERS = {"ask": cmd_ask, "chat": cmd_chat, "sessions": cmd_sessions, "runs": cmd_runs, "agents": cmd_agents,
             "jobs": cmd_jobs, "doctor": cmd_doctor, "serve": cmd_serve, "help": cmd_help, "run": cmd_run,
             "workflows": cmd_workflows, "profiles": cmd_profiles, "projects": cmd_projects,
+            "racks": cmd_racks, "pair": cmd_pair, "deploy": cmd_deploy,
             "models": cmd_list, "gateways": cmd_list, "monitors": cmd_list, "cluster": cmd_list,
             "usage": cmd_list, "skills": cmd_list, "mcp": cmd_list}
 

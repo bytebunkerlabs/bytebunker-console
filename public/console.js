@@ -1707,7 +1707,11 @@
   onLive("usage", () => { if (state.screen === "usage") renderUsage(); });
   onLive("models", () => loadModels());          // an engine started or stopped somewhere
   onLive("approvals", () => renderApprovals());
-  onLive("config", () => { if (state.screen === "workflows") renderWorkflows(true); });
+  onLive("config", (e) => {
+    if (state.screen === "workflows") renderWorkflows(true);
+    // a rack paired or removed elsewhere (bb pair, another tab); not while a form here is open
+    if (e.type === "racks" && state.screen === "recipes" && !$("add-rack-form")) renderRecipes();
+  });
   onLive("runs", (e) => {
     // a goal started elsewhere (another tab, a job, bb) shows up here
     if (state.screen === "agents" && !state.streaming && e.type === "started" && (e.data || {}).kind === "agents") attachAgentRun();
@@ -3387,27 +3391,78 @@
     }
   }
 
+  // POST that answers with data: frames (a run streamed to this tab): each object to onObj
+  async function postFrames(url, body, onObj) {
+    const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!resp.ok) throw new Error(upstreamText(await resp.text()));
+    const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n"); buf = parts.pop();
+      for (const ln of parts) {
+        if (!ln.startsWith("data:")) continue;
+        let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+        onObj(o);
+      }
+    }
+  }
+  try { state.rack = localStorage.getItem("bb.rack") || ""; } catch (e) { state.rack = ""; }
+  function setRack(name) {
+    state.rack = name || "";
+    try { localStorage.setItem("bb.rack", state.rack); } catch (e) {}
+  }
+
   async function rackCard() {
-    // the Sparks: driven by `rack` (dgx-spark-serve), never by a console-made docker command
+    // machines serving with dgx-serve: driven by `rack` over ssh, never by a console-made docker command
     let d = { ok: false };
-    try { d = await (await fetch("/api/rack")).json(); } catch (e) { d = { ok: false, error: e.message }; }
+    const want = state.rack || "";
+    try { d = await (await fetch("/api/rack" + (want ? "?rack=" + encodeURIComponent(want) : ""))).json(); } catch (e) { d = { ok: false, error: e.message }; }
+    if (want && Array.isArray(d.racks) && !d.racks.some((x) => x.name === want)) { setRack(""); return rackCard(); }
     const card = document.createElement("div");
     card.className = "card"; card.style.gap = "8px";
     const head = document.createElement("div"); head.className = "skill-head";
-    head.innerHTML = '<div class="skill-id"><b>DGX Spark cluster \u00b7 rack</b><span class="src mono"></span></div>';
-    head.querySelector(".src").textContent = d.enabled ? (d.host + ":" + d.dir + (d.serving ? "  \u00b7  serving " + d.serving : "")) : "not configured";
+    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>';
+    head.querySelector("b").textContent = (d.name || "Racks") + " · rack";
+    head.querySelector(".src").textContent = d.name ? (d.host + (d.dir ? ":" + d.dir : "") + (d.serving ? "  ·  serving " + d.serving : "")) : "none yet";
     card.appendChild(head);
+    const bar = document.createElement("div"); bar.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+    if ((d.racks || []).length > 1) {
+      const pick = document.createElement("select"); pick.className = "text-input"; pick.id = "rack-select";
+      for (const x of d.racks) { const o = document.createElement("option"); o.value = x.name; o.textContent = x.name + "  ·  " + x.ssh; pick.appendChild(o); }
+      pick.value = d.name || "";
+      pick.onchange = () => { setRack(pick.value); renderRecipes(); };
+      bar.appendChild(pick);
+    }
+    const add = document.createElement("button"); add.type = "button"; add.className = "ghost-btn"; add.id = "add-rack"; add.textContent = "Add a rack";
+    bar.appendChild(add);
+    let rm = null;
+    if (d.name) { rm = document.createElement("button"); rm.type = "button"; rm.className = "ghost-btn"; rm.textContent = "Remove"; bar.appendChild(rm); }
+    card.appendChild(bar);
+    const addHost = document.createElement("div"); card.appendChild(addHost);
+    add.onclick = () => addRackForm(addHost);
+    if (rm) rm.onclick = async () => {
+      if (!confirm("Remove the rack " + d.name + "? What it serves keeps running; this app stops driving it" + (d.paired ? " and takes its key back from " + d.host : "") + ".")) return;
+      const also = confirm("Also remove the gateway and the monitor that pairing added for " + d.name + "?");
+      try {
+        const r = await (await fetch("/api/racks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "remove", name: d.name, gateway: also, monitor: also }) })).json();
+        if (r.error) throw new Error(r.error);
+        if (r.note) alert(r.note);
+      } catch (e) { alert("Could not remove it: " + e.message); }
+      setRack(""); loadModels(); renderRecipes();
+    };
     const desc = document.createElement("div"); desc.className = "skill-desc";
-    desc.textContent = "The Sparks are served by rack: its recipes decide solo vs tensor-parallel and the gateway name, and `rack up` registers the model with litellm. Pick a recipe to read it, then Up. Down stops serving on both nodes.";
+    desc.textContent = "A rack is a machine serving models with dgx-serve (the head, for a cluster). Its recipes decide the engine and how many nodes; pick one to read it, then Up. Down stops serving on every node of the rack.";
     card.appendChild(desc);
     if (!d.ok) {
       const n = document.createElement("div"); n.className = "hint";
-      n.textContent = d.enabled === false ? "Set rack.ssh and rack.dir in config.json to drive the Sparks from here." : ("rack not reachable: " + (d.error || ""));
+      n.textContent = d.enabled === false ? "No rack yet. Add a rack pairs one over ssh: it finds the engine and the monitor, and drives rack with a key that can run rack and nothing else." : ("rack not reachable: " + (d.error || ""));
       card.appendChild(n); return card;
     }
     const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
     const sel = document.createElement("select"); sel.className = "text-input"; sel.style.minWidth = "220px";
-    for (const r of d.recipes || []) { const o = document.createElement("option"); o.value = r.name; o.textContent = r.name + "  \u00b7  " + r.mode + (r.model ? "  \u00b7  " + r.model : ""); if (d.serving && r.name === d.serving) { o.textContent += "  (serving now)"; o.selected = true; } sel.appendChild(o); }
+    for (const r of d.recipes || []) { const o = document.createElement("option"); o.value = r.name; o.textContent = r.name + "  ·  " + r.mode + (r.model ? "  ·  " + r.model : ""); if (d.serving && r.name === d.serving) { o.textContent += "  (serving now)"; o.selected = true; } sel.appendChild(o); }
     const show = document.createElement("button"); show.type = "button"; show.className = "ghost-btn"; show.textContent = "Read recipe";
     const up = document.createElement("button"); up.type = "button"; up.className = "solid-btn"; up.textContent = "rack up";
     const down = document.createElement("button"); down.type = "button"; down.className = "rate-btn bad"; down.textContent = "rack down";
@@ -3421,9 +3476,9 @@
     const lab = document.createElement("div"); lab.className = "glabel"; lab.textContent = "rack status (cached 15 s)";
     card.appendChild(lab); card.appendChild(pre);
     show.onclick = async () => {
-      note.textContent = "reading\u2026";
+      note.textContent = "reading…";
       try {
-        const x = await (await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "show", recipe: sel.value }) })).json();
+        const x = await (await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "show", recipe: sel.value, rack: d.name }) })).json();
         note.textContent = "";
         const pane = recipePane(x.file || ("recipes/" + sel.value + ".env"));
         preBlock(pane, "recipe", x.text || x.error || "");
@@ -3431,35 +3486,108 @@
     };
     const stream = async (action, recipe, confirmText) => {
       if (confirmText && !confirm(confirmText)) return;
-      const pane = recipePane("rack " + action + (recipe ? " " + recipe : ""));
+      const pane = recipePane("rack " + action + (recipe ? " " + recipe : "") + " · " + d.name);
       const out = preBlock(pane, "output", "");
       const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
-      note.textContent = "running\u2026";
+      note.textContent = "running…";
       try {
-        const resp = await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, recipe }) });
-        if (!resp.ok) { append("error: " + upstreamText(await resp.text())); note.textContent = ""; return; }
-        const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const parts = buf.split("\n"); buf = parts.pop();
-          for (const ln of parts) {
-            if (!ln.startsWith("data:")) continue;
-            let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
-            if (o.phase === "start") append("\u2014 " + o.cmd + " on " + o.host + " \u2014");
-            else if (o.phase === "done") { append("\u2014 finished: " + (o.killed ? o.killed : "exit " + o.exit) + " \u2014"); note.textContent = o.exit === 0 ? "done" : "exit " + o.exit; if (state.screen === "recipes") setTimeout(renderRecipes, 1500); }
-            else if (o.error) append("error: " + o.error);
-            else if (o.line != null) append(o.line);
-          }
-        }
+        await postFrames("/api/rack", { action, recipe, rack: d.name }, (o) => {
+          if (o.phase === "start") append("— " + o.cmd + " on " + o.host + " —");
+          else if (o.phase === "done") { append("— finished: " + (o.killed ? o.killed : "exit " + o.exit) + " —"); note.textContent = o.exit === 0 ? "done" : "exit " + o.exit; if (state.screen === "recipes") setTimeout(renderRecipes, 1500); }
+          else if (o.error) append("error: " + o.error);
+          else if (o.line != null) append(o.line);
+        });
       } catch (e) { append("error: " + e.message); note.textContent = ""; }
     };
-    up.onclick = () => stream("up", sel.value, "rack up " + sel.value + " \u2014 this stops whatever the Sparks serve now and launches this recipe. Continue?");
-    down.onclick = () => stream("down", "", "rack down \u2014 stop serving on both Sparks?");
+    up.onclick = () => stream("up", sel.value, "rack up " + sel.value + " on " + d.name + " — this stops whatever " + d.name + " serves now and starts this recipe. Continue?");
+    down.onclick = () => stream("down", "", "rack down — stop serving on every node of " + d.name + "?");
     st.onclick = () => stream("status", "");
     logs.onclick = () => stream("logs", "");
     return card;
+  }
+
+  // Add a rack: pair over ssh, show what was found, keep what you tick
+  function addRackForm(host) {
+    host.textContent = "";
+    const box = document.createElement("div"); box.className = "card"; box.style.gap = "8px"; box.id = "add-rack-form";
+    const h = document.createElement("div"); h.className = "skill-head";
+    h.innerHTML = '<div class="skill-id"><b>Add a rack</b><span class="src mono">the machine that serves (the head, for a cluster), as you reach it with ssh</span></div>';
+    box.appendChild(h);
+    const how = document.createElement("div"); how.className = "hint";
+    how.textContent = "ByteBunker asks it once with your own ssh. dgx-serve there adds this app's own key, allowed to run rack and nothing else, and says where its engine and monitor are.";
+    box.appendChild(how);
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+    const target = inputEl("you@host, or a host from ~/.ssh/config"); target.id = "rack-target"; target.style.minWidth = "260px";
+    const pair = document.createElement("button"); pair.type = "button"; pair.className = "solid-btn"; pair.textContent = "Pair"; pair.id = "rack-pair";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "ghost-btn"; cancel.textContent = "Cancel";
+    const note = document.createElement("span"); note.className = "hint";
+    [target, pair, cancel, note].forEach((e) => row.appendChild(e));
+    box.appendChild(row);
+    const log = document.createElement("pre"); log.className = "skill-body"; log.style.whiteSpace = "pre-wrap"; log.hidden = true;
+    const result = document.createElement("div"); result.style.cssText = "display:flex;flex-direction:column;gap:8px";
+    box.appendChild(log); box.appendChild(result);
+    host.appendChild(box);
+    cancel.onclick = () => { host.textContent = ""; };
+    const go = async () => {
+      const t = target.value.trim();
+      if (!t) { target.focus(); return; }
+      log.hidden = false; log.textContent = ""; result.textContent = ""; pair.disabled = true; note.textContent = "pairing…";
+      const say = (x) => { log.textContent += x + "\n"; };
+      try {
+        await postFrames("/api/racks", { action: "pair", target: t }, (o) => {
+          if (o.line != null) say(o.line);
+          else if (o.error) { say("error: " + o.error); note.textContent = ""; }
+          else if (o.needs_key) needsKey(result, o.needs_key, go);
+          else if (o.found) foundRack(result, o.found, host);
+          else if (o.phase === "done") note.textContent = o.exit === 0 ? "" : note.textContent;
+        });
+      } catch (e) { say("error: " + e.message); }
+      pair.disabled = false; if (note.textContent === "pairing…") note.textContent = "";
+    };
+    pair.onclick = go;
+    target.onkeydown = (e) => { if (e.key === "Enter") go(); };
+    target.focus();
+  }
+  function needsKey(box, need, again) {
+    box.textContent = "";
+    const t = document.createElement("div"); t.className = "skill-desc";
+    t.textContent = "Your ssh to " + need.target + " wants a password, so ByteBunker cannot sign in by itself. On " + need.target + ", run this once (it adds this app's key, allowed to run rack and nothing else), then pair again:";
+    box.appendChild(t);
+    box.appendChild(helpDom("```\n" + need.command + "\n```"));
+    const b = document.createElement("button"); b.type = "button"; b.className = "solid-btn"; b.textContent = "Pair again"; b.onclick = again;
+    box.appendChild(b);
+  }
+  function foundRack(box, f, host) {
+    box.textContent = "";
+    const t = document.createElement("div"); t.className = "skill-desc"; t.id = "rack-found";
+    const s = (f.engine || {}).serving;
+    t.textContent = f.name + " · " + (f.platform || "?") + " · dgx-serve " + (f.rack_version || "?") +
+      "\nengine: " + (f.engine.url ? f.engine.url + (s ? "  ·  serving " + (s.recipe || s.model) + (s.served_name ? " as " + s.served_name : "") : "  ·  nothing serving yet") : "not reachable from here (tried " + (f.tried || []).join(", ") + ")") +
+      "\nmonitor: " + (f.monitor.url ? f.monitor.url : f.monitor.running ? "running, but not reachable from here" : "not running (on the rack: rack monitor up)");
+    t.style.whiteSpace = "pre-wrap";
+    box.appendChild(t);
+    const tick = (label, on, id) => {
+      const l = document.createElement("label"); l.style.cssText = "display:flex;gap:8px;align-items:center";
+      const c = document.createElement("input"); c.type = "checkbox"; c.checked = on; c.disabled = !on; c.id = id;
+      l.appendChild(c); l.appendChild(document.createTextNode(label)); box.appendChild(l); return c;
+    };
+    const gw = tick("Chat with what it serves (its engine becomes a gateway)", !!f.engine.url, "rack-add-gateway");
+    const mon = tick("Show it on Cluster (its monitor)", !!f.monitor.url, "rack-add-monitor");
+    const save = document.createElement("button"); save.type = "button"; save.className = "solid-btn"; save.textContent = "Save " + f.name; save.id = "rack-save";
+    const note = document.createElement("span"); note.className = "hint";
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center"; row.appendChild(save); row.appendChild(note);
+    box.appendChild(row);
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        const r = await (await fetch("/api/racks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", pairing: f.pairing, gateway: gw.checked, monitor: mon.checked }) })).json();
+        if (r.error) throw new Error(r.error);
+        setRack(r.rack.name);
+        host.textContent = "";
+        loadModels();
+        renderRecipes();
+      } catch (e) { note.textContent = e.message; save.disabled = false; }
+    };
   }
 
   function recipePane(title) {

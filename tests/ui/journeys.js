@@ -121,6 +121,23 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
         helpText.slice(0, 200).replace(/\n/g, " | "));
   try { require("fs").rmSync(require("path").dirname(projDir), { recursive: true, force: true }); } catch (e) {}
 
+  // ---- Add a rack: pair over ssh, see what was found, keep it; the card then drives it
+  await page.click('[data-nav="recipes"]');
+  await page.waitForTimeout(1200);
+  await page.click("#add-rack");
+  await page.fill("#rack-target", "you@box");
+  await page.click("#rack-pair");
+  await page.waitForSelector("#rack-found", { timeout: 20000 }).catch(() => {});
+  const found = await page.locator("#rack-found").innerText().catch(() => "");
+  check("racks: pairing shows what it found", found.startsWith("box \u00b7 dgx") && found.includes("engine: not reachable from here"),
+        found.replace(/\n/g, " | "));
+  check("racks: what did not answer cannot be ticked", await page.locator("#rack-add-gateway").isDisabled().catch(() => false));
+  await page.click("#rack-save").catch(() => {});
+  await page.waitForTimeout(2000);
+  const rackHead = await page.locator("#recipes-left .card").first().innerText().catch(() => "");
+  check("racks: saved, the card drives it", rackHead.includes("box \u00b7 rack") && rackHead.includes("qwen3-8b"),
+        rackHead.slice(0, 200).replace(/\n/g, " | "));
+
   check("no page or console errors", errors.length === 0, errors.join(" || ").slice(0, 400));
   await browser.close();
   for (const [n, ok, d] of results) console.log((ok ? "ok    " : "FAIL  ") + n + (ok ? "" : "   -> " + d));

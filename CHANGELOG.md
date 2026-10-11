@@ -3,6 +3,31 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.4.2 — 2026-10-10
+
+### New
+- **Add a rack.** On Recipes, give a machine that serves with dgx-serve as you
+  reach it with ssh (`you@host`). ByteBunker asks it once with your own ssh;
+  dgx-serve there adds this app's own key, allowed to run `rack` and nothing
+  else, and says where its engine and monitor are. ByteBunker finds the
+  address that answers from here and adds what you tick: the engine as a
+  gateway (with its key), the monitor on Cluster (with its token). Nothing is
+  copied by hand. If your ssh wants a password, it shows the one command to
+  run on the machine.
+- **More than one rack.** The rack card drives whichever you pick; Remove
+  forgets one and takes this app's key back from it.
+- **bb pair, bb racks, bb deploy.** `bb pair you@host` adds a rack from a
+  terminal; `bb deploy ls | status | up | down | logs` drives one. `up` and
+  `down` ask first, and in a script go ahead only with `--yes`.
+- **A rack on the setup checklist**, and the network check asks your first
+  rack (it ran an old checkout's rack net).
+
+### Fixed
+- **A deploy's stream ends when it does.** Streams from the server stayed
+  open 15 seconds after a run finished.
+
+Needs dgx-serve with `rack pair` (from 2026-10-10) on the machine you pair.
+
 ## 0.4.1 — 2026-10-10
 
 ### New

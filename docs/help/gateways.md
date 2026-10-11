@@ -7,6 +7,8 @@ summary: Add an engine or a gateway by address, or let ByteBunker find them
 ---
 A gateway is any server that answers the OpenAI chat API: an engine dgx-serve runs (vLLM, llama.cpp), or a router in front of several. ByteBunker merges the models of every gateway into one list and sends each request to the gateway that serves its model.
 
+A machine that serves with dgx-serve comes in by itself when you pair it: **Add a rack** on [Recipes](#recipes) adds its engine as a gateway, with its key. → [Serve a model](help:recipes)
+
 ## Find them
 
 Press **Find engines** on the [Gateways](#gateways) screen. ByteBunker looks on this machine, on your tailnet's own devices, and, if you allow it, on your local network.

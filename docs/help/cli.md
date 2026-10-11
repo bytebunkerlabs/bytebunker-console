@@ -42,6 +42,8 @@ bb ask --json "…"                   for scripts
 bb run review -p file=app.py        a workflow
 bb sessions ls                      recent sessions, the app's and bb's
 bb projects                         projects; * marks the one this folder is in
+bb pair you@host                    add a rack: its engine and monitor come too
+bb deploy up qwen3-8b               serve a recipe on a rack
 bb agents "goal"                    give the agents a goal and follow it
 bb doctor                           what is reachable, and what to do if not
 ```
@@ -49,6 +51,10 @@ bb doctor                           what is reachable, and what to do if not
 ## Projects
 
 Run bb inside a [project's](help:projects) folder and it joins the project: its chats are kept with the project's, and they follow the project's instructions and profile. `-P name` picks a project from anywhere. In the app, **Open in terminal** starts bb in a project's folder, or continues the chat open in the Playground.
+
+## Racks
+
+`bb pair you@host` does what **Add a rack** does: it asks the machine once with your ssh, and from then on reaches it with this app's own key, allowed to run `rack` and nothing else. `bb racks` lists them; `bb deploy ls | status | up | down | logs` drives one (`-r name` picks which). `up` and `down` ask first; in a script, `--yes` lets them go ahead, and without it bb exits with code 4. → [Serve a model](help:recipes)
 
 ## Tools in your folder
 

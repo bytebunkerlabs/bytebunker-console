@@ -41,14 +41,26 @@ class ConfigTest(unittest.TestCase):
                                "sparkdash_url": "http://old:8080", "telemetry_source": "prometheus",
                                "monitors": []}))
         cfg = self.disk()
-        self.assertEqual(cfg["config_version"], 2)
+        self.assertEqual(cfg["config_version"], 3)
         self.assertEqual([(g["name"], g["url"]) for g in cfg["gateways"]], [("upstream", "http://192.0.2.20:4000/v1")])
         self.assertNotIn("sparkdash_url", cfg)
         self.assertNotIn("telemetry_source", cfg)
-        kept = glob.glob(self.path + ".before-v2-*")
+        self.assertEqual(cfg["racks"], [])
+        kept = glob.glob(self.path + ".before-v3-*")
         self.assertEqual(len(kept), 1)
         with open(kept[0]) as f:
             self.assertEqual(json.load(f)["sparkdash_url"], "http://old:8080")
+
+    def test_the_one_rack_becomes_the_first_of_racks(self):
+        self.start(json.dumps({"config_version": 2, "gateways": [], "monitors": [],
+                               "rack": {"ssh": "you@spark-1", "dir": "~/dgx/dgx-serve"}}))
+        cfg = self.disk()
+        self.assertEqual(cfg["config_version"], 3)
+        self.assertNotIn("rack", cfg)
+        self.assertEqual(cfg["racks"], [{"name": "spark-1", "ssh": "you@spark-1", "dir": "~/dgx/dgx-serve"}])
+        self.assertEqual(len(glob.glob(self.path + ".before-v3-*")), 1)
+        st, d = self.srv.request("GET", "/api/racks")
+        self.assertEqual([(r["name"], r["paired"]) for r in d["racks"]], [("spark-1", False)])
 
     def test_an_edit_made_while_running_survives_a_change_in_the_app(self):
         self.start(json.dumps({"config_version": 2, "gateways": [], "monitors": []}))

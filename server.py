@@ -56,6 +56,7 @@ import mcp_catalog as catmod
 import jobs as jobmod
 import gateways as gwmod
 import monitors as monmod
+import racks as racksmod
 import instance as instancemod
 import events as eventsmod
 import runs as runsmod
@@ -92,6 +93,9 @@ DEFAULT_CONFIG = {
     "upstream_key": "bb-local",
     # rack monitors for the Cluster screen: [{"name", "url", "token", "enabled"}]
     "monitors": [],
+    # machines serving with dgx-serve, paired over ssh (racks.py):
+    # [{"name", "ssh", "paired", "app", "gateway", "monitor"}]
+    "racks": [],
     # optional, legacy: a Prometheus that scrapes vLLM, asked only when no
     # monitor reports an engine (the playground's "engine is busy" hint)
     "prometheus_url": "",
@@ -216,7 +220,7 @@ def _default_identity():
 # file is migrated on start (the original kept beside it), and an edit made
 # by hand while the server runs is picked up before the next change, so a
 # save never undoes an edit it has not seen.
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 CONFIG_WARNINGS = []             # shown in the app: what happened to the file and where the original is
 _CFG_STAMP = [None]              # (mtime, size) of config.json as this server last read or wrote it
 _CFG_MIGRATED = []
@@ -264,6 +268,10 @@ def migrate_config(cfg):
         for k in [k for k in cfg if k.startswith("sparkdash") or k in ("telemetry_source", "nodes")]:
             cfg.pop(k, None)
         steps.append("2: gateways")
+    if v < 3:
+        # 3 (0.4.2): the one `rack` becomes the first of `racks`, which Add a rack pairs
+        racksmod.migrate(cfg)
+        steps.append("3: racks")
     cfg["config_version"] = CONFIG_VERSION
     return steps
 
@@ -377,20 +385,29 @@ def plugins_install_dir():
 
 
 # ------------------------------------------------------------------ rack --
-# The Sparks' serving layer is `rack` (dgx-spark-serve): recipes/*.env decide
-# solo vs tensor-parallel and the gateway name; `rack up` launches and
-# registers with litellm. The console drives it over ssh and shows its
-# output — it never composes a docker command for a Spark itself.
-def rack_cfg():
-    r = CFG.get("rack") or {}
-    return {"ssh": (r.get("ssh") or "").strip(), "dir": r.get("dir") or "~/dgx/dgx-spark-serve"}
+# Machines serve models with dgx-serve's `rack`: its recipes decide the
+# engine, solo or tensor-parallel, and `rack up` serves one. The console
+# drives rack over ssh (racks.py: a paired rack with this app's own key,
+# allowed to run rack and nothing else) and shows its output; it never
+# composes a docker command for a node itself.
+KEYS = racksmod.Keys(os.path.dirname(CONFIG_PATH))
+PAIRINGS = racksmod.Pending()
 
 
-def rack_cmd(args):
-    r = rack_cfg()
-    inner = "export PATH=$HOME/.local/bin:$PATH; cd %s && ./rack %s" % (
-        agentmod._rq(r["dir"]), " ".join(shlex_quote(a) for a in args))
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", r["ssh"], inner]
+def racks():
+    return racksmod.entries(CFG)
+
+
+def rack_named(name=None):
+    """A rack by name, or the first one; None when there is none."""
+    rs = racks()
+    if not name:
+        return rs[0] if rs else None
+    return next((r for r in rs if r["name"] == name), None)
+
+
+def rack_cmd(args, rack):
+    return racksmod.rack_argv(KEYS, rack, args)
 
 
 def shlex_quote(a):
@@ -398,7 +415,7 @@ def shlex_quote(a):
     return shlex.quote(str(a))
 
 
-_rack_cache = {"at": 0, "val": None}
+_rack_cache = {}                 # rack name -> (time, overview)
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")        # terminal colour and cursor codes
 
 
@@ -442,34 +459,42 @@ def rack_serving(status):
     return m.group(1) if m else ""
 
 
-def rack_overview(max_age=15):
-    """recipes + status, cached briefly: `rack status` sshes to both nodes."""
+def rack_overview(name=None, max_age=15):
+    """recipes + status, cached briefly: `rack status` sshes to every node."""
     import subprocess
-    r = rack_cfg()
-    if not r["ssh"]:
-        return {"ok": False, "enabled": False, "error": "set rack.ssh (and rack.dir) in config.json"}
+    r = rack_named(name)
+    listing = [{"name": x["name"], "ssh": x["ssh"], "paired": x["paired"]} for x in racks()]
+    if r is None:
+        if name:
+            return {"ok": False, "enabled": bool(listing), "racks": listing, "error": "no rack named %r" % name}
+        return {"ok": False, "enabled": False, "racks": [],
+                "error": "no rack yet: Add a rack pairs one over ssh"}
     now = time.time()
-    if _rack_cache["val"] is not None and now - _rack_cache["at"] < max_age:
-        return _rack_cache["val"]
-    val = {"ok": True, "enabled": True, "host": r["ssh"], "dir": r["dir"]}
+    hit = _rack_cache.get(r["name"])
+    if hit and now - hit[0] < max_age:
+        return dict(hit[1], racks=listing)
+    val = {"ok": True, "enabled": True, "name": r["name"], "host": r["ssh"], "paired": r["paired"],
+           "dir": "" if r["paired"] else (r["dir"] or "~/dgx/dgx-spark-serve"), "racks": listing}
     try:
-        out = subprocess.run(rack_cmd(["recipes", "--json"]), capture_output=True, text=True, timeout=25)
+        out = subprocess.run(rack_cmd(["recipes", "--json"], r), capture_output=True, text=True, timeout=25)
         recipes = rack_recipes(out.stdout)
-        if not recipes and out.returncode != 0:          # a rack from before 1.0 that refuses --json
-            out = subprocess.run(rack_cmd(["recipes"]), capture_output=True, text=True, timeout=25)
+        if not recipes and out.returncode != 0 and not r["paired"]:   # a rack from before 1.0 that refuses --json
+            out = subprocess.run(rack_cmd(["recipes"], r), capture_output=True, text=True, timeout=25)
             recipes = rack_recipes(out.stdout)
+        if not recipes and out.returncode != 0:
+            raise RuntimeError(racksmod._last(out.stderr) or "rack recipes exited %d" % out.returncode)
         val["recipes"] = recipes
     except Exception as e:   # noqa: BLE001
-        val.update(ok=False, error=str(e)[:160])
-        _rack_cache.update(at=now, val=val)
+        val.update(ok=False, error=str(e)[:200])
+        _rack_cache[r["name"]] = (now, val)
         return val
     try:
-        out = subprocess.run(rack_cmd(["status"]), capture_output=True, text=True, timeout=45)
+        out = subprocess.run(rack_cmd(["status"], r), capture_output=True, text=True, timeout=45)
         val["status_raw"] = _ANSI.sub("", out.stdout + out.stderr).strip()[-4000:]
         val["serving"] = rack_serving(val["status_raw"])
     except Exception as e:   # noqa: BLE001
         val["status_raw"] = "rack status failed: %s" % str(e)[:120]
-    _rack_cache.update(at=now, val=val)
+    _rack_cache[r["name"]] = (now, val)
     return val
 
 
@@ -1136,18 +1161,18 @@ _NET_LOCK = threading.Lock()
 
 
 def netcheck(fresh=False):
-    target = CFG.get("netcheck_ssh", "")
-    if not target:
-        return {"ok": False, "error": "netcheck_ssh not configured"}
+    target, rack = CFG.get("netcheck_ssh", ""), rack_named()
+    if not target and not rack:
+        return {"ok": False, "error": "no rack to ask: Add a rack (or set netcheck_ssh)"}
     with _NET_LOCK:
         if not fresh and _NET["result"] and time.time() - _NET["at"] < 300:
             return _NET["result"]
         import subprocess
         try:
-            p = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target,
-                 "cd dgx/dgx-spark-serve && ./rack net"],
-                capture_output=True, text=True, timeout=60)
+            # the first rack's own rack net; a netcheck_ssh from before racks keeps its old command
+            cmd = rack_cmd(["net"], rack) if rack else \
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, "cd dgx/dgx-spark-serve && ./rack net"]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             out = re.sub(r"\x1b\[[0-9;]*m", "", (p.stdout + p.stderr)).strip()
             res = {"ok": p.returncode == 0 or "VERDICT" in out,
                    "at": int(time.time()),
@@ -1231,6 +1256,11 @@ def setup_checklist():
         {"id": "models", "title": "A model to talk to", "ok": bool(GW.models),
          "detail": "%d model%s" % (len(GW.models), "" if len(GW.models) == 1 else "s"),
          "action": {"label": "Models", "screen": "models"}, "help": "gateways"},
+        {"id": "rack", "title": "A rack paired", "optional": True, "ok": any(r["paired"] for r in racks()),
+         "detail": ", ".join(r["name"] for r in racks() if r["paired"]) or (
+             "%s, reached with your own ssh: pair it to drive it with this app's key" % racks()[0]["name"] if racks()
+             else "for machines serving with dgx-serve"),
+         "action": {"label": "Add a rack", "screen": "recipes"}, "help": "recipes"},
         {"id": "monitor", "title": "A rack monitor", "optional": True, "ok": bool(MON.list()),
          "detail": "%d monitor%s" % (len(MON.list()), "" if len(MON.list()) == 1 else "s"),
          "action": {"label": "Cluster", "screen": "cluster"}, "help": "cluster"},
@@ -1777,7 +1807,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "no such run"}, 404)
             return
         self._sse_start()
-        saw_done = [False]
+        saw_done, finished = [False], [False]
 
         def frames(e):
             if not legacy:
@@ -1802,13 +1832,16 @@ class Handler(BaseHTTPRequestHandler):
                     for f in frames(e):
                         self.wfile.write(f)
                     sent = e["seq"]
+                    # the run's last event: done_event is set a moment after it is published,
+                    # and a stream that checked in between would wait out another 15 s
+                    finished[0] = finished[0] or (e["topic"] == "runs" and e["type"] == "finished")
             self.wfile.flush()
             return sent
 
         try:
             sent = send(past, after)
             pos = max(sent, after)
-            while run is not None and not run.done_event.is_set() and not STOPPING.is_set():
+            while run is not None and not finished[0] and not run.done_event.is_set() and not STOPPING.is_set():
                 woke = BUS.wait(pos, 15)
                 evts, gap, pos = BUS.scan(sent, run=rid)
                 if gap:                                # fell out of the ring: the run's file has it all
@@ -2479,7 +2512,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
                                     for n in sorted(found)], "warnings": warnings})
         elif path == "/api/rack":
-            self._json(rack_overview())
+            self._json(rack_overview((urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("rack") or [None])[0]))
+        elif path == "/api/racks":
+            self._json({"racks": racks(), "app": {"key": os.path.exists(KEYS.key), "known_hosts": KEYS.known_hosts}})
         elif path.startswith("/api/uploads/"):
             rel = path[len("/api/uploads/"):]
             parts = [urllib.parse.unquote(x) for x in rel.split("/") if x]
@@ -2624,7 +2659,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
                         "/api/update/apply", "/api/projects", "/api/terminal"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
@@ -2724,6 +2759,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(dict(info, ok=True))
         elif path == "/api/rack":
             self._rack(body)
+        elif path == "/api/racks":
+            self._racks_admin(body)
         elif path == "/api/agents":
             self._agents_run(body)
         elif path == "/api/agents/slave":
@@ -2919,16 +2956,18 @@ class Handler(BaseHTTPRequestHandler):
                            lambda run, emit: agent_goal(run, emit, goal)[0], key="agents", meta={"project": pid})
 
     def _rack(self, body):
-        """show <recipe>: the recipe's .env; up/down/logs/bench: run rack and
-        stream its output (SSE). `up` and `down` change what the Sparks
-        serve — the UI confirms first; the trace log records who did what."""
+        """show <recipe>: the files the recipe runs; up/down/logs/status/bench:
+        run rack and stream its output. `rack` names the rack (else the first).
+        `up` and `down` change what a rack serves: the UI confirms first, and
+        the trace log records who did what."""
         import subprocess
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)
             return
-        r = rack_cfg()
-        if not r["ssh"]:
-            self._json({"error": "rack is not configured (rack.ssh in config.json)"}, 400)
+        r = rack_named(body.get("rack"))
+        if r is None:
+            self._json({"error": ("no rack named %r" % body["rack"]) if body.get("rack")
+                        else "no rack yet: Add a rack pairs one over ssh"}, 400)
             return
         action = str(body.get("action") or "")
         recipe = str(body.get("recipe") or "").strip()
@@ -2939,18 +2978,24 @@ class Handler(BaseHTTPRequestHandler):
             if not recipe:
                 self._json({"error": "recipe required"}, 400)
                 return
-            # where rack says the recipe is (1.0: yours live outside the checkout), else the old place
-            files = next((x.get("files") for x in rack_overview().get("recipes") or []
-                          if x.get("name") == recipe and x.get("files")), None)
-            if files:
-                inner = " && ".join("echo %s && cat %s" % (shlex_quote("# " + f), shlex_quote(f)) for f in files)
+            if r["paired"]:
+                cmd, files = rack_cmd(["recipes", "show", recipe], r), None
             else:
-                files = ["recipes/%s.env" % recipe]
-                inner = "cd %s && cat %s" % (agentmod._rq(r["dir"]), shlex_quote(files[0]))
-            out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", r["ssh"], inner],
-                                 capture_output=True, text=True, timeout=20)
-            self._json({"ok": out.returncode == 0, "recipe": recipe, "file": files[-1],
-                        "text": (out.stdout or out.stderr)[-20000:]})
+                # where rack says the recipe is (1.0: yours live outside the checkout), else the old place
+                files = next((x.get("files") for x in rack_overview(r["name"]).get("recipes") or []
+                              if x.get("name") == recipe and x.get("files")), None)
+                if files:
+                    inner = " && ".join("echo %s && cat %s" % (shlex_quote("# " + f), shlex_quote(f)) for f in files)
+                else:
+                    files = ["recipes/%s.env" % recipe]
+                    inner = "cd %s && cat %s" % (agentmod._rq(r["dir"] or "~/dgx/dgx-spark-serve"), shlex_quote(files[0]))
+                cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", r["ssh"], inner]
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            text = out.stdout or out.stderr
+            if files is None:          # rack recipes show heads each file with "# <path>"
+                files = [l[2:] for l in text.splitlines() if l.startswith(("# /", "# ~")) and l.endswith(".env")] or [recipe]
+            self._json({"ok": out.returncode == 0, "recipe": recipe, "file": files[-1], "rack": r["name"],
+                        "text": text[-20000:]})
             return
         if action not in ("up", "down", "logs", "status", "bench", "preflight", "gateway"):
             self._json({"error": "unknown action"}, 400)
@@ -2958,10 +3003,10 @@ class Handler(BaseHTTPRequestHandler):
         args = [action] + ([recipe] if recipe and action in ("up", "bench", "gateway") else [])
         if action == "logs":
             args = ["logs"]
-        _rack_cache["at"] = 0                      # status changes after this
+        _rack_cache.pop(r["name"], None)           # status changes after this
 
         def work(run, emit):
-            emit({"phase": "start", "host": r["ssh"], "cmd": "rack " + " ".join(args)})
+            emit({"phase": "start", "host": r["ssh"], "rack": r["name"], "cmd": "rack " + " ".join(args)})
             captured = []
 
             def on_line(text):
@@ -2970,20 +3015,110 @@ class Handler(BaseHTTPRequestHandler):
                     captured.append(text)
                 emit({"line": text})
             try:
-                code, killed = agentmod.run_streaming(rack_cmd(args), ROOT, on_line, run.cancel_event, timeout_s=3600)
+                code, killed = agentmod.run_streaming(rack_cmd(args, r), ROOT, on_line, run.cancel_event, timeout_s=3600)
             except Exception as e:   # noqa: BLE001
                 emit({"error": str(e)})
                 code, killed = -1, "error"
             emit({"phase": "done", "exit": code, "killed": killed})
-            TRACE.log("rack", action=action, recipe=recipe, host=r["ssh"], exit=code, run=run.id,
+            TRACE.log("rack", action=action, recipe=recipe, rack=r["name"], host=r["ssh"], exit=code, run=run.id,
                       killed=killed or False, output=captured[-200:])
             return {"ok": code == 0, "exit": code, "killed": killed or False,
                     "error": None if code == 0 else "rack %s exited %s" % (action, code)}
         # a deploy goes on without its viewer; a log tail or a status read does not
         viewing = action in ("logs", "status")
-        self._run_streamed("rack", "rack " + " ".join(args), work,
-                           meta={"action": action, "recipe": recipe, "host": r["ssh"]},
+        self._run_streamed("rack", "rack " + " ".join(args) + " on " + r["name"], work,
+                           meta={"action": action, "recipe": recipe, "rack": r["name"], "host": r["ssh"]},
                            key=None if viewing else "rack:" + r["ssh"], detach=not viewing)
+
+    def _racks_admin(self, body):
+        """pair {target}: ask the machine over ssh (a streamed run: what it
+        did, then what it found, or the one command to run there when your
+        ssh needs a password); save {pairing, gateway, monitor}: keep what was
+        found; remove {name, unpair}: forget a rack, and take this app's key
+        back from it."""
+        import subprocess
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action")
+        if action == "pair":
+            target = str(body.get("target") or "").strip()
+            if not racksmod.TARGET.match(target):
+                self._json({"error": "an ssh destination: user@host, or a host from ~/.ssh/config"}, 400)
+                return
+
+            def work(run, emit):
+                say = lambda t: emit({"line": t})
+                try:
+                    kind, got = racksmod.ask(KEYS, target, say)
+                except racksmod.PairError as e:
+                    emit({"error": str(e)})
+                    emit({"phase": "done", "exit": 1, "killed": False})
+                    TRACE.log("rack", action="pair", target=target, ok=False, error=str(e)[:300], run=run.id)
+                    return {"ok": False, "error": str(e)}
+                if kind == "needs_key":
+                    emit({"needs_key": got})
+                    emit({"phase": "done", "exit": 2, "killed": False})
+                    TRACE.log("rack", action="pair", target=target, ok=False, needs_key=True, run=run.id)
+                    return {"ok": False, "error": "needs the app's key on %s first" % target}
+                say("found %s (%s, dgx-serve %s); looking for its engine and monitor from here"
+                    % (got.get("name"), got.get("platform"), got.get("rack_version")))
+                engine_url, monitor_url, tried = racksmod.find(target, got)
+                found = racksmod.summary(target, got, engine_url, monitor_url)
+                found["pairing"] = PAIRINGS.put({"target": target, "info": got, "engine_url": engine_url,
+                                                 "monitor_url": monitor_url, "app": KEYS.app_name()})
+                found["tried"] = tried
+                emit({"found": found})
+                emit({"phase": "done", "exit": 0, "killed": False})
+                TRACE.log("rack", action="pair", target=target, ok=True, engine=engine_url, monitor=monitor_url, run=run.id)
+                return {"ok": True}
+            self._run_streamed("pair", "pair " + target, work, meta={"target": target}, key="pair:" + target, detach=False)
+            return
+        if action == "save":
+            item = PAIRINGS.take(str(body.get("pairing") or ""))
+            if not item:
+                self._json({"error": "that pairing is gone (15 minutes, or a restart): pair again"}, 410)
+                return
+            rack = racksmod.apply(CFG, item, gateway=body.get("gateway", True) is not False,
+                                  monitor=body.get("monitor", True) is not False, gw_normalize=gwmod.normalize)
+            save_config()
+            GW.refresh(force=True)
+            MON.invalidate()
+            _rack_cache.pop(rack["name"], None)
+            BUS.publish("config", "racks", {"racks": [x["name"] for x in racks()]})
+            TRACE.log("rack", action="save", rack=rack["name"], target=rack["ssh"], gateway=rack.get("gateway"),
+                      monitor=rack.get("monitor"))
+            self._json({"ok": True, "rack": rack})
+            return
+        if action == "remove":
+            r = rack_named(str(body.get("name") or "")) if body.get("name") else None
+            if r is None:
+                self._json({"error": "no such rack"}, 404)
+                return
+            note = ""
+            if r["paired"] and body.get("unpair", True) is not False:
+                try:
+                    out = subprocess.run(rack_cmd(["unpair"], r), capture_output=True, text=True, timeout=30)
+                    note = "its key is off %s" % r["ssh"] if out.returncode == 0 else \
+                        "could not take the key back (%s): on %s, rack unpair --name %s" % (
+                            racksmod._last(out.stderr) or "exit %d" % out.returncode, r["ssh"], r["app"] or "<app>")
+                except (OSError, subprocess.SubprocessError) as e:
+                    note = "could not take the key back (%s): on %s, rack unpair --name %s" % (e, r["ssh"], r["app"] or "<app>")
+            CFG["racks"] = [x for x in (CFG.get("racks") or []) if not (isinstance(x, dict) and x.get("name") == r["name"])]
+            if body.get("gateway") and r["gateway"]:
+                CFG["gateways"] = [g for g in (CFG.get("gateways") or []) if not (isinstance(g, dict) and g.get("name") == r["gateway"])]
+                gwmod.normalize(CFG)
+            if body.get("monitor") and r["monitor"]:
+                CFG["monitors"] = [m for m in (CFG.get("monitors") or []) if not (isinstance(m, dict) and m.get("name") == r["monitor"])]
+            save_config()
+            GW.refresh(force=True)
+            MON.invalidate()
+            _rack_cache.pop(r["name"], None)
+            BUS.publish("config", "racks", {"racks": [x["name"] for x in racks()]})
+            TRACE.log("rack", action="remove", rack=r["name"], target=r["ssh"], note=note)
+            self._json({"ok": True, "note": note})
+            return
+        self._json({"error": "unknown action"}, 400)
 
     def _recipes(self, body):
         """render: the exact files a recipe would run; deploy: run its script

@@ -9,7 +9,9 @@ The Cluster screen shows every machine a rack monitor reports: GPUs, memory, tem
 
 ## Add a monitor
 
-On the rack's head node, with dgx-serve:
+**Add a rack** on [Recipes](#recipes) adds a rack's monitor for you, with its token. → [Serve a model](help:recipes)
+
+By hand: on the rack's head node, with dgx-serve:
 
 ```
 rack monitor up

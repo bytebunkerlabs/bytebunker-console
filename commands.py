@@ -61,6 +61,18 @@ COMMANDS = [
     {"cli": "profiles", "slash": None, "args": "", "route": "GET /api/profiles", "help": "the profiles"},
     {"cli": "projects", "slash": None, "args": "", "route": "GET /api/projects",
      "help": "the projects; bb joins the one whose folder it runs in (or -P NAME)"},
+    # racks: machines serving with dgx-serve, paired over ssh
+    {"cli": "racks", "slash": None, "args": "", "route": "GET /api/racks", "help": "the racks this app drives"},
+    {"cli": "pair", "slash": None, "args": "USER@HOST [--no-gateway] [--no-monitor]", "route": "POST /api/racks",
+     "help": "add a rack: pair with it over ssh; its engine and monitor come too"},
+    {"cli": "deploy ls", "slash": None, "args": "[-r RACK]", "route": "GET /api/rack",
+     "help": "a rack's recipes, and what it serves"},
+    {"cli": "deploy up", "slash": None, "args": "RECIPE [-r RACK] [--yes]", "route": "POST /api/rack",
+     "help": "serve a recipe on a rack (whatever it serves stops)"},
+    {"cli": "deploy down", "slash": None, "args": "[-r RACK] [--yes]", "route": "POST /api/rack",
+     "help": "stop serving on every node of a rack"},
+    {"cli": "deploy status", "slash": None, "args": "[-r RACK]", "route": "POST /api/rack", "help": "rack status"},
+    {"cli": "deploy logs", "slash": None, "args": "[-r RACK]", "route": "POST /api/rack", "help": "the engine's log"},
     # work that runs on its own
     {"cli": "agents", "slash": None, "args": "GOAL [--detach]", "route": "POST /api/agents",
      "help": "give the agents a goal and follow it"},
