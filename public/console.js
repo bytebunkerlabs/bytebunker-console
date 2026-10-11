@@ -2917,7 +2917,7 @@
     // a server reached from a browser cannot open a window here: the command, to run where it runs
     const body = $("help-body"); body.textContent = "";
     const h = document.createElement("h2"); h.textContent = "Continue in a terminal"; h.style.cssText = "font-size:15px;margin:0 0 6px"; body.appendChild(h);
-    body.appendChild(helpDom("This ByteBunker runs on another computer, so it cannot open a window on this one. On the computer it runs on, run:\n\n```\n" + r.command +
+    body.appendChild(helpDom("Only the desktop app opens a terminal window by itself. In a terminal on the computer this ByteBunker runs on, run:\n\n```\n" + r.command +
       "\n```\n\nbb picks up this chat, in the project's folder, with the project's instructions and your tools there. Whatever it does shows here as it happens."));
     showHelp();
   }
