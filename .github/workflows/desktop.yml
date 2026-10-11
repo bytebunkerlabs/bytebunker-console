@@ -17,6 +17,7 @@ on:
       - "plugins/**"
       - "tests/**"
       - "config.json.example"
+      - "CHANGELOG.md"
       - ".github/workflows/desktop.yml"
 
 permissions:
@@ -90,13 +91,21 @@ jobs:
           path: |
             desktop/dist/*.dmg
             desktop/dist/*.zip
+            desktop/dist/*.sha256
           if-no-files-found: error
+
+      - name: Release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: python desktop/release_notes.py "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
 
       - name: Draft release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          body_path: ${{ runner.temp }}/notes.md
           files: |
             desktop/dist/*.dmg
             desktop/dist/*.zip
+            desktop/dist/*.sha256

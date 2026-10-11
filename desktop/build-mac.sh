@@ -21,4 +21,11 @@ for attempt in 1 2 3 4 5; do
   sleep $((attempt * 5))
 done
 rm -rf "$STAGE"
+# the app's own updater takes this zip (ditto keeps the bundle and its signature)
+ZIP="desktop/dist/ByteBunker-$VER-mac-$(uname -m).zip"
+rm -f "$ZIP"
+ditto -c -k --keepParent desktop/dist/ByteBunker.app "$ZIP"
+# one checksum file per download, which the updater checks before it unpacks
+for f in "$OUT" "$ZIP"; do (cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256"); done
 echo "$OUT"
+echo "$ZIP"

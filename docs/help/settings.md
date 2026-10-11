@@ -3,7 +3,7 @@ id: settings
 title: Settings and your data
 screen: settings
 order: 130
-summary: Where everything lives, editing config.json by hand, profiles, bb
+summary: Where everything lives, updates and what's new, editing config.json by hand, roles
 ---
 ## Your data
 
@@ -12,6 +12,14 @@ Everything ByteBunker keeps is in one folder, shown at the top of [Settings](#se
 ## Editing config.json by hand
 
 You can. ByteBunker picks up an edit made while it runs before its next change, so its save never undoes yours. If a file does not parse, it is never overwritten unseen: it is kept beside the new one (`config.json.replaced-…` or `.unreadable-…`), and a banner says so. An older config is upgraded once on start, with the original kept as `config.json.before-v2-…`.
+
+## Updates and what's new
+
+In the desktop app, **Check for updates** asks GitHub whether a newer version is published, and only when you press it (or at start, if you tick **Check for a newer version when ByteBunker starts**). When there is one, you see what it brings, and **Update** does the rest: it downloads the new version, checks it against the checksum its release publishes, quits, puts the new version in place of the old one and opens it. The version you had is kept in the `updates` folder beside your data. If anything goes wrong before the switch, nothing changes and the app says why; if the switch itself fails, the old version opens again and a banner says what happened.
+
+ByteBunker replaces itself only where it is allowed to write. Installed by another user (in Applications, for example), it says so, and the release page has the download.
+
+**What's new** lists every version's changes, newest first. After an update the app opens on a banner that leads to them.
 
 ## Roles
 

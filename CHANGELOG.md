@@ -1,0 +1,98 @@
+# Changelog
+
+What changed in each version of ByteBunker, newest first. After an update the
+app opens on the new version's section, and Settings → What's new shows them all.
+
+## 0.4.0 — 2026-10-10
+
+### New
+- **Update from the app.** Settings → Updates asks GitHub for a newer version
+  only when you press the button, shows what it brings, and with one click
+  downloads it, checks it against the checksum its release publishes, and
+  restarts into it. The version you had is kept, and when anything goes wrong
+  before the switch, the app you have stays exactly as it was.
+- **What's new.** This list, in the app: under Settings, and right after an
+  update.
+- **Check when ByteBunker starts**, if you want it. It is off unless you turn
+  it on: the app does not phone home on its own.
+
+### Fixed
+- **A tool server that will not start says why**, in its own words (for
+  example "None of the specified directories are accessible") instead of
+  "server closed its stdout".
+- **Folders are made for you.** A Filesystem server's folder, the terminal's
+  working folder and a SQLite database's folder are created when they are
+  missing. A Git server still needs a real repository, and says so before
+  anything starts.
+- **One terminal.** Adding Terminal from the catalog turns the built-in one on,
+  or moves its folder, instead of adding a second copy; a terminal that is off
+  says what it is.
+- **Restart on a tool server restarts it.** It did nothing before.
+- **Catalog defaults fit your machine:** your own time zone, and no folders
+  from somebody else's computer.
+
+## 0.3.1 — 2026-10-10
+
+### Fixed
+- **Recipes works with rack 1.0:** each recipe's model and platforms, the one
+  serving now, and Read recipe opens the real file, wherever your own recipes
+  live.
+- **rack's output reads as plain text** in the app (status, logs, deploys),
+  without terminal colour codes.
+- **A model behind a gateway route of another name** is marked as the one
+  serving, and its context, tools and vision come from the rack.
+
+## 0.3.0 — 2026-10-06
+
+### New
+- **bb: ByteBunker in a terminal.** Chat, one-off questions with piped input,
+  sessions, agents, jobs, runs, workflows, profiles and a doctor, on the same
+  server as the app. Its own tools work in the folder you run it in and ask
+  before changing anything.
+- **Work that outlives the window.** Chats, agent goals, deploys, installs and
+  jobs run on the server: close the app and they go on; open it again and they
+  are still there.
+- **Workflows and profiles.** A named prompt with blanks to fill, run from the
+  app, bb or a job; a profile sets the model, effort, tools and approvals.
+- **Approvals.** A tool that may change something asks first, in the app or in
+  the terminal.
+- **Help in the app.** A guide for every screen behind its "?", and a checklist
+  of what is set up and what is missing.
+- **Roles.** Say "fast" or "big" instead of a model name; jobs, workflows and
+  agents follow whatever the role points at.
+- **Model facts from the rack.** The context window, tools, vision and thinking
+  switch come from what dgx-serve says it serves.
+
+### Changed
+- **Sessions are one file each.** The old single file is migrated once, and the
+  original is kept.
+- **config.json is versioned** and migrated once; edits you make while the app
+  runs are kept.
+- **Nothing is loaded from the internet:** the fonts come with the app.
+
+## 0.2.0 — 2026-10-05
+
+### New
+- **One Cluster screen** for every node and engine, fed by rack monitors: GPU,
+  memory, engines, throughput, and decode-step latency, with the tokens per step
+  that speculative decoding gets.
+
+### Fixed
+- **An agents worker that cannot be reached** shows as unreachable, not idle.
+- **Headless mode stops cleanly** when the system stops it.
+
+## 0.1.0 — 2026-10-03
+
+### New
+- **The desktop app** for macOS and Windows: the console in its own window, your
+  data in one folder, one copy running at a time, and engines found on this
+  computer, your tailnet or, if you allow it, your local network.
+- **Several gateways at once:** models from every engine or router in one list,
+  each request sent to the one that serves its model.
+- **The MCP screen:** tool servers with their tools, environment, restart and
+  remove, and a catalog of local servers to add in one click.
+- **Jobs:** chats or agent goals on a schedule, with their run history.
+- **The Playground:** attachments (images for models that see), and tool
+  activity folded above the answer.
+- **Settings:** your data folder, your name, rates, an update check and an
+  export.

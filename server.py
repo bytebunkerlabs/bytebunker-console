@@ -64,6 +64,8 @@ import upstream as upstreammod
 import runner as runnermod
 import model_facts as factsmod
 import approvals as approvalsmod
+import changelog
+import updater as updatemod
 from version import VERSION
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1852,6 +1854,87 @@ class Handler(BaseHTTPRequestHandler):
         c = (self.headers.get("X-BB-Client") or "app").strip().lower()
         return c if re.match(r"^[a-z][a-z0-9-]{0,15}$", c) else "app"
 
+    def _update_check(self):
+        try:
+            self._json(updatemod.check(app_version(), bool(os.environ.get("BYTEBUNKER_DESKTOP")),
+                                       updatemod.app_location()))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:          # GitHub has no latest release until one is published
+                self._json({"current": app_version(), "latest": None, "newer": False, "can_update": False,
+                            "why_not": None, "notes": "", "page": "", "none_published": True})
+            else:
+                self._json({"error": "GitHub answered %s" % e.code}, 502)
+        except Exception as e:   # noqa: BLE001
+            self._json({"error": "could not reach GitHub: %s" % str(e)[:200]}, 502)
+
+    def _update_apply(self):
+        """Download the newer version, check it, unpack it beside this one and
+        hand over to the swap helper; the page then closes the window (or this
+        server leaves by itself) and the new version opens."""
+        location = updatemod.app_location()
+        try:
+            info = updatemod.check(app_version(), bool(os.environ.get("BYTEBUNKER_DESKTOP")), location)
+        except Exception as e:   # noqa: BLE001
+            self._json({"error": "could not reach GitHub: %s" % str(e)[:200]}, 502)
+            return
+        if not info["newer"]:
+            self._json({"error": "this is the latest version (%s)" % info["current"]}, 409)
+            return
+        if not info["can_update"]:
+            self._json({"error": info["why_not"], "page": info["page"]}, 409)
+            return
+
+        def work(run, emit):
+            import shutil
+            home = update_home()
+            os.makedirs(home, exist_ok=True)
+            zpath = os.path.join(home, info["asset"]["name"])
+            staging = os.path.join(home, "staging")
+
+            def progress(got, total):
+                emit({"phase": "download", "got": got, "total": total or info["asset"].get("size") or 0})
+                if run.cancelled:
+                    raise RuntimeError("cancelled: nothing was changed")
+            try:
+                emit({"phase": "download", "got": 0, "total": info["asset"].get("size") or 0})
+                got = updatemod.download(info["asset"]["url"], zpath, progress)
+                emit({"phase": "verify"})
+                if got != updatemod.expected_sha256(info["checksum_url"], info["asset"]["name"]):
+                    raise RuntimeError("the download does not match the checksum its release publishes: nothing was changed")
+                emit({"phase": "unpack"})
+                new_app = updatemod.unpack(zpath, staging)
+                if not updatemod.signature_ok(new_app):
+                    raise RuntimeError("the new app's signature does not verify: nothing was changed")
+                said = updatemod.unpacked_version(new_app)
+                if said != info["latest"]:
+                    raise RuntimeError("the new app says it is %s, not %s: nothing was changed" % (said, info["latest"]))
+            except Exception as e:   # noqa: BLE001
+                shutil.rmtree(staging, ignore_errors=True)
+                emit({"error": str(e)})
+                return {"ok": False, "error": str(e)}
+            finally:
+                for p in (zpath, zpath + ".part"):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            with open(os.path.join(home, "pending.json"), "w", encoding="utf-8") as f:
+                json.dump({"from": app_version(), "to": info["latest"], "page": info["page"], "at": round(time.time())}, f)
+            try:
+                os.remove(os.path.join(home, "updater.log"))
+            except OSError:
+                pass
+            updatemod.start_swap(os.getpid(), location, new_app, os.path.join(home, "previous", os.path.basename(location)),
+                                 os.path.join(home, "updater.log"), updatemod.relaunch_command(location), home)
+            TRACE.log("update", from_version=app_version(), to_version=info["latest"], run=run.id)
+            emit({"phase": "ready", "version": info["latest"]})
+            # the page closes the window now; a server with no window of its own leaves by itself
+            t = threading.Timer(8.0, _leave_for_update)
+            t.daemon = True              # a window that closes ends the process at once
+            t.start()
+            return {"ok": True, "version": info["latest"]}
+        self._run_streamed("update", "update to %s" % info["latest"], work, key="update")
+
     def _run_streamed(self, kind, title, work, meta=None, key=None, detach=True):
         """Start work(run, emit) as a server-owned run and stream it to this
         client in the frames the app's screens read. With detach (deploys,
@@ -2041,7 +2124,9 @@ class Handler(BaseHTTPRequestHandler):
                         "uploads_dir": os.path.expanduser(CFG.get("uploads_dir") or os.path.join(DATA, "uploads")),
                         "identity": CFG.get("identity") or {}, "rates": CFG.get("frontier_rates_per_mtok") or {},
                         "python": sys.version.split()[0], "frozen": bool(getattr(sys, "frozen", False)),
-                        "keep_running": bool(CFG.get("keep_running")), "roles": CFG.get("roles") or {}})
+                        "keep_running": bool(CFG.get("keep_running")), "roles": CFG.get("roles") or {},
+                        "update_check_at_start": bool(CFG.get("update_check_at_start")),
+                        "updated": UPDATE_STATE.get("updated"), "update_failed": UPDATE_STATE.get("update_failed")})
         elif path == "/api/gateways":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             GW.refresh(force=bool(q.get("refresh")))
@@ -2213,6 +2298,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/jobs/runs":
             jid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
             self._json({"id": jid, "runs": JOBS.runs(jid, 30)})
+        elif path == "/api/update/check":
+            self._update_check()
+        elif path == "/api/changelog":
+            self._json({"current": app_version(), "sections": changelog.sections()})
         elif path == "/api/mcp/catalog":
             try:
                 st = mcp_host().status
@@ -2327,7 +2416,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave"):
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
+                        "/api/update/apply"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -2349,6 +2439,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"content": text, "isError": is_err})
         elif path == "/api/mcp":
             self._mcp_admin(body)
+        elif path == "/api/update/apply":
+            self._update_apply()
         elif path == "/api/plugins":
             self._plugin_admin(body)
         elif path == "/api/skills":
@@ -2495,6 +2587,15 @@ class Handler(BaseHTTPRequestHandler):
                 save_config()
                 BUS.publish("config", "roles", roles)
                 self._json({"ok": True, "roles": roles})
+                return
+            if body.get("action") == "update_seen":
+                clear_update_state()
+                self._json({"ok": True})
+                return
+            if "update_check_at_start" in body:
+                CFG["update_check_at_start"] = bool(body["update_check_at_start"])
+                save_config()
+                self._json({"ok": True, "update_check_at_start": CFG["update_check_at_start"]})
                 return
             if "keep_running" in body:
                 CFG["keep_running"] = bool(body["keep_running"])
@@ -3257,6 +3358,10 @@ def serve(bind=None, port=None, idle_exit=None):
         TRACE.log("config", action="migrated", steps=list(_CFG_MIGRATED), kept=os.path.basename(kept))
         del _CFG_MIGRATED[:]
     inst.publish(srv.server_address[1], version=app_version(), desktop=bool(os.environ.get("BYTEBUNKER_DESKTOP")))
+    if os.environ.get("BYTEBUNKER_DESKTOP"):
+        import shutil
+        UPDATE_STATE.update(read_update_state())
+        shutil.rmtree(os.path.join(update_home(), "staging"), ignore_errors=True)
     import atexit
     atexit.register(release_instance)
     # the built-in jobs MCP server calls the console back on this port
@@ -3324,6 +3429,57 @@ def watch_models():
 
 def app_version():
     return os.environ.get("BYTEBUNKER_VERSION") or VERSION
+
+
+# ---- updating the desktop app (updater.py does the work) --------------------
+UPDATE_STATE = {}       # what the last update did, read once at start; said until seen
+
+
+def update_home():
+    """Downloads, the unpacked new version and the previous one: beside the user's data."""
+    return os.path.join(os.path.dirname(CONFIG_PATH), "updates")
+
+
+def read_update_state():
+    """After an update this process is the new version, or, when the swap
+    failed, still the old one: what to tell the user."""
+    try:
+        with open(os.path.join(update_home(), "pending.json"), encoding="utf-8") as f:
+            m = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    said = ""
+    try:
+        with open(os.path.join(update_home(), "updater.log"), encoding="utf-8") as f:
+            said = (f.read().strip().splitlines() or [""])[-1]
+    except OSError:
+        pass
+    if m.get("to") == app_version():
+        return {"updated": {"from": m.get("from"), "to": m["to"],
+                            "notes": (changelog.section(m["to"]) or {}).get("body", "")}}
+    return {"update_failed": {"to": m.get("to"), "page": m.get("page") or "",
+                              "why": said if said and said != "updated" else "the new version did not start"}}
+
+
+def clear_update_state():
+    UPDATE_STATE.clear()
+    for name in ("pending.json", "updater.log"):
+        try:
+            os.remove(os.path.join(update_home(), name))
+        except OSError:
+            pass
+
+
+def _leave_for_update():
+    """The swap helper waits for this process to end. A window closes itself
+    when its page asks; this ends a server that has no window of its own."""
+    release_instance()
+    try:
+        if _MCP is not None:
+            _MCP.stop_all()
+    except Exception:   # noqa: BLE001
+        pass
+    os._exit(0)
 
 
 def release_instance():

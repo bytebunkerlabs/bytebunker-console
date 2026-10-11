@@ -20,13 +20,14 @@ datas = [
     (os.path.join(ROOT, "skills"), "skills"),
     (os.path.join(ROOT, "plugins"), "plugins"),
     (os.path.join(ROOT, "config.json.example"), "."),
+    (os.path.join(ROOT, "CHANGELOG.md"), "."),
     (os.path.join(ROOT, "docs", "help"), os.path.join("docs", "help")),
 ]
 # the console is imported at run time by the launcher, and the built-in MCP
 # servers by --mcp: name them so the analysis bundles them and their imports
 hidden = ["server", "version", "instance", "paths", "commands", "bb", "approvals", "workspace", "events", "runs", "sessions", "upstream", "runner", "model_facts",
           "gateways", "monitors", "jobs", "agents", "recipes", "skills", "traces",
-          "mcp", "mcp_catalog", "mcp_jobs", "mcp_terminal"]
+          "mcp", "mcp_catalog", "mcp_jobs", "mcp_terminal", "updater", "changelog"]
 
 a = Analysis(
     [os.path.join(HERE, "app.py")],

@@ -2222,24 +2222,116 @@
     kl.appendChild(kx); kl.appendChild(document.createTextNode("Keep the server running in the background. Otherwise a server bb started leaves after 30 idle minutes, and the next bb starts it again."));
     kx.onchange = () => fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keep_running: kx.checked }) }).catch(() => {});
     cli.appendChild(kl);
-    // updates: only when asked — the app does not phone home on its own
+    // updates: only when asked (or at start, if turned on): the app does not phone home on its own
     if (d.desktop) {
-      const up = card("Updates", "checked only when you press the button; nothing is downloaded or installed");
+      const up = card("Updates", "ByteBunker " + (d.version || "") + " \u00b7 GitHub is asked only when you press the button");
       const urow = document.createElement("div"); urow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
       const ub = document.createElement("button"); ub.type = "button"; ub.className = "ghost-btn"; ub.textContent = "Check for updates";
+      const wn = document.createElement("button"); wn.type = "button"; wn.className = "ghost-btn"; wn.textContent = "What's new";
       const un = document.createElement("span"); un.className = "hint";
-      ub.onclick = async () => {
-        un.textContent = "asking GitHub\u2026";
-        try {
-          const r = await (await fetch("https://api.github.com/repos/bytebunkerlabs/bytebunker-console/releases/latest")).json();
-          const latest = String(r.tag_name || "").replace(/^v/, "");
-          if (!latest) { un.textContent = "no published release yet"; return; }
-          if (latest === d.version) { un.textContent = "you have the latest (" + latest + ")"; return; }
-          un.textContent = latest + " is available \u2014 ";
-          const a = document.createElement("button"); a.type = "button"; a.className = "linky"; a.textContent = "open the release page"; a.onclick = () => openOut(r.html_url); un.appendChild(a);
-        } catch (e) { un.textContent = "could not reach GitHub: " + e.message; }
-      };
-      urow.appendChild(ub); urow.appendChild(un); up.appendChild(urow);
+      urow.appendChild(ub); urow.appendChild(wn); urow.appendChild(un); up.appendChild(urow);
+      const detail = document.createElement("div"); detail.style.cssText = "display:flex;flex-direction:column;gap:8px"; up.appendChild(detail);
+      const sl = document.createElement("label"); sl.className = "hint"; sl.style.cssText = "display:flex;gap:8px;align-items:center";
+      const sx = document.createElement("input"); sx.type = "checkbox"; sx.checked = !!d.update_check_at_start;
+      sl.appendChild(sx); sl.appendChild(document.createTextNode("Check for a newer version when ByteBunker starts"));
+      sx.onchange = () => fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ update_check_at_start: sx.checked }) }).catch(() => {});
+      up.appendChild(sl);
+      ub.onclick = () => checkUpdate(un, detail);
+      wn.onclick = () => showWhatsNew();
+    }
+  }
+
+  /* ---------------- updates and what's new ---------------- */
+  const mb = (n) => ((n || 0) / 1048576).toFixed(1) + " MB";
+  async function checkUpdate(note, detail) {
+    note.textContent = "asking GitHub\u2026"; detail.textContent = "";
+    let r;
+    try {
+      const resp = await fetch("/api/update/check"); r = await resp.json();
+      if (!resp.ok) throw new Error(r.error || ("HTTP " + resp.status));
+    } catch (e) { note.textContent = "could not check: " + e.message; return; }
+    if (r.none_published) { note.textContent = "no published release yet"; return; }
+    if (!r.newer) { note.textContent = "you have the latest (" + r.current + ")"; return; }
+    note.textContent = "ByteBunker " + r.latest + " is available (you have " + r.current + ")";
+    const notes = document.createElement("div"); notes.style.cssText = "border:1px solid var(--border);border-radius:9px;padding:10px 14px;max-height:340px;overflow:auto";
+    notes.appendChild(helpDom(r.notes || "This release has no notes."));
+    detail.appendChild(notes);
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const prog = document.createElement("span"); prog.className = "hint";
+    if (r.can_update) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "solid-btn"; b.textContent = "Update to " + r.latest;
+      b.onclick = () => applyUpdate(b, prog);
+      row.appendChild(b);
+    } else if (r.why_not) {
+      prog.textContent = r.why_not;
+    }
+    if (r.page) { const a = document.createElement("button"); a.type = "button"; a.className = "linky"; a.textContent = "release page"; a.onclick = () => openOut(r.page); row.appendChild(a); }
+    row.appendChild(prog); detail.appendChild(row);
+  }
+  async function applyUpdate(btn, prog) {
+    btn.disabled = true; prog.textContent = "starting\u2026";
+    const quit = () => {
+      const api = window.pywebview && window.pywebview.api;
+      if (api && api.quit_for_update) api.quit_for_update();
+      else prog.textContent += " Close this tab: ByteBunker reopens by itself.";
+    };
+    try {
+      const resp = await fetch("/api/update/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (!resp.ok) { let e = {}; try { e = await resp.json(); } catch (x) {} prog.textContent = e.error || ("could not start the update (HTTP " + resp.status + ")"); btn.disabled = false; return; }
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n"); buf = parts.pop();
+        for (const ln of parts) {
+          if (!ln.startsWith("data:")) continue;
+          let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+          if (o.error) { prog.textContent = o.error; btn.disabled = false; }
+          else if (o.phase === "download") prog.textContent = "downloading " + mb(o.got) + (o.total ? " of " + mb(o.total) : "");
+          else if (o.phase === "verify") prog.textContent = "checking the download against its checksum\u2026";
+          else if (o.phase === "unpack") prog.textContent = "unpacking\u2026";
+          else if (o.phase === "ready") { prog.textContent = "restarting into " + o.version + "\u2026"; setTimeout(quit, 800); }
+        }
+      }
+    } catch (e) { prog.textContent = "the update stopped: " + e.message; btn.disabled = false; }
+  }
+  async function showWhatsNew() {
+    let d = { sections: [] };
+    try { d = await (await fetch("/api/changelog")).json(); } catch (e) {}
+    const body = $("help-body"); body.textContent = "";
+    const h = document.createElement("h2"); h.textContent = "What's new"; h.style.cssText = "font-size:15px;margin:0 0 6px"; body.appendChild(h);
+    if (!(d.sections || []).length) { const e = document.createElement("div"); e.className = "hint"; e.textContent = "This build has no changelog."; body.appendChild(e); }
+    for (const sec of d.sections || []) {
+      const t = document.createElement("h2"); t.style.cssText = "font-size:14px;margin:14px 0 2px";
+      t.textContent = sec.version + (sec.date ? "  \u00b7  " + sec.date : "") + (sec.version === d.current ? "  \u00b7  this version" : "");
+      body.appendChild(t); body.appendChild(helpDom(sec.body));
+    }
+    showHelp();
+  }
+  function appBanner(build, onDismiss) {
+    const t = $("app-banner-text"); t.textContent = ""; build(t);
+    $("app-banner").hidden = false;
+    $("app-banner-close").onclick = () => { $("app-banner").hidden = true; if (onDismiss) onDismiss(); };
+  }
+  async function updateNotices() {
+    let s = {};
+    try { s = await (await fetch("/api/settings")).json(); } catch (e) { return; }
+    if (!s.desktop) return;
+    const seen = () => fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "update_seen" }) }).catch(() => {});
+    const link = (text, fn) => { const a = document.createElement("button"); a.type = "button"; a.className = "linky"; a.textContent = text; a.onclick = fn; return a; };
+    if (s.updated) {
+      appBanner((t) => { t.appendChild(document.createTextNode("Updated to ByteBunker " + s.updated.to + ". ")); t.appendChild(link("See what's new", showWhatsNew)); }, seen);
+    } else if (s.update_failed) {
+      appBanner((t) => {
+        t.appendChild(document.createTextNode("The update to " + s.update_failed.to + " did not finish (" + s.update_failed.why + "); this is still " + s.version + ". "));
+        if (s.update_failed.page) t.appendChild(link("release page", () => openOut(s.update_failed.page)));
+      }, seen);
+    } else if (s.update_check_at_start) {
+      try {
+        const r = await (await fetch("/api/update/check")).json();
+        if (r.newer) appBanner((t) => { t.appendChild(document.createTextNode("ByteBunker " + r.latest + " is available. ")); t.appendChild(link("Update in Settings", () => go("settings"))); }, null);
+      } catch (e) {}
     }
   }
 
@@ -4791,6 +4883,7 @@
     startLive();
     renderApprovals();
     addHelpButtons();
+    updateNotices();
     const deep = location.hash.slice(1);
     if (deep && screens.includes(deep) && deep !== state.screen) go(deep);
     setInterval(() => { if (!state.models.length) loadModels(); }, 15000);

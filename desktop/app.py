@@ -146,6 +146,13 @@ class Bridge:
     def version(self):
         return VERSION
 
+    def quit_for_update(self):
+        """Close the window: the update helper is waiting for this app to end."""
+        import webview
+        for w in list(webview.windows):
+            w.destroy()
+        return True
+
     def open_folder(self, path):
         """Show a folder in Finder / Explorer — only the app's own data."""
         import subprocess
