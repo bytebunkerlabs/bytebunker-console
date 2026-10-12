@@ -392,6 +392,7 @@ def plugins_install_dir():
 # allowed to run rack and nothing else) and shows its output; it never
 # composes a docker command for a node itself.
 KEYS = racksmod.Keys(os.path.dirname(CONFIG_PATH))
+agentmod.EXTRA_SSH[:] = ["-o", KEYS._known()]     # a worker found by Machines is known by its pinned key
 PAIRINGS = racksmod.Pending()
 
 
@@ -586,6 +587,173 @@ def deploy_chain(run, emit, target, recipe):
     emit({"phase": "done", "exit": 0, "killed": False})
     TRACE.log("machine", action="deploy", target=target, recipe=recipe, ok=True, run=run.id)
     return {"ok": True}
+
+
+# ------------------------------------------------------------ agent plane --
+# Where agents work: any machine Machines found, or this computer (sandboxed
+# in podman's Linux VM on a Mac: an exception to the separate-host rule, and
+# labelled so). A machine that serves models is the model plane: agents there
+# would slow its model down, so it is shown and not offered.
+PLANE_CHECK = r'''
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+echo "system: $(uname -sm)"
+RT=""
+if command -v podman >/dev/null 2>&1; then RT=podman; elif command -v docker >/dev/null 2>&1; then RT=docker; fi
+if [ -z "$RT" ]; then
+  case "$(uname -s)" in
+    Darwin) echo "BB_ERR no container runtime here: brew install podman && podman machine init && podman machine start, then pick it again" ;;
+    *) echo "BB_ERR no container runtime here: sudo apt install -y podman uidmap, then pick it again" ;;
+  esac
+  exit 4
+fi
+if [ "$RT" = podman ] && [ "$(uname -s)" = Darwin ] && ! podman info >/dev/null 2>&1; then
+  podman machine inspect >/dev/null 2>&1 || { echo "BB_ERR podman has no Linux VM yet: podman machine init && podman machine start, then pick it again"; exit 4; }
+  echo "starting podman's Linux VM"
+  podman machine start >/dev/null 2>&1 || { echo "BB_ERR podman's VM did not start: podman machine start"; exit 4; }
+fi
+echo "runtime: $($RT --version 2>/dev/null | head -1)"
+if ! command -v uv >/dev/null 2>&1; then
+  echo "installing uv (runs the harness's Python) into ~/.local/bin"
+  curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || { echo "BB_ERR could not install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 4; }
+fi
+echo "uv: $(uv --version 2>/dev/null)"
+if [ "$(uname -s)" = Linux ] && command -v loginctl >/dev/null 2>&1 && [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != yes ]; then
+  echo "note: linger is off, so agents stop when you log out there (once: sudo loginctl enable-linger $USER)"
+fi
+echo "BB_RUNTIME=$RT"
+'''
+
+PLANE_BUILD = r'''
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+cd "$BB_DIR" || exit 4
+if [ ! -f config/config.yaml ] && [ -f config/config.example.yaml ]; then
+  sed "s/^\(  *runner:\).*/\1 $BB_RT/" config/config.example.yaml > config/config.yaml
+  echo "config/config.yaml made from the example (runner: $BB_RT)"
+fi
+echo "building the sandbox image (the first time takes a few minutes)"
+"$BB_RT" build -q -f docker/Dockerfile.slave -t bytebunker-slave:latest . || exit 5
+echo "sandbox image: bytebunker-slave:latest"
+'''
+
+
+def harness_source():
+    """A harness checkout on this computer to ship to a worker, or None.
+    (Release builds will carry it as a bundle: plan decision 4.)"""
+    for d in (os.environ.get("BYTEBUNKER_HARNESS_SRC"), "~/bb/bytebunker-harness", "~/bytebunker-harness"):
+        if d and os.path.isfile(os.path.join(os.path.expanduser(d), "scripts", "run_master.py")):
+            return os.path.expanduser(d)
+    return None
+
+
+def agent_planes():
+    """Every machine agents could work on, from the last Find, with why or why not."""
+    gw_hosts = set()
+    for g in CFG.get("gateways") or []:
+        try:
+            gw_hosts.add(urllib.parse.urlparse(g.get("url") or "").hostname or "")
+        except ValueError:
+            pass
+    a = CFG.get("agents") or {}
+    current = (a.get("ssh") or racksmod.LOCAL) if a.get("enabled") else ""
+    out = []
+    here = _machines.get("here") or {}
+    out.append({"target": racksmod.LOCAL, "name": "This computer", "description": here.get("description") or "",
+                "kind": "this computer", "selectable": True, "current": current == racksmod.LOCAL,
+                "note": "the exception: agents beside this app, each task sandboxed in a container"
+                        + (" in podman's Linux VM" if sys.platform == "darwin" else "")})
+    for m in annotate_machines(_machines.get("list") or []):
+        if not m.get("ok"):
+            continue
+        names = set(m.get("aliases") or []) | {m.get("target"), m.get("hostname")}
+        serves = bool(m.get("paired_as") or m.get("worker_of") or names & gw_hosts)
+        out.append({"target": m["target"], "name": m["target"], "description": m.get("description") or "",
+                    "kind": "model plane" if serves else "machine", "selectable": not serves,
+                    "current": current in names,
+                    "has": m.get("has") or [],
+                    "note": "serves models: agents there would slow them down" if serves else
+                            ("podman is there" if "podman" in (m.get("has") or []) else
+                             "docker is there" if "docker" in (m.get("has") or []) else "needs podman")})
+    if current and current != racksmod.LOCAL and not any(p["current"] for p in out):
+        out.append({"target": current, "name": current, "description": "", "kind": "machine", "selectable": True,
+                    "current": True, "note": "the worker set before; Find machines to see it here"})
+    return out
+
+
+def agent_plane_setup(run, emit, target):
+    """Make target the agent plane: check it (container runtime, uv), bring
+    the harness there and build its sandbox image, test, then enable."""
+    import subprocess
+    say = lambda t: emit({"line": t})
+    local = target == racksmod.LOCAL
+    a = CFG.setdefault("agents", {})
+    rt = {}
+
+    def remote(script, env=""):
+        cmd = env + script
+        if local:
+            return ["/bin/bash", "-c", cmd]
+        return agentmod.ssh_base() + ["-o", "ConnectTimeout=10", target, "bash -c " + shlex_quote(cmd)]
+
+    def stream(argv, timeout=1800):
+        def on_line(text):
+            text = _ANSI.sub("", text)
+            if text.startswith("BB_ERR "):
+                emit({"error": text[7:]})
+            elif text.startswith("BB_RUNTIME="):
+                rt["name"] = text.split("=", 1)[1].strip()
+            else:
+                say(text)
+        return agentmod.run_streaming(argv, ROOT, on_line, run.cancel_event, timeout_s=timeout)
+
+    def done(ok, msg=""):
+        if not ok:
+            emit({"error": msg}) if msg else None
+        emit({"phase": "done", "exit": 0 if ok else 1, "killed": False})
+        TRACE.log("agents", action="plane", target=target, ok=ok, error=(msg or "")[:300], run=run.id)
+        return {"ok": ok, "error": msg or None}
+
+    say("== %s: what agents need" % ("this computer" if local else target))
+    code, _ = stream(remote(PLANE_CHECK), 600)
+    if code != 0 or not rt.get("name"):
+        return done(False)
+    src = harness_source()
+    if local:
+        if not src:
+            return done(False, "the agents harness is not on this computer (it ships with the app in a later release)")
+        d = src
+        say("harness: %s" % d)
+    else:
+        d = a.get("dir") if a.get("ssh") == target and a.get("dir") else "~/bytebunker-harness"
+        if src:
+            say("== the harness to %s:%s (from %s)" % (target, d, src))
+            git = subprocess.run(["git", "-C", src, "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
+            arch = subprocess.Popen(["git", "-C", src, "archive", "--format=tar", "HEAD"], stdout=subprocess.PIPE)
+            put = subprocess.run(agentmod.ssh_base() + ["-o", "ConnectTimeout=10", target,
+                                 "mkdir -p %s && tar -x -C %s" % (agentmod._rq(d), agentmod._rq(d))],
+                                 stdin=arch.stdout, capture_output=True, text=True, timeout=300)
+            arch.stdout.close()
+            arch.wait()
+            if put.returncode != 0:
+                return done(False, "could not copy the harness there: %s" % racksmod._last(put.stderr))
+            say("harness %s there (its config.yaml, if any, is kept)" % git.stdout.strip())
+        else:
+            say("no harness on this computer to bring: using the one already at %s:%s" % (target, d))
+    say("== the sandbox image")
+    code, _ = stream(remote(PLANE_BUILD, "BB_DIR=%s; BB_RT=%s; " % (
+        shlex_quote(d) if not d.startswith("~/") else '"$HOME"/' + shlex_quote(d[2:]), rt["name"])), 3600)
+    if code != 0:
+        return done(False, "the sandbox image did not build (exit %s): the log above says why" % code)
+    if not local:
+        res = agentmod.test_worker(target, d, "uv run")
+        if not res.get("ok"):
+            return done(False, "%s is not ready: %s" % (target, res.get("error") or ", ".join(
+                k for k, v in (res.get("checks") or {}).items() if not v)))
+    a.update(enabled=True, ssh="" if local else target, dir=d, python="uv run")
+    a.setdefault("script", "scripts/run_master.py")
+    save_config()
+    BUS.publish("config", "agents", {"plane": target})
+    say("agents work on %s now" % ("this computer" if local else target))
+    return done(True)
 
 
 def connect_local(emit=None):
@@ -2678,6 +2846,8 @@ class Handler(BaseHTTPRequestHandler):
                                  "lines": e.get("lines"), "host": e.get("host")})
             st["recent"] = runs[-40:][::-1]
             self._json(st)
+        elif path == "/api/agents/planes":
+            self._json({"at": _machines["at"], "planes": agent_planes()})
         elif path == "/api/agents/log":
             rid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
             found = None
@@ -3105,6 +3275,18 @@ class Handler(BaseHTTPRequestHandler):
     def _agents_run(self, body):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)
+            return
+        if body.get("action") == "plane":
+            target = str(body.get("target") or "").strip()
+            if target != racksmod.LOCAL and not racksmod.TARGET.match(target):
+                self._json({"error": "an ssh destination, or local"}, 400)
+                return
+            p = next((p for p in agent_planes() if p["target"] == target), None)
+            if p and not p["selectable"]:
+                self._json({"error": "%s %s: pick another machine for agents" % (p["name"], p["note"])}, 409)
+                return
+            self._run_streamed("agents-plane", "agents on " + ("this computer" if target == racksmod.LOCAL else target),
+                               lambda run, emit: agent_plane_setup(run, emit, target), key="agents-plane", detach=True)
             return
         if body.get("action") in ("test_worker", "setup", "disable"):
             a = CFG.setdefault("agents", {})

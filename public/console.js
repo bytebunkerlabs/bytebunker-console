@@ -3887,6 +3887,64 @@
   }
 
   /* ---------------- agents (harness) ---------------- */
+  // Agent plane: every machine Machines found; pick where agents work
+  async function planeCard() {
+    let d = { planes: [], at: 0 };
+    try { d = await (await fetch("/api/agents/planes")).json(); } catch (e) {}
+    let card = $("agents-plane");
+    if (!card) {
+      card = document.createElement("div"); card.className = "card"; card.id = "agents-plane"; card.style.gap = "8px";
+      $("agents-topology").parentNode.insertBefore(card, $("agents-topology").nextSibling);
+    }
+    card.textContent = "";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b>Agent plane</b><span class="src mono">where agents work</span></div>';
+    const find = document.createElement("button"); find.type = "button"; find.className = "ghost-btn"; find.textContent = d.at ? "Look again" : "Find machines";
+    head.appendChild(find); card.appendChild(head);
+    const how = document.createElement("div"); how.className = "hint";
+    how.textContent = "Every machine your ssh reaches shows here. Pick one: ByteBunker checks it (a container runtime, uv), brings the harness, builds the sandbox image, tests it, and switches agents to it. Machines that serve models stay for models.";
+    card.appendChild(how);
+    find.onclick = async () => {
+      find.disabled = true; find.textContent = "Looking…";
+      try { await fetch("/api/machines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "find" }) }); } catch (e) {}
+      planeCard();
+    };
+    const log = document.createElement("pre"); log.className = "skill-body"; log.style.whiteSpace = "pre-wrap"; log.hidden = true; log.id = "agents-plane-log";
+    for (const p of d.planes || []) {
+      const el = document.createElement("div"); el.className = "deploy-row"; el.dataset.plane = p.target;
+      const id = document.createElement("div"); id.className = "deploy-id";
+      const b = document.createElement("b"); b.textContent = p.name; id.appendChild(b);
+      const meta = document.createElement("span"); meta.className = "deploy-meta"; meta.textContent = [p.description, p.note].filter(Boolean).join("  ·  "); id.appendChild(meta);
+      el.appendChild(id);
+      const pill = document.createElement("span"); pill.className = "pill" + (p.current ? " ok" : "");
+      pill.textContent = p.current ? "agents work here" : p.kind; el.appendChild(pill);
+      if (p.selectable && !p.current) {
+        const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn"; go.textContent = "Work here";
+        go.onclick = async () => {
+          if (!confirm("Agents on " + p.name + "?\n\nByteBunker checks it, brings the harness there, builds the sandbox image (a few minutes the first time) and switches agents to it." + (p.target === "local" ? "\n\nThis computer is the exception to running agents on a separate machine: each task is sandboxed in a container." : ""))) return;
+          log.hidden = false; log.textContent = "";
+          const say = (t) => { log.textContent += t + "\n"; log.scrollTop = log.scrollHeight; };
+          go.disabled = true;
+          try {
+            await postFrames("/api/agents", { action: "plane", target: p.target }, (o) => {
+              if (o.line != null) say(o.line);
+              else if (o.error) say("error: " + o.error);
+              else if (o.phase === "done") say(o.exit === 0 ? "— ready —" : "— stopped —");
+            });
+          } catch (e) { say("error: " + e.message); }
+          go.disabled = false;
+          renderAgents();
+        };
+        el.appendChild(go);
+      }
+      card.appendChild(el);
+    }
+    if (!(d.planes || []).some((p) => p.target !== "local")) {
+      const n = document.createElement("div"); n.className = "hint"; n.textContent = "Only this computer so far: Find machines lists the rest."; card.appendChild(n);
+    }
+    card.appendChild(log);
+  }
+
   function workerSetupForm(d) {
     const box = document.createElement("div"); box.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:6px";
     const ssh = inputEl("ssh host: an alias from ~/.ssh/config, or user@host"); ssh.value = d.host && d.host !== "this machine" ? d.host : "";
@@ -3970,17 +4028,20 @@
     if (!d.enabled) {
       const warn = document.createElement("div");
       warn.className = "msg-note";
-      warn.textContent = "Agents are off. They run on a separate worker host reached over ssh (not a model server, " +
-        "not this machine): the worker has the harness and podman or docker; this console launches goals there and watches.";
+      warn.textContent = "Agents are off. Pick where they work under Agent plane, or connect a worker by hand below.";
       topo.appendChild(warn);
-      topo.appendChild(workerSetupForm(d));
+      const byHand = document.createElement("details");
+      const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Connect a worker by hand"; byHand.appendChild(sm);
+      byHand.appendChild(workerSetupForm(d));
+      topo.appendChild(byHand);
     } else if (!d.isolated) {
       const warn = document.createElement("div");
       warn.className = "msg-note";
-      warn.textContent = "Running locally on the console host: slaves are NOT sandboxed. " +
-        "Set agents.ssh to a dedicated worker host for real isolation.";
+      warn.textContent = "Agents work on this computer, beside the app: the exception to a separate worker. Each task runs in its own container; " +
+        "the master runs here.";
       topo.appendChild(warn);
     }
+    planeCard();
 
     // master persona (only overwrite when not focused/editing)
     if (document.activeElement !== $("master-name")) $("master-name").value = d.master_name || "";

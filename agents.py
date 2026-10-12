@@ -61,6 +61,13 @@ def status(CFG):
     }
 
 
+EXTRA_SSH = []      # set by the server: host keys this app pinned, beside yours (racks.Keys)
+
+
+def ssh_base():
+    return ["ssh", "-o", "BatchMode=yes"] + EXTRA_SSH
+
+
 def ssh_available():
     """The OpenSSH client: built into macOS and Linux; an optional feature
     on Windows 10/11 (Settings > Apps > Optional features > OpenSSH Client)."""
@@ -85,7 +92,7 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
              "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s)' %s 2>/dev/null | sort -u | tr '\\n' ' '); "
              "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0], shlex.quote(script))
     try:
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, probe],
+        r = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
                            capture_output=True, text=True, timeout=30)
     except Exception as e:   # noqa: BLE001
         return {"ok": False, "error": "ssh failed: %s" % str(e)[:160]}
@@ -127,7 +134,7 @@ def harness_caps(CFG, refresh=False):
         if ssh:
             probe = "cd %s && grep -o -E -- '--(goal-id|proto|spec|timeout-s)' %s 2>/dev/null | sort -u" % (
                 _rq(directory or "~/bytebunker-harness"), shlex.quote(script))
-            text = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, probe],
+            text = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
                                   capture_output=True, text=True, timeout=20).stdout
         else:
             with open(os.path.join(os.path.expanduser(directory), script), encoding="utf-8", errors="replace") as f:
@@ -237,7 +244,7 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None)
                   "SIDE=$!; wait $CPID; RC=$?; exec 2>/dev/null; pkill -P $SIDE; kill $SIDE; "
                   + ('rm -f "$SPEC"; ' if spec_in else "") + "exit $RC"
                   ) % (qdir, launch, launch)
-        return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", ssh, remote]
+        return ssh_base() + ["-o", "ConnectTimeout=15", ssh, remote]
 
     # local: no shell, goal is a discrete argv element; env via a leading `env`
     env_argv = ["env"] + ["%s=%s" % (k, v) for k, v in envs.items()] if envs else []
@@ -281,7 +288,7 @@ def recent_slaves(CFG, limit=40, goal_id=None):
         else:
             qd = shlex.quote(d)
         remote = "tail -n %d %s/%s 2>/dev/null; %s" % (int(limit), qd, rel, live_cmd.replace("{dir}", qd))
-        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", ssh, remote]
+        cmd = ssh_base() + ["-o", "ConnectTimeout=12", ssh, remote]
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
         except (subprocess.TimeoutExpired, OSError) as e:
@@ -373,7 +380,7 @@ def slave_detail(CFG, slave_id):
         d = directory
         qd = "~" if d == "~" else ("~/" + shlex.quote(d[2:]) if d.startswith("~/") else shlex.quote(d))
         remote = script % (qd, sid, sid, sid, sid)
-        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", ssh, remote]
+        cmd = ssh_base() + ["-o", "ConnectTimeout=12", ssh, remote]
     else:
         cmd = ["sh", "-c", script % (shlex.quote(os.path.expanduser(directory)), sid, sid, sid, sid)]
     try:
@@ -621,7 +628,7 @@ def _refresh_usage(a, on_update):
     import json as _json
     ssh = (a.get("ssh") or "").strip()
     py = _USAGE_PY.replace("~/bytebunker-harness", (a.get("dir") or "~/bytebunker-harness"))
-    cmd = (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
+    cmd = (ssh_base() + ["-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
            if ssh else ["python3", "-c", py])
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip().splitlines()
@@ -657,7 +664,7 @@ def stats(CFG, max_age=8):
     py = _STATS_PY.replace("~/bytebunker-harness", (a.get("dir") or "~/bytebunker-harness"))
     py = py.replace("__FAST_METRICS__", _json.dumps(a.get("worker_model_metrics") or "http://127.0.0.1:8001/metrics"))
     if ssh:
-        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
+        cmd = ssh_base() + ["-o", "ConnectTimeout=8", ssh, "python3 -c " + shlex.quote(py)]
     else:
         cmd = ["python3", "-c", py]
     try:
@@ -712,7 +719,7 @@ def push_skill(CFG, name, text):
     rel = "skills/%s/SKILL.md" % name
     try:
         if ssh:
-            cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh,
+            cmd = ssh_base() + ["-o", "ConnectTimeout=8", ssh,
                    "mkdir -p %s && cat > %s" % (_rq(d + "/skills/" + name), _rq(d + "/" + rel))]
             r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=25)
             if r.returncode != 0:
@@ -734,7 +741,7 @@ def remove_skill_remote(CFG, name):
     try:
         target = d + "/skills/" + name
         if ssh:
-            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh,
+            r = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh,
                                 "rm -rf %s %s" % (_rq(target), _rq(target + ".md"))],
                                capture_output=True, text=True, timeout=20)
             return {"removed": r.returncode == 0}
@@ -754,7 +761,7 @@ def kill_slave(CFG, slave_id):
     ssh = (a.get("ssh") or "").strip()
     q = shlex.quote(slave_id)
     inner = ("{ podman kill %s || docker kill %s; } >/dev/null 2>&1 && echo killed || echo not-running" % (q, q))
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh, inner] if ssh else ["sh", "-c", inner]
+    cmd = ssh_base() + ["-o", "ConnectTimeout=10", ssh, inner] if ssh else ["sh", "-c", inner]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip()
     except (subprocess.TimeoutExpired, OSError) as e:

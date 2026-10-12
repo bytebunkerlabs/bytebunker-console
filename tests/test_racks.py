@@ -323,6 +323,51 @@ class AddARack(unittest.TestCase):
             st, r = self.srv.request("POST", "/api/machines", bad)
             self.assertEqual(st, 400, bad)
 
+    def test_agent_plane_found_machines_then_work_here(self):
+        cfgfile = os.path.join(self.f, "ssh_config")
+        with open(cfgfile, "w") as f:
+            f.write("Host box\n  HostName 127.0.0.1\nHost worker1\n  HostName 127.0.0.7\n")
+        for name, body in (("podman", 'case "$1" in --version) echo "podman version 5.0.0";; build) echo "built";; *) exit 0;; esac'),
+                           ("uv", 'echo "uv 0.11.0"')):
+            script(os.path.join(self.f, "bin", name), "#!/bin/sh\n" + body + "\n")
+        src = os.path.join(self.f, "harness")
+        os.makedirs(os.path.join(src, "scripts"))
+        os.makedirs(os.path.join(src, "config"))
+        with open(os.path.join(src, "scripts", "run_master.py"), "w") as f:
+            f.write("# --goal-id --proto --spec\n")
+        with open(os.path.join(src, "config", "config.example.yaml"), "w") as f:
+            f.write("sandbox:\n  runner: docker\n")
+        git = lambda *a: subprocess.run(["git", "-C", src] + list(a), check=True, capture_output=True)
+        git("init", "-q"); git("add", "."); git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "h")
+        self.srv.stop()
+        self.srv = Server(os.path.join(self.f, "data"), {}, env={
+            "PATH": os.path.join(self.f, "bin") + os.pathsep + clean_path(), "BYTEBUNKER_HARNESS_SRC": src,
+            "BYTEBUNKER_SSH_CONFIG": cfgfile, "BYTEBUNKER_TAILNET": "off", "BYTEBUNKER_LOCAL_RACK": "off"})
+        got = self.found(self.pair())                                  # box serves models once it is paired
+        self.srv.request("POST", "/api/racks", {"action": "save", "pairing": got["pairing"]})
+        self.srv.request("POST", "/api/machines", {"action": "find"})
+        st, d = self.srv.request("GET", "/api/agents/planes")
+        kinds = {p["target"]: (p["kind"], p["selectable"]) for p in d["planes"]}
+        self.assertEqual(kinds["local"], ("this computer", True))
+        self.assertEqual(kinds["box"], ("model plane", False))
+        self.assertEqual(kinds["worker1"], ("machine", True))
+        st, r = self.srv.request("POST", "/api/agents", {"action": "plane", "target": "box"})
+        self.assertEqual(st, 409, r)
+        frames = self.srv.sse("/api/agents", method="POST", body={"action": "plane", "target": "worker1"}, timeout=60,
+                              until=lambda fr: json.loads(fr[-1]["data"]).get("phase") == "done")
+        frames = [json.loads(x["data"]) for x in frames]
+        lines = [x.get("line") for x in frames if x.get("line")]
+        self.assertEqual(frames[-1]["exit"], 0, frames)
+        self.assertIn("runtime: podman version 5.0.0", lines)
+        self.assertIn("config/config.yaml made from the example (runner: podman)", lines)
+        self.assertIn("agents work on worker1 now", lines)
+        with open(os.path.join(self.f, "home", "bytebunker-harness", "config", "config.yaml")) as f:
+            self.assertIn("runner: podman", f.read())
+        cfg = json.loads(text(self.srv.cfg))
+        self.assertEqual((cfg["agents"]["enabled"], cfg["agents"]["ssh"]), (True, "worker1"))
+        st, d = self.srv.request("GET", "/api/agents/planes")
+        self.assertTrue(next(p for p in d["planes"] if p["target"] == "worker1")["current"])
+
     def test_removing_a_rack_takes_its_key_back(self):
         got = self.found(self.pair())
         self.srv.request("POST", "/api/racks", {"action": "save", "pairing": got["pairing"]})
