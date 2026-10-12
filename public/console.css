@@ -572,3 +572,8 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
 .palette-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 10px;border-radius:7px;text-align:left;font-size:13px;color:var(--fg)}
 .palette-item small{color:var(--faint);font-size:11px}
 .palette-item.on,.palette-item:hover{background:var(--chip)}
+/* the court: what a role may read */
+.court-access{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:2px}
+.chk{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer}
+.chk input{margin:0}
+.court-access-box summary{cursor:pointer}

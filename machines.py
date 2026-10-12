@@ -52,7 +52,7 @@ if command -v "$NS" >/dev/null 2>&1; then
   "$NS" --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>/dev/null | sed 's/^/gpu=/'
 fi
 echo "disk_kb=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
-for t in docker podman git python3 curl; do command -v "$t" >/dev/null 2>&1 && echo "has_$t=1"; done
+for t in docker podman bwrap git python3 curl; do command -v "$t" >/dev/null 2>&1 && echo "has_$t=1"; done
 R=$(PATH="$HOME/.local/bin:$PATH" command -v rack 2>/dev/null)
 [ -n "$R" ] && echo "rack=$("$R" version 2>/dev/null | head -1)"
 echo "BB_PROBE_OK"

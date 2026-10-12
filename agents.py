@@ -117,7 +117,8 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
 def _caps_from(text):
     """What a harness's run_master.py understands, from its own text."""
     return {"goal_id": "--goal-id" in text, "proto2": "--proto" in text, "spec": "--spec" in text,
-            "timeout": "--timeout-s" in text, "court": "--court" in text, "checked": round(time.time())}
+            "timeout": "--timeout-s" in text, "court": "--court" in text, "access": "--access" in text,
+            "checked": round(time.time())}
 
 
 # The Sultan's court as the harness defines it (slaves/archetypes.py): what
@@ -143,9 +144,14 @@ COURT_DEFAULTS = [
      "timeout_s": None, "what": "Read-only analysis of the workspace; changes nothing."},
     {"id": "general", "suggest": "khadim", "tier": "doer", "thinking": False, "network": False, "max_tokens": None,
      "timeout_s": None, "what": "General work: read, write, run commands in its workspace."},
+    {"id": "khazin", "suggest": "", "tier": "doer", "thinking": False, "network": False, "max_tokens": None,
+     "timeout_s": 2700, "needs_access": True,
+     "what": "Keeper of the treasury: reads the data you give it (folders, MCP tools) and answers from it; "
+             "never has network. Works in chunks, in parallel; results land as files for the others."},
 ]
 COURT_ROLE_KEYS = ("display", "description", "enabled", "base", "network", "thinking", "max_tokens", "timeout_s",
-                   "max_attempts", "default_depth", "brief_suffix")
+                   "max_attempts", "default_depth", "brief_suffix", "data", "mcp", "write_tools")
+_SERVER_ID = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$")
 _COURT_ID = __import__("re").compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
@@ -166,7 +172,12 @@ def clean_court(raw):
             if k not in r or r[k] in (None, ""):
                 continue
             v = r[k]
-            if k in ("enabled", "network", "thinking"):
+            if k in ("data", "mcp", "write_tools"):
+                if not isinstance(v, list) or not all(isinstance(x, str) and x.strip() for x in v):
+                    raise ValueError("role %s: %s is a list of names" % (rid, k))
+                if v:
+                    out[k] = sorted(set(x.strip() for x in v))
+            elif k in ("enabled", "network", "thinking"):
                 out[k] = bool(v)
             elif k in ("max_tokens", "timeout_s", "max_attempts"):
                 try:
@@ -202,7 +213,83 @@ def clean_court(raw):
     court = {"roles": roles}
     if con:
         court["concurrency"] = con
+    access = _clean_access(raw.get("access") or {})
+    if access["folders"] or access["mcp_servers"]:
+        court["access"] = access
+    defaults = {r["id"]: r for r in COURT_DEFAULTS}
+    for rid, r in roles.items():
+        if not (r.get("data") or r.get("mcp") or r.get("write_tools")):
+            continue
+        for f in r.get("data") or []:
+            if f not in access["folders"]:
+                raise ValueError("role %s reads folder %r, which is not under Access" % (rid, f))
+        for g in (r.get("mcp") or []) + (r.get("write_tools") or []):
+            if "__" not in g or g.split("__", 1)[0] not in access["mcp_servers"]:
+                raise ValueError("role %s: %r is not a tool of a server shared with agents" % (rid, g))
+        base = defaults.get(rid) or defaults.get(r.get("base")) or {}
+        if r.get("network") or (base.get("network") and r.get("network") is not False):
+            raise ValueError("%s uses the network, so it cannot also hold data (the data could leave): "
+                             "give the data to khazin, analyst or a role of your own without network" % rid)
     return court
+
+
+def _clean_access(a):
+    """Access: folders on the worker by name, and the names of this app's MCP servers shared with agents."""
+    if not isinstance(a, dict):
+        raise ValueError("access: expected an object")
+    folders = {}
+    for n, p in (a.get("folders") or {}).items():
+        n, p = str(n).strip(), str(p or "").strip()
+        if not _COURT_ID.match(n):
+            raise ValueError("folder name %r: lower-case letters, digits, - or _" % n)
+        if not (p.startswith("/") or p.startswith("~")):
+            raise ValueError("folder %s: a full path on the worker (/... or ~/...)" % n)
+        folders[n] = p
+    servers = sorted({str(x).strip() for x in (a.get("mcp_servers") or []) if str(x).strip()})
+    for n in servers:
+        if not _SERVER_ID.match(n):
+            raise ValueError("MCP server %r cannot be shared with agents: its name must be letters, digits or -" % n)
+    return {"folders": folders, "mcp_servers": servers}
+
+
+def court_for_run(court, caps, mcp_servers):
+    """The court as this worker's harness takes it: access expanded with the shared MCP servers'
+    definitions (their settings travel in the run's spec, never on a command line); an older
+    harness gets it without data, tools or the khazin."""
+    import copy
+    c = copy.deepcopy(court or {})
+    if not caps.get("access"):
+        c.pop("access", None)
+        for rid in list((c.get("roles") or {})):
+            for k in ("data", "mcp", "write_tools"):
+                c["roles"][rid].pop(k, None)
+            if rid == "khazin" or not c["roles"][rid]:
+                c["roles"].pop(rid, None)
+        return c
+    acc = c.get("access") or {}
+    defs = {}
+    for n in acc.get("mcp_servers") or []:
+        sv = (mcp_servers or {}).get(n)
+        if not sv or not sv.get("command"):
+            continue
+        env = sv.get("env") if isinstance(sv.get("env"), dict) else {}
+        defs[n] = {"command": sv["command"], "args": list(sv.get("args") or []), "env": dict(env)}
+    if acc:
+        c["access"] = {"folders": dict(acc.get("folders") or {}), "mcp_servers": defs}
+    return c
+
+
+def shareable_mcp(mcp_servers):
+    """This app's MCP servers agents could use: the app's own built-ins (terminal, jobs) stay here."""
+    from mcp import BUILTIN_SCRIPTS
+    out = []
+    for n, sv in sorted((mcp_servers or {}).items()):
+        args = sv.get("args") or []
+        if args and os.path.basename(str(args[0])) in BUILTIN_SCRIPTS:
+            continue
+        out.append({"name": n, "command": sv.get("command") or "", "ok_name": bool(_SERVER_ID.match(n)),
+                    "enabled": sv.get("enabled", True)})
+    return out
 
 
 def harness_caps(CFG, refresh=False):
@@ -217,13 +304,18 @@ def harness_caps(CFG, refresh=False):
     text = ""
     try:
         if ssh:
-            probe = "cd %s && grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null | sort -u" % (
+            # a harness with the tool broker takes access (data and MCP tools for a role)
+            probe = ("cd %s && { grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null; "
+                     "[ -f src/bytebunker_agents/harness/tool_broker.py ] && echo --access; } | sort -u") % (
                 _rq(directory or "~/bytebunker-harness"), shlex.quote(script))
             text = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
                                   capture_output=True, text=True, timeout=20).stdout
         else:
             with open(os.path.join(os.path.expanduser(directory), script), encoding="utf-8", errors="replace") as f:
                 text = f.read()
+            if os.path.isfile(os.path.join(os.path.expanduser(directory), "src", "bytebunker_agents", "harness",
+                                           "tool_broker.py")):
+                text += "\n--access"
     except Exception:   # noqa: BLE001 - unknown means the old flags
         return {}
     a["harness"] = _caps_from(text)

@@ -598,11 +598,22 @@ PLANE_CHECK = r'''
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 echo "system: $(uname -sm)"
 RT=""
-if command -v podman >/dev/null 2>&1; then RT=podman; elif command -v docker >/dev/null 2>&1; then RT=docker; fi
+# Linux and WSL2: bubblewrap when it can make a sandbox and systemd can limit it (no image, no daemon)
+if [ "$(uname -s)" = Linux ] && command -v bwrap >/dev/null 2>&1 \
+   && systemctl --user is-system-running 2>/dev/null | grep -qE '^(running|degraded)'; then
+  B="--ro-bind /usr /usr"
+  for d in /bin /sbin /lib /lib32 /lib64; do
+    if [ -L "$d" ]; then B="$B --symlink $(readlink "$d") $d"; elif [ -d "$d" ]; then B="$B --ro-bind $d $d"; fi
+  done
+  if bwrap --unshare-all --die-with-parent $B --proc /proc --dev /dev true 2>/dev/null; then RT=bwrap; fi
+fi
+if [ -z "$RT" ]; then
+  if command -v podman >/dev/null 2>&1; then RT=podman; elif command -v docker >/dev/null 2>&1; then RT=docker; fi
+fi
 if [ -z "$RT" ]; then
   case "$(uname -s)" in
     Darwin) echo "BB_ERR no container runtime here: brew install podman && podman machine init && podman machine start, then pick it again" ;;
-    *) echo "BB_ERR no container runtime here: sudo apt install -y podman uidmap, then pick it again" ;;
+    *) echo "BB_ERR no sandbox here: sudo apt install -y bubblewrap (the lightest), then pick it again" ;;
   esac
   exit 4
 fi
@@ -611,7 +622,8 @@ if [ "$RT" = podman ] && [ "$(uname -s)" = Darwin ] && ! podman info >/dev/null 
   echo "starting podman's Linux VM"
   podman machine start >/dev/null 2>&1 || { echo "BB_ERR podman's VM did not start: podman machine start"; exit 4; }
 fi
-echo "runtime: $($RT --version 2>/dev/null | head -1)"
+if [ "$RT" = bwrap ]; then echo "sandbox: bubblewrap $(bwrap --version 2>/dev/null | awk '{print $2}'), limits by systemd: no image to build"
+else echo "sandbox: $($RT --version 2>/dev/null | head -1)"; fi
 if ! command -v uv >/dev/null 2>&1; then
   echo "installing uv (runs the harness's Python) into ~/.local/bin"
   curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || { echo "BB_ERR could not install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 4; }
@@ -626,10 +638,15 @@ echo "BB_RUNTIME=$RT"
 PLANE_BUILD = r'''
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$BB_DIR" || exit 4
+RUNNER=$BB_RT; [ "$BB_RT" = bwrap ] && RUNNER=auto
 if [ ! -f config/config.yaml ] && [ -f config/config.example.yaml ]; then
-  sed "s/^\(  *runner:\).*/\1 $BB_RT/" config/config.example.yaml > config/config.yaml
-  echo "config/config.yaml made from the example (runner: $BB_RT)"
+  sed "s/^\(  *runner:\).*/\1 $RUNNER/" config/config.example.yaml > config/config.yaml
+  echo "config/config.yaml made from the example (runner: $RUNNER)"
+elif [ -f config/config.yaml ] && ! grep -qE "^ +runner: *$RUNNER( |$)" config/config.yaml; then
+  sed "s/^\(  *runner:\).*/\1 $RUNNER/" config/config.yaml > config/config.yaml.new && mv config/config.yaml.new config/config.yaml
+  echo "config/config.yaml: sandbox runner set to $RUNNER"
 fi
+if [ "$BB_RT" = bwrap ]; then echo "bubblewrap runs the agents' code directly: no image"; exit 0; fi
 echo "building the sandbox image (the first time takes a few minutes)"
 "$BB_RT" build -q -f docker/Dockerfile.slave -t bytebunker-slave:latest . || exit 5
 echo "sandbox image: bytebunker-slave:latest"
@@ -659,8 +676,8 @@ def agent_planes():
     here = _machines.get("here") or {}
     out.append({"target": racksmod.LOCAL, "name": "This computer", "description": here.get("description") or "",
                 "kind": "this computer", "selectable": True, "current": current == racksmod.LOCAL,
-                "note": "the exception: agents beside this app, each task sandboxed in a container"
-                        + (" in podman's Linux VM" if sys.platform == "darwin" else "")})
+                "note": "the exception: agents beside this app, each task in its own sandbox"
+                        + (" (a container in podman's Linux VM)" if sys.platform == "darwin" else "")})
     for m in annotate_machines(_machines.get("list") or []):
         if not m.get("ok"):
             continue
@@ -671,8 +688,10 @@ def agent_planes():
                     "current": current in names,
                     "has": m.get("has") or [],
                     "note": "serves models: agents there would slow them down" if serves else
-                            ("podman is there" if "podman" in (m.get("has") or []) else
-                             "docker is there" if "docker" in (m.get("has") or []) else "needs podman")})
+                            ("bubblewrap is there" if "bwrap" in (m.get("has") or []) else
+                             "podman is there" if "podman" in (m.get("has") or []) else
+                             "docker is there" if "docker" in (m.get("has") or []) else
+                             "needs a sandbox: bubblewrap on Linux, podman on a Mac")})
     if current and current != racksmod.LOCAL and not any(p["current"] for p in out):
         out.append({"target": current, "name": current, "description": "", "kind": "machine", "selectable": True,
                     "current": True, "note": "the worker set before; Find machines to see it here"})
@@ -738,7 +757,7 @@ def agent_plane_setup(run, emit, target):
             say("harness %s there (its config.yaml, if any, is kept)" % git.stdout.strip())
         else:
             say("no harness on this computer to bring: using the one already at %s:%s" % (target, d))
-    say("== the sandbox image")
+    say("== the sandbox")
     code, _ = stream(remote(PLANE_BUILD, "BB_DIR=%s; BB_RT=%s; " % (
         shlex_quote(d) if not d.startswith("~/") else '"$HOME"/' + shlex_quote(d[2:]), rt["name"])), 3600)
     if code != 0:
@@ -968,8 +987,9 @@ def agents_spec():
     spec = {"version": 1}
     if out:
         spec["roles"] = out
-    if (court.get("roles") or court.get("concurrency")) and (a.get("harness") or {}).get("court"):
-        spec["court"] = court
+    caps = a.get("harness") or {}
+    if (court.get("roles") or court.get("concurrency") or court.get("access")) and caps.get("court"):
+        spec["court"] = agentmod.court_for_run(court, caps, CFG.get("mcp_servers") or {})
     return spec if len(spec) > 1 else None
 
 
@@ -2856,6 +2876,8 @@ class Handler(BaseHTTPRequestHandler):
             a = CFG.get("agents") or {}
             self._json({"defaults": agentmod.COURT_DEFAULTS, "court": a.get("court") or {"roles": {}},
                         "harness_knows": bool((a.get("harness") or {}).get("court")),
+                        "harness_access": bool((a.get("harness") or {}).get("access")),
+                        "mcp": agentmod.shareable_mcp(CFG.get("mcp_servers") or {}),
                         "master_name": a.get("master_name") or "Sultan"})
         elif path == "/api/agents/planes":
             self._json({"at": _machines["at"], "planes": agent_planes()})

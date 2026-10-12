@@ -3956,6 +3956,11 @@
     card.oninput = card.onchange = () => { card.dataset.dirty = "1"; };
     const court = JSON.parse(JSON.stringify(d.court || { roles: {} }));
     court.roles = court.roles || {};
+    court.access = court.access || { folders: {}, mcp_servers: [] };
+    court.access.folders = court.access.folders || {}; court.access.mcp_servers = court.access.mcp_servers || [];
+    const defaultsById = Object.fromEntries((d.defaults || []).map((r) => [r.id, r]));
+    // a role may hold data only if it never uses the network (the data could leave)
+    const canHold = (rid, o) => { const b = defaultsById[rid] || defaultsById[o.base] || {}; return !o.network && !(b.network && o.network !== false); };
     const head = document.createElement("div"); head.className = "skill-head";
     head.innerHTML = '<div class="skill-id"><b></b><span class="src mono">the roles your master spawns</span></div>';
     head.querySelector("b").textContent = (d.master_name || "Sultan") + "'s court";
@@ -4003,9 +4008,80 @@
         rm.onclick = () => { delete court.roles[row.id]; el.remove(); }; tune.appendChild(rm);
       }
       id.appendChild(tune);
+      // what this role may read: folders and MCP servers from Access, below
+      const folders = Object.keys(court.access.folders), servers = court.access.mcp_servers;
+      if (canHold(row.id, o) && (folders.length || servers.length || (b && b.needs_access))) {
+        const acc = document.createElement("div"); acc.className = "court-access";
+        const lab = document.createElement("span"); lab.className = "deploy-meta"; lab.textContent = "reads:"; acc.appendChild(lab);
+        const chip = (text, checked, onchange, title) => {
+          const l = document.createElement("label"); l.className = "chk"; l.title = title || "";
+          const c = document.createElement("input"); c.type = "checkbox"; c.checked = checked; c.onchange = () => onchange(c.checked);
+          l.appendChild(c); l.appendChild(document.createTextNode(" " + text)); acc.appendChild(l); return c;
+        };
+        const toggle = (key, val, on) => { const set = new Set(o[key] || []); if (on) set.add(val); else set.delete(val); o[key] = [...set]; if (!o[key].length) delete o[key]; };
+        for (const f of folders) chip("/data/" + f, (o.data || []).includes(f), (v) => toggle("data", f, v), court.access.folders[f] + " on the worker, read-only");
+        for (const sname of servers) {
+          const g = sname + "__*";
+          chip(sname + " tools", (o.mcp || []).includes(g), (v) => toggle("mcp", g, v), "its read-only tools, through the broker");
+          chip("and changes", (o.write_tools || []).includes(g), (v) => toggle("write_tools", g, v), sname + ": also the tools that may change things");
+        }
+        if (!folders.length && !servers.length) {
+          const n = document.createElement("span"); n.className = "deploy-meta";
+          n.textContent = "nothing yet: add a folder or share an MCP server under Access"; acc.appendChild(n);
+        }
+        id.appendChild(acc);
+      } else if (!canHold(row.id, o) && (o.data || o.mcp)) {
+        delete o.data; delete o.mcp; delete o.write_tools;
+      }
       el.appendChild(on); el.appendChild(id);
       list.appendChild(el);
     }
+    // Access: what the court can give roles to read
+    const acc = document.createElement("details"); acc.className = "court-access-box"; acc.open = !!(Object.keys(court.access.folders).length || court.access.mcp_servers.length);
+    const asum = document.createElement("summary"); asum.className = "hint"; asum.textContent = "Access: folders and MCP tools roles may read"; acc.appendChild(asum);
+    const aw = document.createElement("div"); aw.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:6px"; acc.appendChild(aw);
+    const ah = document.createElement("div"); ah.className = "hint";
+    ah.appendChild(helpDom("A role you tick above reads these and nothing else: folders read-only at /data/<name>, MCP tools through the worker's broker (read-only ones unless you tick \u201cand changes\u201d). A role that uses the network can never hold data. → [Agents and your data](help:court)"));
+    aw.appendChild(ah);
+    if (!d.harness_access) { const n = document.createElement("div"); n.className = "msg-note"; n.textContent = "The worker's harness is older and gives roles no data: Work here (Agent plane) brings the newer one."; aw.appendChild(n); }
+    for (const [fname, fpath] of Object.entries(court.access.folders)) {
+      const r = document.createElement("div"); r.className = "court-folder"; r.style.cssText = "display:flex;gap:8px;align-items:center";
+      const c = document.createElement("code"); c.textContent = "/data/" + fname; r.appendChild(c);
+      const pth = document.createElement("span"); pth.className = "deploy-meta mono"; pth.textContent = fpath; r.appendChild(pth);
+      const x = document.createElement("button"); x.type = "button"; x.className = "ghost-btn danger"; x.textContent = "Remove";
+      x.onclick = () => { delete court.access.folders[fname]; for (const k of Object.keys(court.roles)) { const ro = court.roles[k]; if (ro.data) { ro.data = ro.data.filter((y) => y !== fname); if (!ro.data.length) delete ro.data; } } save().then(courtCard); };
+      r.appendChild(x); aw.appendChild(r);
+    }
+    const fr = document.createElement("div"); fr.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+    const fn = inputEl("name, e.g. sales"); fn.style.maxWidth = "140px"; fn.id = "court-folder-name";
+    const fp = inputEl("path on the worker, e.g. ~/data/sales"); fp.style.flex = "1"; fp.style.minWidth = "200px"; fp.id = "court-folder-path";
+    const fb = document.createElement("button"); fb.type = "button"; fb.className = "ghost-btn"; fb.textContent = "Add folder"; fb.id = "court-folder-add";
+    fb.onclick = () => {
+      const k = fn.value.trim().toLowerCase(), v = fp.value.trim();
+      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(k)) { fn.focus(); note.textContent = "a folder name of lower-case letters"; return; }
+      if (!/^[\/~]/.test(v)) { fp.focus(); note.textContent = "a full path on the worker: /… or ~/…"; return; }
+      court.access.folders[k] = v; save().then(courtCard);
+    };
+    [fn, fp, fb].forEach((x) => fr.appendChild(x)); aw.appendChild(fr);
+    const ms = document.createElement("div"); ms.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+    const ml0 = document.createElement("span"); ml0.className = "deploy-meta"; ml0.textContent = "MCP servers shared with agents:"; ms.appendChild(ml0);
+    if (!(d.mcp || []).length) { const n = document.createElement("span"); n.className = "deploy-meta"; n.textContent = "none yet: add one in Tools \u2192 MCP servers"; ms.appendChild(n); }
+    for (const m of d.mcp || []) {
+      const l = document.createElement("label"); l.className = "chk"; l.title = m.ok_name ? "runs on the worker: " + m.command + " must be there" : "rename it (letters, digits, -) to share it";
+      const c = document.createElement("input"); c.type = "checkbox"; c.disabled = !m.ok_name; c.checked = court.access.mcp_servers.includes(m.name);
+      c.onchange = () => {
+        const set = new Set(court.access.mcp_servers); if (c.checked) set.add(m.name); else set.delete(m.name);
+        court.access.mcp_servers = [...set];
+        if (!c.checked) for (const k of Object.keys(court.roles)) for (const f of ["mcp", "write_tools"]) { const ro = court.roles[k]; if (ro[f]) { ro[f] = ro[f].filter((g) => !g.startsWith(m.name + "__")); if (!ro[f].length) delete ro[f]; } }
+        save().then(courtCard);
+      };
+      l.appendChild(c); l.appendChild(document.createTextNode(" " + m.name)); ms.appendChild(l);
+    }
+    aw.appendChild(ms);
+    const msn = document.createElement("div"); msn.className = "hint";
+    msn.textContent = "A shared server runs on the worker with its settings from here (keys included, sent with each run, never inside a sandbox): its command must be installed there.";
+    aw.appendChild(msn);
+    card.appendChild(acc);
     // add a role of your own
     const add = document.createElement("details");
     const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Add a role of your own"; add.appendChild(sm);
@@ -4036,7 +4112,7 @@
     const note = document.createElement("span"); note.className = "hint";
     [sv, rs, note].forEach((x) => acts.appendChild(x)); card.appendChild(acts);
     async function save(body) {
-      const c = body || { roles: court.roles, concurrency: { max_concurrent_slaves: c1.value || undefined, max_slaves_per_goal: c2.value || undefined } };
+      const c = body || { roles: court.roles, access: court.access, concurrency: { max_concurrent_slaves: c1.value || undefined, max_slaves_per_goal: c2.value || undefined } };
       for (const k of Object.keys(c.roles || {})) { const r = c.roles[k]; for (const f of Object.keys(r)) if (r[f] === undefined || r[f] === "") delete r[f]; }
       try {
         const r = await (await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "court", court: c }) })).json();
@@ -4046,7 +4122,7 @@
       } catch (e) { note.textContent = e.message; }
     }
     sv.onclick = () => save();
-    rs.onclick = async () => { if (!confirm("Forget your names, roles and limits, and use the built-in court?")) return; await save({ roles: {} }); courtCard(); };
+    rs.onclick = async () => { if (!confirm("Forget your names, roles, limits and access, and use the built-in court?")) return; await save({ roles: {} }); courtCard(); };
   }
 
   // Agent plane: every machine Machines found; pick where agents work
@@ -4064,7 +4140,7 @@
     const find = document.createElement("button"); find.type = "button"; find.className = "ghost-btn"; find.textContent = d.at ? "Look again" : "Find machines";
     head.appendChild(find); card.appendChild(head);
     const how = document.createElement("div"); how.className = "hint";
-    how.textContent = "Every machine your ssh reaches shows here. Pick one: ByteBunker checks it (a container runtime, uv), brings the harness, builds the sandbox image, tests it, and switches agents to it. Machines that serve models stay for models.";
+    how.textContent = "Every machine your ssh reaches shows here. Pick one: ByteBunker checks it, brings the harness, sets up the lightest sandbox that works there (bubblewrap on Linux and WSL2, no image; podman elsewhere), tests it, and switches agents to it. Machines that serve models stay for models.";
     card.appendChild(how);
     find.onclick = async () => {
       find.disabled = true; find.textContent = "Looking…";
@@ -4083,7 +4159,7 @@
       if (p.selectable && !p.current) {
         const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn"; go.textContent = "Work here";
         go.onclick = async () => {
-          if (!confirm("Agents on " + p.name + "?\n\nByteBunker checks it, brings the harness there, builds the sandbox image (a few minutes the first time) and switches agents to it." + (p.target === "local" ? "\n\nThis computer is the exception to running agents on a separate machine: each task is sandboxed in a container." : ""))) return;
+          if (!confirm("Agents on " + p.name + "?\n\nByteBunker checks it, brings the harness there, sets up its sandbox (with podman, an image: a few minutes the first time) and switches agents to it." + (p.target === "local" ? "\n\nThis computer is the exception to running agents on a separate machine: each task runs in its own sandbox." : ""))) return;
           log.hidden = false; log.textContent = "";
           const say = (t) => { log.textContent += t + "\n"; log.scrollTop = log.scrollHeight; };
           go.disabled = true;

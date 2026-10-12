@@ -40,6 +40,21 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   check("agents: Settings has the court, every role, yours to name", courtText.includes("court") && courtText.includes("researcher") &&
         courtText.includes("malikah") && await page.locator('#agents-court [data-role="researcher"] input.text-input').first().isVisible().catch(() => false),
         courtText.slice(0, 120) + " " + errors.slice(-3).join(" | "));
+  // Access: a folder for the khazin, read-only; a network role is offered none
+  check("agents: the khazin waits for access", (await page.locator('#agents-court [data-role="khazin"]').innerText().catch(() => "")).includes("nothing yet"));
+  await page.locator("#agents-court .court-access-box summary").click();
+  await page.fill("#court-folder-name", "sales");
+  await page.fill("#court-folder-path", "~/data/sales");
+  await page.click("#court-folder-add");
+  await page.waitForTimeout(800);
+  await page.locator('#agents-court [data-role="khazin"] .court-access input').first().check();
+  await page.click("#court-save");
+  await page.waitForTimeout(600);
+  const savedCourt = await (await fetch(BASE + "/api/agents/court")).json();
+  check("agents: a folder given to the khazin, saved", JSON.stringify((savedCourt.court.roles.khazin || {}).data) === '["sales"]' &&
+        savedCourt.court.access.folders.sales === "~/data/sales", JSON.stringify(savedCourt.court).slice(0, 200));
+  check("agents: a network role is offered no data", await page.locator('#agents-court [data-role="researcher"] .court-access').count() === 0);
+  await fetch(BASE + "/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "court", court: { roles: {} } }) });
   await page.click('#agents-tabs [data-atab="master"]');
   await page.waitForTimeout(400);
   check("agents: Master hides the settings", !(await page.locator("#agents-master").isVisible().catch(() => true)) &&

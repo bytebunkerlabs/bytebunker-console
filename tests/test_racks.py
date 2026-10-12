@@ -358,7 +358,7 @@ class AddARack(unittest.TestCase):
         frames = [json.loads(x["data"]) for x in frames]
         lines = [x.get("line") for x in frames if x.get("line")]
         self.assertEqual(frames[-1]["exit"], 0, frames)
-        self.assertIn("runtime: podman version 5.0.0", lines)
+        self.assertIn("sandbox: podman version 5.0.0", lines)
         self.assertIn("config/config.yaml made from the example (runner: podman)", lines)
         self.assertIn("agents work on worker1 now", lines)
         with open(os.path.join(self.f, "home", "bytebunker-harness", "config", "config.yaml")) as f:
