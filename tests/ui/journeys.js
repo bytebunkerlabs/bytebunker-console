@@ -34,6 +34,16 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   const oneMachine = await page.locator("#agents-one-machine").innerText().catch(() => "");
   check("agents: with one machine, says to use the Playground, a Project or bb", oneMachine.includes("One machine?") && oneMachine.includes("Playground") && oneMachine.includes("bb"),
         oneMachine.slice(0, 120));
+  await page.click('#agents-tabs [data-atab="settings"]');
+  await page.waitForSelector('#agents-court [data-role="researcher"]', { timeout: 8000 }).catch(() => {});
+  const courtText = await page.locator("#agents-court").innerText().catch(() => "");
+  check("agents: Settings has the court, every role, yours to name", courtText.includes("court") && courtText.includes("researcher") &&
+        courtText.includes("malikah") && await page.locator('#agents-court [data-role="researcher"] input.text-input').first().isVisible().catch(() => false),
+        courtText.slice(0, 120) + " " + errors.slice(-3).join(" | "));
+  await page.click('#agents-tabs [data-atab="master"]');
+  await page.waitForTimeout(400);
+  check("agents: Master hides the settings", !(await page.locator("#agents-master").isVisible().catch(() => true)) &&
+        !(await page.locator("#agents-court").isVisible().catch(() => true)));
   // start a slow goal from "another client" and walk away from it
   const ctl = new AbortController();
   fetch(BASE + "/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal: "slow" }), signal: ctl.signal })

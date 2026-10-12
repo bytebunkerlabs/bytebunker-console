@@ -5,17 +5,19 @@ screen: agents
 order: 80
 summary: A goal for a team of agents, run on a separate worker
 ---
-The agents (a master that plans and a court of helpers) run on a separate worker machine, never on the machine that serves the models and never on this one. Each helper runs in its own container with no network unless it is granted. ByteBunker starts goals there over SSH and watches.
+A master agent plans each goal and hands the work to its court of helpers: fast workers, a deep thinker, a judge (→ [The court](help:court)). Each helper runs in its own container with no network unless it is granted. ByteBunker starts goals where the agents work and watches.
 
-## Connect a worker
+Agents has two tabs: **Master**, to run goals and follow them, and **Settings**, for where agents work, the master's models and instructions, and the court.
 
-On [Agents](#agents), enter the worker's SSH address (an alias from `~/.ssh/config`, or `user@host`) and press **Test**. The test checks the harness, the container runtime and the launcher, and says what is missing.
+## Choose where agents work
 
-The worker needs: Linux, podman or docker, and the ByteBunker agents harness. Test that this machine can reach it without a password:
+On [Agents](#agents) → Settings → **Agent plane**, every machine your ssh reaches is listed (**Find machines** looks). Pick one and press **Work here**: ByteBunker checks it (podman or docker, and uv), brings the agents harness, builds the sandbox image, tests it, and switches agents to it.
 
-```
-ssh worker-host true && echo ok
-```
+Machines that serve models are shown and not offered: agents there would slow the model down. **This computer** is allowed as the exception, each task in its own container (on a Mac, inside podman's Linux VM: `brew install podman && podman machine init && podman machine start` first).
+
+> **Note:** with one machine doing everything, agents compete with your own chats for the same GPU and everything slows down. Use the [Playground](#playground), a [Project](#projects) or `bb` instead.
+
+Connecting a worker by hand (an SSH address and **Test**) is still there, folded, under Settings.
 
 ## Run a goal
 

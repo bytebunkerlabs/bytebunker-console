@@ -547,3 +547,6 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .sub-tabs{max-width:none;margin:0;padding:8px 24px 0}
 .agents-left [data-apane][hidden]{display:none}
 #agents-summary .sum-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.court-row{align-items:flex-start}
+.court-row>input[type=checkbox]{margin-top:4px}
+.court-row.off .deploy-id{opacity:.45}

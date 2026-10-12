@@ -89,7 +89,7 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
              "test -f %s && echo HARNESS_OK || echo NO_HARNESS; "
              "(command -v podman || command -v docker) >/dev/null 2>&1 && echo RUNTIME_OK || echo NO_RUNTIME; "
              "%s --version >/dev/null 2>&1 && echo LAUNCHER_OK || echo NO_LAUNCHER; "
-             "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s)' %s 2>/dev/null | sort -u | tr '\\n' ' '); "
+             "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null | sort -u | tr '\\n' ' '); "
              "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0], shlex.quote(script))
     try:
         r = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
@@ -117,7 +117,92 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
 def _caps_from(text):
     """What a harness's run_master.py understands, from its own text."""
     return {"goal_id": "--goal-id" in text, "proto2": "--proto" in text, "spec": "--spec" in text,
-            "timeout": "--timeout-s" in text, "checked": round(time.time())}
+            "timeout": "--timeout-s" in text, "court": "--court" in text, "checked": round(time.time())}
+
+
+# The Sultan's court as the harness defines it (slaves/archetypes.py): what
+# Agents > Settings > Court shows and starts from. The court a person sets
+# (config agents.court) travels with each run in the spec; a harness that
+# knows --court applies it. "suggest" is a name in the court's own idiom.
+COURT_DEFAULTS = [
+    {"id": "minion", "suggest": "", "tier": "doer", "thinking": False, "network": True, "max_tokens": 2000,
+     "timeout_s": 600, "what": "Fast worker for one well-defined task; many run in parallel."},
+    {"id": "wazir", "suggest": "", "tier": "thinking", "thinking": True, "network": True, "max_tokens": 8000,
+     "timeout_s": 1800, "what": "The Sultan's advisor: deep thinking for hard or ambiguous questions; plans and judges. One at a time."},
+    {"id": "malikah", "suggest": "", "tier": "thinking", "thinking": True, "network": True, "max_tokens": 6000,
+     "timeout_s": 1500, "what": "The queen: final judgment on the report before you see it; approves or sends it back."},
+    {"id": "researcher", "suggest": "alim", "tier": "doer", "thinking": False, "network": True, "max_tokens": None,
+     "timeout_s": None, "what": "Research on the web; every finding cites its source."},
+    {"id": "verifier", "suggest": "qazi", "tier": "doer", "thinking": False, "network": False, "max_tokens": None,
+     "timeout_s": None, "what": "Skeptic: audits another worker's answer against its evidence."},
+    {"id": "internet_agent", "suggest": "qasid", "tier": "doer", "thinking": False, "network": True, "max_tokens": None,
+     "timeout_s": None, "what": "Fetches and distills online content."},
+    {"id": "coder", "suggest": "mimar", "tier": "doer", "thinking": False, "network": False, "max_tokens": None,
+     "timeout_s": None, "what": "Writes and changes code in the workspace; runs it to check."},
+    {"id": "analyst", "suggest": "daftardar", "tier": "doer", "thinking": False, "network": False, "max_tokens": None,
+     "timeout_s": None, "what": "Read-only analysis of the workspace; changes nothing."},
+    {"id": "general", "suggest": "khadim", "tier": "doer", "thinking": False, "network": False, "max_tokens": None,
+     "timeout_s": None, "what": "General work: read, write, run commands in its workspace."},
+]
+COURT_ROLE_KEYS = ("display", "description", "enabled", "base", "network", "thinking", "max_tokens", "timeout_s",
+                   "max_attempts", "default_depth", "brief_suffix")
+_COURT_ID = __import__("re").compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+
+def clean_court(raw):
+    """A court from the Agents screen, kept to what the harness accepts;
+    ValueError names the first problem."""
+    if not isinstance(raw, dict):
+        raise ValueError("expected an object")
+    ids = {r["id"] for r in COURT_DEFAULTS}
+    roles = {}
+    for rid, r in (raw.get("roles") or {}).items():
+        if not _COURT_ID.match(str(rid)):
+            raise ValueError("a role id is lower-case letters, digits, - or _: %r" % rid)
+        if not isinstance(r, dict):
+            raise ValueError("role %s: expected an object" % rid)
+        out = {}
+        for k in COURT_ROLE_KEYS:
+            if k not in r or r[k] in (None, ""):
+                continue
+            v = r[k]
+            if k in ("enabled", "network", "thinking"):
+                out[k] = bool(v)
+            elif k in ("max_tokens", "timeout_s", "max_attempts"):
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    raise ValueError("role %s: %s must be a whole number" % (rid, k))
+                if v <= 0:
+                    raise ValueError("role %s: %s must be positive" % (rid, k))
+                out[k] = v
+            elif k == "default_depth":
+                if v not in ("quick", "standard", "deep"):
+                    raise ValueError("role %s: depth is quick, standard or deep" % rid)
+                out[k] = v
+            else:
+                out[k] = str(v)[:2000 if k == "brief_suffix" else 300]
+        if rid not in ids and out.get("base") not in ids:
+            raise ValueError("new role %s needs a base: one of %s" % (rid, ", ".join(sorted(ids))))
+        if rid in ids:
+            out.pop("base", None)
+        if out:
+            roles[rid] = out
+    con = {}
+    for k in ("max_concurrent_slaves", "max_slaves_per_goal"):
+        v = (raw.get("concurrency") or {}).get(k)
+        if v not in (None, ""):
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                raise ValueError("%s must be a whole number" % k)
+            if v <= 0:
+                raise ValueError("%s must be positive" % k)
+            con[k] = v
+    court = {"roles": roles}
+    if con:
+        court["concurrency"] = con
+    return court
 
 
 def harness_caps(CFG, refresh=False):
@@ -132,7 +217,7 @@ def harness_caps(CFG, refresh=False):
     text = ""
     try:
         if ssh:
-            probe = "cd %s && grep -o -E -- '--(goal-id|proto|spec|timeout-s)' %s 2>/dev/null | sort -u" % (
+            probe = "cd %s && grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null | sort -u" % (
                 _rq(directory or "~/bytebunker-harness"), shlex.quote(script))
             text = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
                                   capture_output=True, text=True, timeout=20).stdout

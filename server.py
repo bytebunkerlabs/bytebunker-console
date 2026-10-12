@@ -964,7 +964,13 @@ def agents_spec():
         if a.get(role + "_effort"):
             r["effort"] = a[role + "_effort"]
         out[role] = r
-    return {"version": 1, "roles": out} if out else None
+    court = (CFG.get("agents") or {}).get("court") or {}
+    spec = {"version": 1}
+    if out:
+        spec["roles"] = out
+    if (court.get("roles") or court.get("concurrency")) and (a.get("harness") or {}).get("court"):
+        spec["court"] = court
+    return spec if len(spec) > 1 else None
 
 
 def agent_goal(run, emit, goal, via="app"):
@@ -2846,6 +2852,11 @@ class Handler(BaseHTTPRequestHandler):
                                  "lines": e.get("lines"), "host": e.get("host")})
             st["recent"] = runs[-40:][::-1]
             self._json(st)
+        elif path == "/api/agents/court":
+            a = CFG.get("agents") or {}
+            self._json({"defaults": agentmod.COURT_DEFAULTS, "court": a.get("court") or {"roles": {}},
+                        "harness_knows": bool((a.get("harness") or {}).get("court")),
+                        "master_name": a.get("master_name") or "Sultan"})
         elif path == "/api/agents/planes":
             self._json({"at": _machines["at"], "planes": agent_planes()})
         elif path == "/api/agents/log":
@@ -3275,6 +3286,17 @@ class Handler(BaseHTTPRequestHandler):
     def _agents_run(self, body):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)
+            return
+        if body.get("action") == "court":
+            try:
+                court = agentmod.clean_court(body.get("court") or {})
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            CFG.setdefault("agents", {})["court"] = court
+            save_config()
+            TRACE.log("agents", action="court", roles=sorted(court["roles"]))
+            self._json({"ok": True, "court": court})
             return
         if body.get("action") == "plane":
             target = str(body.get("target") or "").strip()

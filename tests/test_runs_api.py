@@ -55,9 +55,13 @@ print("BB_RUN " + json.dumps({"goal_id": gid, "proto": int(proto)}), flush=True)
 spec = opt("--spec")
 if spec:
     mode = stat.S_IMODE(os.stat(spec).st_mode)
-    roles = json.load(open(spec))["roles"]
+    full = json.load(open(spec))
+    roles = full.get("roles") or {}
     print("spec %s: %s" % ("private" if mode == 0o600 else "OPEN", ", ".join("%s=%s" % (r, v["model"]) for r, v in sorted(roles.items()))), flush=True)
     print("spec file " + spec, flush=True)
+    if full.get("court"):
+        print("court " + json.dumps(full["court"], sort_keys=True), flush=True)
+court_file = opt("--court")
 def watch():
     sys.stdin.read()
     os._exit(3)
@@ -185,6 +189,31 @@ class AgentRunsV2Test(unittest.TestCase):
         full = [json.loads(f["data"]) for f in self.srv.sse("/api/runs/%s/events" % rid, timeout=10,
                 until=lambda fr: json.loads(fr[-1]["data"])["type"] == "finished")]
         return rid, frames, full
+
+    def test_the_court_travels_with_the_run(self):
+        st, d = self.srv.request("GET", "/api/agents/court")
+        self.assertIn("researcher", [r["id"] for r in d["defaults"]])
+        for bad, says in (({"roles": {"Bad id": {}}}, "role id"), ({"roles": {"scribe": {"display": "munshi"}}}, "needs a base"),
+                          ({"roles": {"minion": {"max_tokens": -5}}}, "positive")):
+            st, r = self.srv.request("POST", "/api/agents", {"action": "court", "court": bad})
+            self.assertEqual(st, 400, r)
+            self.assertIn(says, r["error"])
+        court = {"roles": {"researcher": {"display": "alim"}, "malikah": {"enabled": False},
+                           "scribe": {"base": "analyst", "display": "munshi", "description": "Writes it up."}},
+                 "concurrency": {"max_concurrent_slaves": "3"}}
+        st, r = self.srv.request("POST", "/api/agents", {"action": "court", "court": court})
+        self.assertEqual(st, 200, r)
+        self.assertEqual(r["court"]["concurrency"], {"max_concurrent_slaves": 3})
+        self.srv.request("POST", "/api/agents", {"action": "test_worker", "ssh": ""})
+        rid, frames, full = self.goal("quick")
+        line = next(f["line"] for f in frames if f.get("line", "").startswith("court "))
+        sent = json.loads(line[6:])
+        self.assertEqual(sent["roles"]["researcher"], {"display": "alim"})
+        self.assertEqual(sent["roles"]["malikah"], {"enabled": False})
+        self.assertEqual(sent["roles"]["scribe"]["base"], "analyst")
+        self.srv.request("POST", "/api/agents", {"action": "court", "court": {"roles": {}}})
+        rid, frames, full = self.goal("quick")
+        self.assertFalse(any(f.get("line", "").startswith("court ") for f in frames))
 
     def test_the_run_names_the_goal_and_the_spec_stays_private(self):
         rid, frames, full = self.goal("quick")

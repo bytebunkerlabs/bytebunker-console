@@ -3887,6 +3887,113 @@
   }
 
   /* ---------------- agents (harness) ---------------- */
+  // Court: the master's roles, named and tuned by you; sent with every run
+  async function courtCard() {
+    let d = { defaults: [], court: { roles: {} } };
+    try { d = await (await fetch("/api/agents/court")).json(); } catch (e) {}
+    let card = $("agents-court");
+    if (card && card.dataset.dirty === "1") return;          // never redraw over your unsaved edits
+    if (!card) {
+      card = document.createElement("div"); card.className = "card"; card.id = "agents-court"; card.style.gap = "8px"; card.dataset.apane = "settings";
+      $("agents-master").parentNode.insertBefore(card, $("agents-master").nextSibling);
+    }
+    card.textContent = "";
+    card.oninput = card.onchange = () => { card.dataset.dirty = "1"; };
+    const court = JSON.parse(JSON.stringify(d.court || { roles: {} }));
+    court.roles = court.roles || {};
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b></b><span class="src mono">the roles your master spawns</span></div>';
+    head.querySelector("b").textContent = (d.master_name || "Sultan") + "'s court";
+    card.appendChild(head);
+    const how = document.createElement("div"); how.className = "hint";
+    how.appendChild(helpDom("Name each role in your own words, turn roles off, or add your own. The master still spawns them by their id; your names are how it and this app speak of them. Sent with every run. → [The court](help:court)"));
+    card.appendChild(how);
+    if (!d.harness_knows) {
+      const n = document.createElement("div"); n.className = "msg-note";
+      n.textContent = "The worker's harness is older and runs the built-in court: Work here (Agent plane) brings the newer one.";
+      card.appendChild(n);
+    }
+    const list = document.createElement("div"); list.style.cssText = "display:flex;flex-direction:column"; card.appendChild(list);
+    const ids = d.defaults.map((r) => r.id);
+    const rows = d.defaults.map((r) => ({ id: r.id, builtin: r })).concat(
+      Object.keys(court.roles).filter((id) => !ids.includes(id)).map((id) => ({ id, builtin: null })));
+    const num = (v, ph, title) => { const i = inputEl(ph); i.type = "number"; i.min = "1"; i.value = v == null ? "" : v; i.title = title; i.style.width = "92px"; return i; };
+    for (const row of rows) {
+      const b = row.builtin, o = court.roles[row.id] || (court.roles[row.id] = {});
+      const el = document.createElement("div"); el.className = "deploy-row court-row"; el.dataset.role = row.id;
+      const on = document.createElement("input"); on.type = "checkbox"; on.checked = o.enabled !== false; on.title = "in this court";
+      on.onchange = () => { if (on.checked) delete o.enabled; else o.enabled = false; el.classList.toggle("off", !on.checked); };
+      el.classList.toggle("off", o.enabled === false);
+      const id = document.createElement("div"); id.className = "deploy-id";
+      const top = document.createElement("div"); top.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+      const rid = document.createElement("code"); rid.textContent = row.id; top.appendChild(rid);
+      const name = inputEl(b && b.suggest ? "your name, e.g. " + b.suggest : "your name for it"); name.value = o.display || ""; name.style.maxWidth = "240px";
+      name.oninput = () => { o.display = name.value.trim(); };
+      top.appendChild(name);
+      if (!b) { const base = document.createElement("span"); base.className = "pill"; base.textContent = "yours, from " + (o.base || "?"); top.appendChild(base); }
+      id.appendChild(top);
+      const what = document.createElement("span"); what.className = "deploy-meta";
+      what.textContent = (o.description || (b && b.what) || "") + (b ? "  ·  " + (b.thinking ? "thinks deeply" : "fast") + (b.network ? ", may use the network" : "") : "");
+      id.appendChild(what);
+      const tune = document.createElement("div"); tune.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+      const tok = num(o.max_tokens, b && b.max_tokens ? String(b.max_tokens) : "tokens", "longest answer, in tokens");
+      const min = num(o.timeout_s ? Math.round(o.timeout_s / 60) : null, b && b.timeout_s ? String(Math.round(b.timeout_s / 60)) : "minutes", "time limit, in minutes");
+      tok.oninput = () => { o.max_tokens = tok.value ? +tok.value : undefined; };
+      min.oninput = () => { o.timeout_s = min.value ? +min.value * 60 : undefined; };
+      const tl = document.createElement("span"); tl.className = "deploy-meta"; tl.textContent = "tokens";
+      const ml = document.createElement("span"); ml.className = "deploy-meta"; ml.textContent = "min";
+      [tok, tl, min, ml].forEach((x) => tune.appendChild(x));
+      if (!b) {
+        const rm = document.createElement("button"); rm.type = "button"; rm.className = "linky"; rm.textContent = "remove";
+        rm.onclick = () => { delete court.roles[row.id]; el.remove(); }; tune.appendChild(rm);
+      }
+      id.appendChild(tune);
+      el.appendChild(on); el.appendChild(id);
+      list.appendChild(el);
+    }
+    // add a role of your own
+    const add = document.createElement("details");
+    const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Add a role of your own"; add.appendChild(sm);
+    const ar = document.createElement("div"); ar.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px";
+    const nid = inputEl("id, e.g. scribe"); nid.style.maxWidth = "140px";
+    const ndisp = inputEl("your name, e.g. munshi"); ndisp.style.maxWidth = "160px";
+    const nbase = document.createElement("select"); nbase.className = "text-input"; nbase.title = "starts from this role's tools and limits";
+    for (const r of d.defaults) { const op = document.createElement("option"); op.value = r.id; op.textContent = "like " + r.id; nbase.appendChild(op); }
+    const ndesc = inputEl("what it does, for the master"); ndesc.style.flex = "1"; ndesc.style.minWidth = "200px";
+    const nadd = document.createElement("button"); nadd.type = "button"; nadd.className = "ghost-btn"; nadd.textContent = "Add";
+    [nid, ndisp, nbase, ndesc, nadd].forEach((x) => ar.appendChild(x)); add.appendChild(ar); card.appendChild(add);
+    nadd.onclick = () => {
+      const k = nid.value.trim().toLowerCase();
+      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(k) || ids.includes(k) || court.roles[k] && court.roles[k].base) { nid.focus(); note.textContent = "an id of lower-case letters, not one already here"; return; }
+      court.roles[k] = { base: nbase.value, display: ndisp.value.trim(), description: ndesc.value.trim() };
+      save().then(courtCard);
+    };
+    // limits
+    const lim = document.createElement("div"); lim.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+    const con = court.concurrency || {};
+    const c1 = num(con.max_concurrent_slaves, "4", "workers at once"); const c2 = num(con.max_slaves_per_goal, "6", "workers per goal");
+    const l1 = document.createElement("span"); l1.className = "deploy-meta"; l1.textContent = "workers at once";
+    const l2 = document.createElement("span"); l2.className = "deploy-meta"; l2.textContent = "per goal";
+    [c1, l1, c2, l2].forEach((x) => lim.appendChild(x)); card.appendChild(lim);
+    const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;align-items:center";
+    const sv = document.createElement("button"); sv.type = "button"; sv.className = "solid-btn"; sv.textContent = "Save the court"; sv.id = "court-save";
+    const rs = document.createElement("button"); rs.type = "button"; rs.className = "ghost-btn"; rs.textContent = "Restore the built-in court";
+    const note = document.createElement("span"); note.className = "hint";
+    [sv, rs, note].forEach((x) => acts.appendChild(x)); card.appendChild(acts);
+    async function save(body) {
+      const c = body || { roles: court.roles, concurrency: { max_concurrent_slaves: c1.value || undefined, max_slaves_per_goal: c2.value || undefined } };
+      for (const k of Object.keys(c.roles || {})) { const r = c.roles[k]; for (const f of Object.keys(r)) if (r[f] === undefined || r[f] === "") delete r[f]; }
+      try {
+        const r = await (await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "court", court: c }) })).json();
+        if (r.error) throw new Error(r.error);
+        note.textContent = "saved: the next run uses it";
+        card.dataset.dirty = "";
+      } catch (e) { note.textContent = e.message; }
+    }
+    sv.onclick = () => save();
+    rs.onclick = async () => { if (!confirm("Forget your names, roles and limits, and use the built-in court?")) return; await save({ roles: {} }); courtCard(); };
+  }
+
   // Agent plane: every machine Machines found; pick where agents work
   async function planeCard() {
     let d = { planes: [], at: 0 };
@@ -4068,7 +4175,7 @@
       topo.appendChild(warn);
     }
     agentsTab(state.agentsTab);
-    planeCard().then(() => agentsTab(state.agentsTab));
+    Promise.all([planeCard(), courtCard()]).then(() => agentsTab(state.agentsTab));
 
     // master persona (only overwrite when not focused/editing)
     if (document.activeElement !== $("master-name")) $("master-name").value = d.master_name || "";
