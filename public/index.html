@@ -147,11 +147,13 @@
     </section>
 
     <section class="screen" id="screen-agents">
-      <header><h1>Agents</h1><span class="sub">Launch the harness on a separate host · the console only watches · <span id="agents-sub">—</span></span><div class="grow"></div><a class="ghost-btn" href="/agents-flow.html" target="_blank" rel="noopener" style="text-decoration:none;font-size:12px">how agents run</a></header>
+      <header><h1>Agents</h1><span class="sub">A master agent that splits goals among sandboxed workers · <span id="agents-sub">—</span></span><div class="grow"></div><a class="ghost-btn" href="/agents-flow.html" target="_blank" rel="noopener" style="text-decoration:none;font-size:12px">how agents run</a></header>
+      <div class="chat-tabs sub-tabs" id="agents-tabs"><button class="on" data-atab="master">Master</button><button data-atab="settings">Settings</button></div>
       <div class="scroll agents-grid">
         <div class="agents-left">
-        <div id="agents-topology" class="card"></div>
-        <div class="card" id="agents-master">
+        <div class="card" id="agents-summary" data-apane="master"></div>
+        <div id="agents-topology" class="card" data-apane="settings"></div>
+        <div class="card" id="agents-master" data-apane="settings">
           <div class="glabel">Your master agent</div>
           <div class="prow" style="flex-direction:row;align-items:center;gap:10px">
             <b style="font-size:13px;font-weight:500;white-space:nowrap">Name</b>
@@ -174,7 +176,7 @@
             <span class="hint" id="master-note">The master reads these on the next run. Slaves are isolated; only the master sees this.</span>
           </div>
         </div>
-        <div class="card" id="agents-launch">
+        <div class="card" id="agents-launch" data-apane="master">
           <div class="glabel">Run a goal</div>
           <textarea id="agent-goal" class="sys-input" rows="3" placeholder="Describe the goal for the Master agent…"></textarea>
           <div style="display:flex;gap:8px;align-items:center">
@@ -184,11 +186,11 @@
           </div>
           <pre id="agent-stream" class="skill-body" hidden style="max-height:420px"></pre>
         </div>
-        <div>
+        <div data-apane="master">
           <div class="glabel" style="margin-bottom:8px">What your agents are doing</div>
           <div id="agents-slaves" class="cards-col"></div>
         </div>
-        <div>
+        <div data-apane="master">
           <div class="glabel" style="margin-bottom:8px">Recent runs · click one to read its log</div>
           <div id="agents-runs" class="cards-col"></div>
         </div>

@@ -3893,7 +3893,7 @@
     try { d = await (await fetch("/api/agents/planes")).json(); } catch (e) {}
     let card = $("agents-plane");
     if (!card) {
-      card = document.createElement("div"); card.className = "card"; card.id = "agents-plane"; card.style.gap = "8px";
+      card = document.createElement("div"); card.className = "card"; card.id = "agents-plane"; card.style.gap = "8px"; card.dataset.apane = "settings";
       $("agents-topology").parentNode.insertBefore(card, $("agents-topology").nextSibling);
     }
     card.textContent = "";
@@ -3907,7 +3907,7 @@
     find.onclick = async () => {
       find.disabled = true; find.textContent = "Looking…";
       try { await fetch("/api/machines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "find" }) }); } catch (e) {}
-      planeCard();
+      planeCard().then(() => agentsTab(state.agentsTab));
     };
     const log = document.createElement("pre"); log.className = "skill-body"; log.style.whiteSpace = "pre-wrap"; log.hidden = true; log.id = "agents-plane-log";
     for (const p of d.planes || []) {
@@ -3972,12 +3972,37 @@
     return box;
   }
 
+  // Agents has two tabs: Master (run goals, watch them) and Settings (where agents work, the master's setup)
+  try { state.agentsTab = localStorage.getItem("bb.agentsTab") || "master"; } catch (e) { state.agentsTab = "master"; }
+  function agentsTab(tab) {
+    state.agentsTab = tab;
+    try { localStorage.setItem("bb.agentsTab", tab); } catch (e) {}
+    for (const b of document.querySelectorAll("#agents-tabs button")) b.classList.toggle("on", b.dataset.atab === tab);
+    for (const el of document.querySelectorAll("#screen-agents .agents-left > [data-apane]")) {
+      if (el.id === "agents-one-machine" && el.dataset.off === "1") { el.hidden = true; continue; }
+      el.hidden = el.dataset.apane !== tab;
+    }
+  }
+  for (const b of document.querySelectorAll("#agents-tabs button")) b.onclick = () => agentsTab(b.dataset.atab);
+  function agentsSummary(d) {
+    const el = $("agents-summary"); el.textContent = "";
+    const line = document.createElement("div"); line.className = "sum-line";
+    const who = document.createElement("b"); who.textContent = d.master_name || "Your master agent"; line.appendChild(who);
+    const where = document.createElement("span"); where.className = "deploy-meta";
+    where.textContent = !d.enabled ? "agents are off" : "works on " + (d.mode === "ssh" ? d.host : "this computer") +
+      (d.master_model ? "  ·  master " + d.master_model : "") + (d.slave_model ? "  ·  doers " + d.slave_model : "");
+    line.appendChild(where);
+    const set = document.createElement("button"); set.type = "button"; set.className = "linky"; set.textContent = d.enabled ? "Settings" : "Set up agents";
+    set.onclick = () => agentsTab("settings"); line.appendChild(set);
+    el.appendChild(line);
+  }
   async function renderAgents() {
     let d = {};
     try { d = await (await fetch("/api/agents")).json(); } catch (e) {}
+    agentsSummary(d);
     $("agents-sub").textContent = d.enabled
-      ? (d.mode === "ssh" ? "on " + d.host : "local (not isolated)")
-      : "disabled";
+      ? (d.mode === "ssh" ? "working on " + d.host : "working on this computer")
+      : "off";
 
     let gws = [];
     try { gws = ((await (await fetch("/api/gateways")).json()).gateways || []).filter((g) => g.enabled !== false); } catch (e) {}
@@ -3985,11 +4010,11 @@
     const modelHosts = [...new Set(gws.map((g) => hostOf(g.url)))];
     let warn = $("agents-one-machine");
     if (!warn) {
-      warn = document.createElement("div"); warn.id = "agents-one-machine"; warn.className = "card agents-warn";
+      warn = document.createElement("div"); warn.id = "agents-one-machine"; warn.className = "card agents-warn"; warn.dataset.apane = "master";
       $("agents-topology").parentNode.insertBefore(warn, $("agents-topology"));
     }
     const one = modelHosts.length <= 1 || d.mode === "local" || (d.host && modelHosts.includes(d.host));
-    warn.hidden = !one;
+    warn.dataset.off = one ? "" : "1";
     if (one) {
       warn.textContent = "";
       warn.appendChild(helpDom("**One machine?** Agents send many requests at once: a master and several workers, each with long prompts. " +
@@ -4001,9 +4026,10 @@
     const topo = $("agents-topology");
     const planes = [
       ["Model plane", gws.map((g) => g.name).join(", ") || "no gateway yet", "serve the LLM only — no agent code runs here"],
-      ["Control plane", "this console", "launches goals and watches; runs no agent code"],
-      ["Agent plane", d.host || "unset", d.isolated
-        ? "a separate host; one rootless podman container per agent, no network unless granted" : "NOT a separate host — no isolation"],
+      ["Control plane", "this app", "launches goals and watches; runs no agent code"],
+      ["Agent plane", !d.enabled ? "none yet" : d.mode === "ssh" ? d.host : "this computer", !d.enabled ? "pick one under Agent plane"
+        : d.isolated ? "a separate host; one rootless podman container per agent, no network unless granted"
+        : "this computer, the exception: each task in its own container"],
     ];
     topo.innerHTML = "<div class='glabel'>Topology</div>";
     for (const [name, host, note] of planes) {
@@ -4041,7 +4067,8 @@
         "the master runs here.";
       topo.appendChild(warn);
     }
-    planeCard();
+    agentsTab(state.agentsTab);
+    planeCard().then(() => agentsTab(state.agentsTab));
 
     // master persona (only overwrite when not focused/editing)
     if (document.activeElement !== $("master-name")) $("master-name").value = d.master_name || "";
@@ -4059,7 +4086,8 @@
     }
 
     $("agent-run").disabled = !d.enabled || state.streaming;
-    $("agent-launch-note").textContent = d.enabled ? "" : "connect a worker first";
+    state.agentsOn = !!d.enabled;
+    $("agent-launch-note").textContent = d.enabled ? "" : "Agents are off: set them up in Settings";
     if (d.enabled && !state.streaming) attachAgentRun();
 
     renderAgentSlaves();
@@ -4225,7 +4253,9 @@
     }
     if (!d.ok || (!(d.slaves || []).length && !(d.live || []).length)) {
       box.innerHTML = "<div class='empty-state'><b>No agent activity yet</b><span>" +
-        (d.error ? "Could not read the worker's trajectory (" + d.error + ")." :
+        (state.agentsOn === false ? "Agents are off: pick where they work in Settings." :
+         d.error && /No such file/.test(d.error) ? "Nothing has run on this worker yet." :
+         d.error ? "Could not read the worker's activity (" + d.error + ")." :
          "Each slave the master spawns appears here — its role, whether it had network, whether it succeeded, and what it found.") + "</span></div>";
       return;
     }
