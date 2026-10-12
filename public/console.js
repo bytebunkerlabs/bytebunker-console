@@ -3615,6 +3615,10 @@
       const n = document.createElement("span"); n.className = "pill"; n.textContent = m.why_not || "cannot serve"; el.appendChild(n);
       return el;
     }
+    if (m.worker_of) {
+      const n = document.createElement("span"); n.className = "pill"; n.textContent = "a worker in " + m.worker_of + "'s rack: deploy on " + m.worker_of; el.appendChild(n);
+      return el;
+    }
     const recs = m.recipes || [];
     const sel = document.createElement("select"); sel.className = "text-input"; sel.style.maxWidth = "260px";
     for (const r of recs) {

@@ -478,7 +478,30 @@ def annotate_machines(found):
         r = next((r for r in rs if racksmod.host_of(r["ssh"]) in names or r["ssh"] in names), None)
         m["rack"] = m.get("rack") or ""
         m["paired_as"] = r["name"] if r else ""
+        m["worker_of"] = next((head for head, ws in _machines.get("workers", {}).items()
+                               if names & ws or (m.get("hostname") or "") in ws), "")
     return found
+
+
+def rack_workers():
+    """{rack name: the names its worker nodes go by}, from each paired rack's inventory."""
+    import subprocess
+    out = {}
+    for r in racks():
+        if not r["paired"]:
+            continue
+        try:
+            p = subprocess.run(rack_cmd(["nodes", "--json"], r), capture_output=True, text=True, timeout=20)
+            nodes = json.loads(p.stdout).get("nodes") or []
+        except Exception:   # noqa: BLE001  (not reachable now: nothing to mark)
+            continue
+        names = set()
+        for n in nodes:
+            if n.get("role") == "worker":
+                names |= {x for x in (n.get("name"), n.get("ssh"), racksmod.host_of(n.get("ssh") or "")) if x}
+        if names:
+            out[r["name"]] = names
+    return out
 
 
 def deploy_chain(run, emit, target, recipe):
@@ -3238,7 +3261,8 @@ class Handler(BaseHTTPRequestHandler):
         action = body.get("action")
         if action == "find":
             cat = machinesmod.load_catalog()
-            _machines.update(at=int(time.time() * 1000), list=machinesmod.find(KEYS, cat), here=machinesmod.here(cat))
+            _machines.update(at=int(time.time() * 1000), list=machinesmod.find(KEYS, cat), here=machinesmod.here(cat),
+                             workers=rack_workers())
             TRACE.log("machine", action="find", answered=sum(1 for m in _machines["list"] if m.get("ok")),
                       asked=len(_machines["list"]))
             self._json({"at": _machines["at"], "machines": annotate_machines(_machines["list"]), "here": _machines["here"]})
@@ -3251,6 +3275,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", recipe):
                 self._json({"error": "which recipe?"}, 400)
+                return
+            m = next((m for m in annotate_machines(_machines["list"]) if m.get("target") == target), None)
+            if m and m.get("worker_of"):
+                self._json({"error": "%s is a worker in %s's rack: deploy on %s, which serves across both"
+                                     % (target, m["worker_of"], m["worker_of"])}, 409)
                 return
             where = "this computer" if target == racksmod.LOCAL else target
             self._run_streamed("deploy", "serve %s on %s" % (recipe, where),

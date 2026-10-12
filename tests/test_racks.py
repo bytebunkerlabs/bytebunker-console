@@ -75,6 +75,7 @@ case "$1" in
     [ "$1" = rack ] && shift
     case "$*" in
       "pair --json") exec "$0" pair --json ;;
+      "nodes --json") echo '{"schema":1,"nodes":[{"name":"box","role":"head"},{"name":"w1","ssh":"w1","role":"worker"}]}' ;;
       "recipes --json") echo '{"schema":1,"here":"dgx","recipes":[{"name":"qwen3-8b","layout":"v2","model":"Qwen/Qwen3-8B","platforms":["dgx"],"variants":{"dgx":{"file":"/r/qwen3-8b/dgx.env"}}}]}' ;;
       status) echo "serving"; echo "  qwen3-8b (Qwen/Qwen3-8B) with vllm under docker on box, since now" ;;
       "recipes show "*) echo "# /home/you/.config/dgx-serve/recipes/$3/model.env"; echo "MODEL=Qwen/Qwen3-8B" ;;
@@ -287,14 +288,14 @@ class AddARack(unittest.TestCase):
     def test_machines_find_then_one_click_deploy(self):
         cfgfile = os.path.join(self.f, "ssh_config")
         with open(cfgfile, "w") as f:
-            f.write("Host box spark-x\n  HostName 127.0.0.1\nHost github.com\n")
+            f.write("Host box spark-x\n  HostName 127.0.0.1\nHost github.com\nHost w1\n  HostName 127.0.0.3\n")
         self.srv.stop()
         self.srv = Server(os.path.join(self.f, "data"), {}, env={
             "PATH": os.path.join(self.f, "bin") + os.pathsep + clean_path(),
             "BYTEBUNKER_SSH_CONFIG": cfgfile, "BYTEBUNKER_TAILNET": "off", "BYTEBUNKER_LOCAL_RACK": "off"})
         st, d = self.srv.request("POST", "/api/machines", {"action": "find"})
         self.assertEqual(st, 200, d)
-        (m,) = d["machines"]                                           # github.com is not a computer
+        m, w1 = d["machines"]                                          # github.com is not a computer
         self.assertEqual((m["target"], m["aliases"], m["ok"]), ("box", ["box", "spark-x"], True), m)
         self.assertTrue(m["rack"], m)                                  # the stand-in rack is on its PATH
         self.assertTrue(d["here"]["ok"], d["here"])
@@ -311,8 +312,12 @@ class AddARack(unittest.TestCase):
         cfg = json.loads(text(self.srv.cfg))
         self.assertEqual([r["name"] for r in cfg["racks"]], ["box"])
         self.assertEqual([g["name"] for g in cfg["gateways"]], ["box"])
-        st, d = self.srv.request("GET", "/api/machines")
-        self.assertEqual(d["machines"][0]["paired_as"], "box")
+        st, d = self.srv.request("POST", "/api/machines", {"action": "find"})
+        self.assertEqual([(x["target"], x["paired_as"], x["worker_of"]) for x in d["machines"]],
+                         [("box", "box", ""), ("w1", "", "box")])
+        st, r = self.srv.request("POST", "/api/machines", {"action": "deploy", "target": "w1", "recipe": "qwen3-8b"})
+        self.assertEqual(st, 409, r)
+        self.assertIn("a worker in box's rack", r["error"])
         for bad in ({"action": "deploy", "target": "-oProxyCommand=x", "recipe": "a"},
                     {"action": "deploy", "target": "box", "recipe": "a b"}):
             st, r = self.srv.request("POST", "/api/machines", bad)
