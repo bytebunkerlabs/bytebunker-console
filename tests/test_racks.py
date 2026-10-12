@@ -87,6 +87,12 @@ esac
 '''
 
 
+def clean_path():
+    """The test host's PATH without a real rack on it (dgx-serve may be installed here)."""
+    return os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                           if d and not os.path.exists(os.path.join(d, "rack")))
+
+
 def text(path):
     with open(path) as f:
         return f.read()
@@ -113,7 +119,7 @@ class AddARack(unittest.TestCase):
         script(os.path.join(self.f, "bin", "rack"), sub(RACK))
         data = os.path.join(self.f, "data")
         os.makedirs(data)
-        self.srv = Server(data, {}, env={"PATH": os.path.join(self.f, "bin") + os.pathsep + os.environ.get("PATH", "")})
+        self.srv = Server(data, {}, env={"PATH": os.path.join(self.f, "bin") + os.pathsep + clean_path()})
 
     def tearDown(self):
         self.srv.stop()
@@ -165,7 +171,8 @@ class AddARack(unittest.TestCase):
                                                              "recipes show qwen3-8b", "up qwen3-8b")])
         # after pairing, ssh only ever went as the app, with nothing else offered
         calls = [l for l in text(os.path.join(self.f, "ssh.log")).splitlines() if not l.startswith("-G")]
-        self.assertTrue(all("IdentitiesOnly=yes" in c and "IdentityAgent=none" in c for c in calls[1:]), calls)
+        self.assertTrue(all("IdentitiesOnly=yes" in c and "IdentityAgent=none" in c and "ControlPath=none" in c
+                            for c in calls[1:]), calls)
         self.assertIn("StrictHostKeyChecking=accept-new", calls[0])
         self.assertIn("StrictHostKeyChecking=yes", calls[-1])
 
@@ -213,7 +220,7 @@ class AddARack(unittest.TestCase):
 
     def bb(self, *args):
         from test_bb import bb_env
-        env = dict(bb_env(self.srv.data), PATH=os.path.join(self.f, "bin") + os.pathsep + os.environ.get("PATH", ""))
+        env = dict(bb_env(self.srv.data), PATH=os.path.join(self.f, "bin") + os.pathsep + clean_path())
         return subprocess.run([sys.executable, os.path.join(HERE, "..", "bb.py")] + list(args), input="",
                               capture_output=True, text=True, timeout=90, env=env, cwd=self.f)
 
@@ -255,7 +262,7 @@ class AddARack(unittest.TestCase):
         os.remove(os.path.join(self.f, "bin", "rack"))
         self.srv.stop()
         self.srv = Server(os.path.join(self.f, "data"), {}, env={
-            "PATH": os.path.join(self.f, "bin") + os.pathsep + os.environ.get("PATH", ""),
+            "PATH": os.path.join(self.f, "bin") + os.pathsep + clean_path(),
             "BYTEBUNKER_DGX_SERVE_GIT": repo})
         errs = [x["error"] for x in self.pair() if x.get("error")]
         self.assertTrue(errs and "dgx-serve is not on you@box" in errs[0], errs)

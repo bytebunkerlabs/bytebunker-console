@@ -177,7 +177,10 @@ class Keys:
              "-o", "ServerAliveCountMax=4", "-o", self._known(),
              "-o", "StrictHostKeyChecking=" + ("accept-new" if first else "yes")]
         if own_key:
-            a += ["-i", _fwd(self.key), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]
+            # never a shared connection (ControlMaster in ~/.ssh/config): one opened with your own key would
+            # carry this app's commands past the restriction its own key has on the rack
+            a += ["-i", _fwd(self.key), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+                  "-o", "ControlMaster=no", "-o", "ControlPath=none"]
         return a + list(extra) + [target]
 
 
