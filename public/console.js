@@ -2803,6 +2803,17 @@
     }
     if (!n) { const e = document.createElement("div"); e.className = "hint"; e.textContent = "Nothing found."; list.appendChild(e); }
     body.appendChild(list);
+    if (!q) {
+      // where ByteBunker comes from: links only, opened in your browser; the app fetches nothing from them
+      const h3 = document.createElement("h2"); h3.textContent = "ByteBunker Labs"; h3.style.cssText = "font-size:15px;margin:14px 0 0"; body.appendChild(h3);
+      const labs = helpDom("ByteBunker and dgx-serve are made by ByteBunker Labs.\n\n" +
+        "- [bytebunkerlabs.ai](https://bytebunkerlabs.ai): the website\n" +
+        "- [Docs for ByteBunker](https://docs.bytebunkerlabs.ai/bytebunker/) and [for dgx-serve](https://docs.bytebunkerlabs.ai/dgx-serve/): these guides and more, online\n" +
+        "- [Blog](https://blog.bytebunkerlabs.ai): builds, benchmarks and releases\n" +
+        "- [Support ByteBunker Labs](https://bytebunkerlabs.ai/#support)\n" +
+        "- Questions, bugs or a recipe for a new model: [support@bytebunkerlabs.ai](mailto:support@bytebunkerlabs.ai)");
+      labs.id = "help-labs"; body.appendChild(labs);
+    }
   }
   $("help-close").onclick = () => { $("help-panel").hidden = true; help.open = false; };
   $("nav-help").onclick = () => helpHome();

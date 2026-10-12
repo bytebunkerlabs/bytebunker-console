@@ -25,3 +25,7 @@ The checklist on the Help home measures each of these and links to the fix.
 ## Where things live
 
 Everything ByteBunker keeps (sessions, the trace log, usage, settings) is in one folder on this machine, shown in [Settings](#settings). Deleting the app does not delete it.
+
+## More from ByteBunker Labs
+
+The website is [bytebunkerlabs.ai](https://bytebunkerlabs.ai). These guides and more are online at [docs.bytebunkerlabs.ai](https://docs.bytebunkerlabs.ai). Questions, bugs, or a recipe for a new model: [support@bytebunkerlabs.ai](mailto:support@bytebunkerlabs.ai).

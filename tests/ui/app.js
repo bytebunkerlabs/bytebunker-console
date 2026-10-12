@@ -95,6 +95,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(1200);
   const home = await page.locator("#help-body").innerText();
   check("help: the checklist measures the setup", home.includes("A model server answers") && home.includes("A model to talk to"), home.slice(0, 200));
+  const labs = await page.locator("#help-labs").innerText().catch(() => "");
+  check("help: ByteBunker Labs, its site, docs and support", labs.includes("bytebunkerlabs.ai") && labs.includes("Docs for ByteBunker") &&
+        labs.includes("support@bytebunkerlabs.ai"), labs.slice(0, 200));
   await page.fill("#help-search", "workflow");
   await sleep(1500);
   check("help: search finds by content", (await page.locator("#help-body .help-list button").count()) >= 1 &&
