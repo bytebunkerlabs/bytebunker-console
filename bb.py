@@ -49,6 +49,19 @@ class BBError(Exception):
         self.code = code
 
 
+def max_tokens_arg(v):
+    """--max-tokens: a positive number, or auto."""
+    if v.strip().lower() == "auto":
+        return "auto"
+    try:
+        n = int(v)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError("a number of tokens, or auto")
+    return str(n)
+
+
 # ------------------------------------------------------------------ terminal --
 def _enable_windows_vt():
     if os.name != "nt":
@@ -573,7 +586,7 @@ def cmd_ask(a, out):
     if a.no_tools:
         req["tools"] = False
     if a.max_tokens:
-        req["params"] = {"max_tokens": a.max_tokens}
+        req["params"] = {"max_tokens": "auto" if a.max_tokens == "auto" else int(a.max_tokens)}
     ws = None if a.no_tools or a.no_workspace else workspace_here()
     code, _ = run_turn(srv, out, sid, req, json_out=a.json, quiet=a.quiet, show_thinking=not a.no_thinking,
                        ws=ws, yes=a.yes)
@@ -1210,7 +1223,8 @@ def parser():
     a.add_argument("-q", "--quiet", action="store_true", help="only the answer")
     a.add_argument("--no-thinking", action="store_true")
     a.add_argument("--no-tools", action="store_true")
-    a.add_argument("--max-tokens", type=int)
+    a.add_argument("--max-tokens", type=max_tokens_arg, metavar="N|auto",
+                   help="longest answer in tokens; auto (the default) lets the model use what its window has left")
     a.add_argument("--yes", action="store_true", help="allow tool calls that would ask")
     a.add_argument("--no-workspace", action="store_true", help="no tools in this folder (server tools only)")
     c = sub.add_parser("chat", help="chat in this terminal")

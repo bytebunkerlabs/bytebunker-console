@@ -11,12 +11,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const errors = [];
   page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
-  page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
+  // a reload cuts requests in flight: that is the test's doing, not the app's
+  page.on("console", (m) => { if (m.type() === "error" && !/ERR_NETWORK_IO_SUSPENDED|ERR_ABORTED/.test(m.text())) errors.push("console: " + m.text()); });
   await page.goto(BASE + "/");
   await sleep(1500);
 
   // ---- Cmd/Ctrl-K jumps anywhere; a grouped screen shows its group's tabs
   check("playground: sampling folded under Advanced", await page.locator("#temp").isVisible() === false && await page.locator("#maxtok").isVisible());
+  check("playground: Max tokens starts on Auto", (await page.locator("#max-val").innerText()) === "Auto");
+  await page.locator("#maxtok").fill("17");
+  check("playground: Max tokens goes to 1M", (await page.locator("#max-val").innerText()) === "1M",
+        await page.locator("#max-val").innerText());
+  await page.locator("#maxtok").fill("18");
+  await page.click("#panel-btn");
+  await page.reload(); await sleep(1200);
+  check("playground: a closed panel stays closed after a reload", await page.locator("#panel.on").count() === 0);
+  await page.click("#panel-btn");
+  check("playground: and opens again", await page.locator("#panel.on").count() === 1);
   await page.keyboard.press("Control+K");
   await sleep(200);
   await page.locator("#palette input").fill("gatew");

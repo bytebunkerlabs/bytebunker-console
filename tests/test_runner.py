@@ -69,6 +69,17 @@ class _Base(unittest.TestCase):
 class RunnerTest(_Base):
 
     # ------------------------------------------------------------ the turn
+    def test_max_tokens_auto_a_number_and_more_than_the_window(self):
+        self.eng.script([{"content": "a"}, {"content": "b"}, {"content": "c"}])
+        self.turn("auto", params={"max_tokens": "auto"})
+        self.assertNotIn("max_tokens", self.sent(0))
+        self.turn("pinned", params={"max_tokens": 4096})
+        self.assertEqual(self.sent(1)["max_tokens"], 4096)
+        # a 1M dial on a 32k window: cut down to the room left, with a note, not an error
+        r, evts = self.turn("huge", params={"max_tokens": 1048576})
+        self.assertLess(self.sent(2)["max_tokens"], 32768)
+        self.assertEqual(self.of(evts, "finished")[0]["state"], "done")
+
     def test_a_turn_streams_saves_traces_and_counts(self):
         self.eng.script([{"content": "Paris is the capital.", "reasoning": "geography",
                           "usage": {"prompt_tokens": 40, "completion_tokens": 9}}])
@@ -83,7 +94,8 @@ class RunnerTest(_Base):
         sent = self.sent()
         self.assertEqual(sent["messages"], [{"role": "system", "content": "be brief"},
                                             {"role": "user", "content": "capital of France?"}])
-        self.assertEqual((sent["temperature"], sent["top_p"], sent["max_tokens"], sent["top_k"]), (0.7, 0.95, 8192, 40))
+        self.assertEqual((sent["temperature"], sent["top_p"], sent["top_k"]), (0.7, 0.95, 40))
+        self.assertNotIn("max_tokens", sent)     # Auto: the engine may use what the window has left
         self.assertTrue(sent["stream"])
         sess = self.srv.request("GET", "/api/sessions?id=" + r["session"])[1]
         self.assertEqual([m["role"] for m in sess["messages"]], ["user", "bot"])
@@ -359,3 +371,30 @@ class RoleTest(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaxTokensRule(unittest.TestCase):
+    """Max tokens: Auto or a number up to 1M; auto-compress follows the real window."""
+
+    def test_auto_and_numbers(self):
+        import runner
+        for v in (None, "", 0, "auto", "Auto"):
+            self.assertIsNone(runner.max_tokens_of(v))
+        self.assertEqual(runner.max_tokens_of("4096"), 4096)
+
+    def test_compress_limit(self):
+        import runner
+        win = 262144
+        self.assertEqual(runner.compress_limit(win, None), int(win * 0.8))            # Auto: 80% of the window
+        self.assertEqual(runner.compress_limit(win, 8192), int(win * 0.8))            # a small answer: still 80%
+        self.assertEqual(runner.compress_limit(win, 1048576), win - win // 2 - 4096)  # 1M reserves half, not all
+        self.assertEqual(runner.compress_limit(32768, None), int(32768 * 0.8))        # a small window: 80% of it, sooner
+
+    def test_bb_flag(self):
+        import argparse
+        import bb
+        self.assertEqual(bb.max_tokens_arg("auto"), "auto")
+        self.assertEqual(bb.max_tokens_arg("1048576"), "1048576")
+        for bad in ("0", "-5", "lots"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                bb.max_tokens_arg(bad)

@@ -41,7 +41,7 @@
     cfg: { identity: {}, upstream: "", monitors: 0 },
     models: [],
     model: null,
-    params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 8192,
+    params: { temp: 0.7, topP: 0.95, topK: 40, rep: 1.05, maxTok: 0,   // 0 = Auto
               seed: 0, effort: 0, json: false, stops: "", sys: "",
               autoCompress: true, maxHops: 40 },
     messages: [],           // {role:'user'|'bot', content, reasoning, meta, error}
@@ -123,9 +123,13 @@
     go(GROUPS[b.dataset.group].includes(last) ? last : GROUPS[b.dataset.group][0]);
   }));
 
-  let panelWanted = window.innerWidth >= 1080;
-  $("panel-btn").onclick = () => { panelWanted = !panelWanted; go(state.screen); };
-  $("code-btn").onclick = () => { panelWanted = true; showCode(true); go("playground"); };
+  // the side panel: open in any window the app can be (960 px and up) unless you closed it; remembered
+  let panelWanted = window.innerWidth >= 960;
+  try { const v = localStorage.getItem("bb.panel"); if (v) panelWanted = v === "1"; } catch (e) {}
+  const setPanel = (on) => { panelWanted = on; try { localStorage.setItem("bb.panel", on ? "1" : "0"); } catch (e) {} };
+  $("panel").classList.toggle("on", panelWanted);   // the page opens on the Playground
+  $("panel-btn").onclick = () => { setPanel(!panelWanted); go(state.screen); };
+  $("code-btn").onclick = () => { setPanel(true); showCode(true); go("playground"); };
   $("code-close").onclick = () => showCode(false);
   function showCode(on) {
     $("panel-params").style.display = on ? "none" : "flex";
@@ -136,7 +140,10 @@
   /* ---------------- params ---------------- */
   const P = state.params;
   const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
-  const fmtTok = (v) => (v >= 1000 ? (v / 1000).toFixed(1).replace(".0", "") + "k" : String(v));
+  // token counts the way windows are named: 8192 is 8k, 262144 is 256k, 1048576 is 1M
+  const fmtTok = (v) => (v >= 1048576 && v % 1048576 === 0 ? v / 1048576 + "M"
+    : v >= 1024 && v % 1024 === 0 ? v / 1024 + "k"
+    : v >= 1000 ? (v / 1000).toFixed(1).replace(".0", "") + "k" : String(v));
   function bindRange(id, valId, key, fmt) {
     $(id).oninput = (e) => { P[key] = +e.target.value; $(valId).textContent = fmt(P[key]); };
   }
@@ -144,7 +151,20 @@
   bindRange("topp", "topp-val", "topP", (v) => v.toFixed(2));
   bindRange("topk", "topk-val", "topK", (v) => String(v));
   bindRange("rep", "rep-val", "rep", (v) => v.toFixed(2));
-  bindRange("maxtok", "max-val", "maxTok", fmtTok);
+  // Max tokens: a number up to 1M, or Auto (the slider's last stop): nothing is sent, and the model may
+  // use what its window has left. A number bigger than the room left is cut down per request.
+  const MAX_STOPS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072,
+                     196608, 262144, 393216, 524288, 786432, 1048576];
+  function maxLabel() {
+    const win = state.model ? capsFor(state.model).ctx : 0;
+    $("max-val").textContent = P.maxTok ? fmtTok(P.maxTok) : "Auto";
+    $("max-hint").textContent = P.maxTok
+      ? (win && P.maxTok > win ? "More than this model's " + fmtTok(win) + " window: each request gets what fits." : "")
+      : (win ? "Up to " + fmtTok(win) + " for this model: whatever its window has left." : "Whatever the model's window has left.");
+  }
+  $("maxtok").max = String(MAX_STOPS.length);
+  $("maxtok").value = String(MAX_STOPS.length);
+  $("maxtok").oninput = (e) => { P.maxTok = MAX_STOPS[+e.target.value] || 0; maxLabel(); };
   bindRange("effort", "effort-val", "effort", (v) => EFFORT_LABEL[v]);
   bindRange("maxhops", "maxhops-val", "maxHops", String);
   $("seed").oninput = (e) => { P.seed = parseInt(e.target.value || "0", 10) || 0; };
@@ -184,7 +204,7 @@
       "    ],",
       `    temperature=${P.temp},`,
       `    top_p=${P.topP},`,
-      `    max_tokens=${P.maxTok},`,
+      P.maxTok ? `    max_tokens=${P.maxTok},` : null,
       P.seed ? `    seed=${P.seed},` : null,
       P.json ? '    response_format={"type": "json_object"},' : null,
       "    stream=True,",
@@ -574,6 +594,7 @@
   function gatewayOf(id) { return modelInfo(id).gateway || ""; }
   function gatewayUrl(id) { return ((state.cfg && state.cfg.gateway_urls) || {})[gatewayOf(id)] || ""; }
   function servingLine(txt) {
+    maxLabel();   // the Auto hint names the selected model's window
     const haveGw = !!((state.cfg && state.cfg.gateways) || []).length;
     let base = state.model ? `${baseId(state.model)} · ${gatewayOf(state.model) || "?"}`
       : (haveGw ? "no models reachable — see Gateways" : "no engine connected — Find engines on the Gateways screen");
@@ -959,9 +980,12 @@
 
   // Where the prompt has to stay for the chat to keep going: room under the
   // window for the Max tokens dial, and never past 80% of it regardless.
+  // The answer's room is at most half the window, so a dial bigger than the model does not compress
+  // every turn; Auto reserves none.
   function compressLimit(win) {
+    const reserve = P.maxTok ? Math.min(P.maxTok, Math.floor(win / 2)) : 0;
     return Math.max(Math.floor(win * 0.3),
-                    Math.min(Math.floor(win * 0.8), win - P.maxTok - 4096));
+                    Math.min(Math.floor(win * 0.8), win - reserve - 4096));
   }
 
   async function send(text) {
@@ -1009,9 +1033,10 @@
 
     const body = {
       model: state.model,
-      temperature: P.temp, top_p: P.topP, max_tokens: P.maxTok,
+      temperature: P.temp, top_p: P.topP,
       top_k: P.topK, repetition_penalty: P.rep,
     };
+    if (P.maxTok) body.max_tokens = P.maxTok;
     if (P.seed) body.seed = P.seed;
     if (P.json) body.response_format = { type: "json_object" };
     if (P.stops.trim()) body.stop = P.stops.split(",").map((s) => s.trim()).filter(Boolean);
@@ -1023,7 +1048,7 @@
     // for; other models ignore an empty object.
     if (caps.ctk && Object.keys(caps.ctk).length) body.chat_template_kwargs = caps.ctk;
     applyThinkingSwitch(body, caps, ABSTRACT_EFFORT[P.effort]);
-    if (caps.min_max_tokens && body.max_tokens < caps.min_max_tokens) body.max_tokens = caps.min_max_tokens;
+    if (caps.min_max_tokens && body.max_tokens && body.max_tokens < caps.min_max_tokens) body.max_tokens = caps.min_max_tokens;
     const tools = toolDefs(caps);
     if (tools) { body.tools = tools; body.tool_choice = "auto"; }
 
@@ -1171,7 +1196,7 @@
     } else if (state.abort) state.abort.abort();
   }
   function turnRequest(text, atts) {
-    const params = { temperature: P.temp, top_p: P.topP, top_k: P.topK, repetition_penalty: P.rep, max_tokens: P.maxTok };
+    const params = { temperature: P.temp, top_p: P.topP, top_k: P.topK, repetition_penalty: P.rep, max_tokens: P.maxTok || "auto" };
     if (P.seed) params.seed = P.seed;
     if (P.json) params.json = true;
     if (P.stops.trim()) params.stop = P.stops.split(",").map((x) => x.trim()).filter(Boolean);
@@ -2201,7 +2226,7 @@
       const ef = document.createElement("select"); ef.className = "text-input";
       for (const v of ["", "off", "low", "medium", "high", "max"]) { const o = document.createElement("option"); o.value = v; o.textContent = v || "(the model's default)"; ef.appendChild(o); }
       ef.value = p.effort || "";
-      const mt = inputEl("max tokens, e.g. 8192"); mt.type = "number"; mt.value = (p.params || {}).max_tokens || "";
+      const mt = inputEl("max tokens: empty is Auto"); mt.type = "number"; mt.value = (p.params || {}).max_tokens || "";
       const md = document.createElement("select"); md.className = "text-input";
       const m0 = document.createElement("option"); m0.value = ""; m0.textContent = "(whatever is picked)"; md.appendChild(m0);
       for (const r of ["big", "fast", "vision", "thinking"]) { const o = document.createElement("option"); o.value = "role:" + r; o.textContent = "role: " + r + ((d.roles || {})[r] ? " (" + d.roles[r] + ")" : " (not set)"); md.appendChild(o); }

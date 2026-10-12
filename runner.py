@@ -169,9 +169,19 @@ def estimate_prompt(msgs, tools, calib, model):
     return {"tokens": tokens, "margin": margin, "calibrated": cal}
 
 
+def max_tokens_of(v):
+    """Max tokens from params: a number, or None for Auto (nothing sent: the engine may use what the
+    window has left). Missing, 0 and "auto" are Auto."""
+    if v in (None, "", 0) or str(v).strip().lower() == "auto":
+        return None
+    return max(1, int(v))
+
+
 def compress_limit(win, max_tokens):
-    """Where the prompt has to stay: room for the answer, never past 80%."""
-    return max(math.floor(win * 0.3), min(math.floor(win * 0.8), win - max_tokens - 4096))
+    """Where the prompt has to stay: room for the answer (at most half the window, so a dial bigger
+    than the model does not compress every turn; none for Auto), and never past 80%."""
+    reserve = 0 if max_tokens is None else min(max_tokens, win // 2)
+    return max(math.floor(win * 0.3), min(math.floor(win * 0.8), win - reserve - 4096))
 
 
 def effort_for(effort, caps):
@@ -656,7 +666,7 @@ class Runner:
         if not text and not atts:
             raise TurnError("nothing to send")
         params = dict(req.get("params") or {})
-        max_tok = int(params.get("max_tokens") or 8192)
+        max_tok = max_tokens_of(params.get("max_tokens"))
         self.hydrate_images(messages + [{"attachments": atts}])
         if re.match(r"^/compress\b", text, re.I):
             return self.compress(run, emit, sid, sess, req, "manual")
@@ -684,8 +694,9 @@ class Runner:
         caps = self.caps(model)
         msgs = build_msgs(messages[:-1], caps, self.system_prompt(req))
         body = {"model": model, "temperature": params.get("temperature", 0.7), "top_p": params.get("top_p", 0.95),
-                "max_tokens": max_tok, "top_k": params.get("top_k", 40),
-                "repetition_penalty": params.get("repetition_penalty", 1.05)}
+                "top_k": params.get("top_k", 40), "repetition_penalty": params.get("repetition_penalty", 1.05)}
+        if max_tok is not None:
+            body["max_tokens"] = max_tok
         if params.get("seed"):
             body["seed"] = params["seed"]
         if params.get("json"):
@@ -698,7 +709,7 @@ class Runner:
         if caps.get("ctk"):
             body["chat_template_kwargs"] = caps["ctk"]
         apply_thinking_switch(body, caps, req.get("effort"))
-        if caps.get("min_max_tokens") and body["max_tokens"] < caps["min_max_tokens"]:
+        if caps.get("min_max_tokens") and body.get("max_tokens") and body["max_tokens"] < caps["min_max_tokens"]:
             body["max_tokens"] = caps["min_max_tokens"]     # it thinks first: less room cuts the answer off
         tools = self.tool_defs(caps, req)
         if tools:

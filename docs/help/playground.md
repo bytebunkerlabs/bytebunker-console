@@ -9,14 +9,15 @@ Pick a model at the top, type, press Enter. Shift+Enter makes a new line. Stop e
 
 ## The panel
 
+The panel stays open unless you close it with the panel button at the top right; the app remembers which you chose.
+
 | Setting | What it does |
 |---|---|
-| Temperature, top-p, top-k | how adventurous the wording is |
-| Max tokens | the longest answer; thinking counts against it |
+| Max tokens | the longest answer; thinking counts against it. **Auto** (the default) lets the model use whatever its window has left; the hint under it names the window, such as 256k. Or pin a number up to 1M: a request that would not fit is given what fits |
 | Reasoning effort | how long a thinking model thinks. Default sends nothing; Off to Max are mapped to the model's own nearest level |
 | Tool hops | how many rounds of tool calls before it pauses |
 | Auto-compress | folds older turns into a summary when the window fills |
-| JSON mode, seed, stops | for structured or repeatable output |
+| Advanced | temperature, top-p, top-k, repetition penalty, seed, JSON mode and stop sequences, folded; it says "changed" when any differs from the default |
 | System prompt | standing instructions for this chat |
 
 ## Tools and skills
@@ -29,7 +30,7 @@ Drop files on the box. Images go to models that read images; text files go inlin
 
 ## Long conversations
 
-The window is shared by the prompt and the answer. When a conversation nears it, auto-compress writes a summary of the older turns and keeps the originals in the archive. Type `/compress` to do it yourself. If an engine refuses a prompt as too long, its answer names its real window, and ByteBunker believes it from then on.
+The window is shared by the prompt and the answer. When a conversation passes 80% of the model's window (sooner if a pinned Max tokens needs the room, but never more than half the window is held for the answer), auto-compress writes a summary of the older turns and keeps the originals in the archive. Type `/compress` to do it yourself. If an engine refuses a prompt as too long, its answer names its real window, and ByteBunker believes it from then on.
 
 ## Projects and the terminal
 

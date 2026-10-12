@@ -389,7 +389,7 @@
 
         <div class="pgroup">
           <span class="glabel">Length and context</span>
-          <div class="prow"><div class="head"><b>Max tokens</b><span class="val" id="max-val">8k</span></div><input type="range" id="maxtok" min="256" max="65536" step="256" value="8192"></div>
+          <div class="prow"><div class="head"><b>Max tokens</b><span class="val" id="max-val">Auto</span></div><input type="range" id="maxtok" min="0" max="18" step="1" value="18"><span class="hint" id="max-hint">Whatever the model's window has left.</span></div>
           <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:12px">
             <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Auto-compress</b><span class="hint">When the window fills, older turns are summarized by the model and the originals kept. Type <span class="mono">/compress</span> to do it now.</span></div>
             <button class="switch on" id="compress-switch"><span></span></button>
