@@ -78,9 +78,15 @@ class Timeouts(unittest.TestCase):
             s = host.servers["f"]
             with self.assertRaises(TimeoutError):
                 s.call("slow", {"seconds": 3}, timeout=0.5)
-            time.sleep(0.3)
-            with open(log.name) as f:
-                self.assertIn('"reason": "timeout"', f.read())
+            # the cancel reaches the server soon, not at once: a slow runner (Windows CI) needs more than 0.3 s
+            seen = ""
+            for _ in range(50):
+                with open(log.name) as f:
+                    seen = f.read()
+                if '"reason": "timeout"' in seen:
+                    break
+                time.sleep(0.1)
+            self.assertIn('"reason": "timeout"', seen)
             text, err = host.call("f__echo", {"text": "still alive"})
             self.assertEqual(text, "echo:still alive")
         finally:
