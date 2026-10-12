@@ -3,6 +3,41 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.5.0 — 2026-10-12
+
+### New
+- **Deploy replaces Recipes.** Serve a model on this computer or on any
+  machine you add. With nothing set up, Deploy opens on this computer and
+  offers to install dgx-serve here; on another machine it installs over your
+  own ssh, then pairs. Each recipe says whether it fits the machine.
+- **Ask for a recipe.** Name a model, and your mail app opens a request to
+  support@bytebunkerlabs.ai with the machine's details filled in.
+- **Machines.** Find every computer your ssh reaches, on a button press:
+  what it is, its GPU and memory, the recipes that suit it, and one-click
+  deploy. A worker of a paired rack says so and is deployed through its head.
+- **Choose where agents work.** Agents → Settings lists every machine found;
+  **Work here** checks it, sends the agents, builds their sandbox and tests it.
+  A Mac works too, inside podman's VM. With one machine, Agents says to use the
+  Playground, Projects or bb instead.
+- **Agents has two tabs.** Master shows the master agent, its runs and its
+  workers; Settings holds everything you set up once.
+- **The court is yours.** Name every role in your own words, turn roles off,
+  add your own, and set limits; it travels with each run. Help has a page on
+  the court, with names from a royal court to borrow.
+- **Cmd-K (Ctrl-K).** Jump to any screen, guide or action by typing.
+- **A tidier app.** Models, Deploy and Gateways share one sidebar entry, and
+  MCP servers, Skills and Plugins another. Sampling and output controls fold
+  under Advanced. Remove buttons look the same everywhere.
+- **Help links to ByteBunker Labs**: the website, docs, blog and support.
+
+### Fixed
+- The app's ssh to a rack never rides a shared connection (a shared one could
+  answer "rack: command not found").
+- The real ByteBunker mark in the sidebar and as the page icon.
+- "1 model", not "1 models"; the sidebar's bars say GPU, with memory on hover.
+
+Needs dgx-serve from 2026-10-12 on machines you deploy to.
+
 ## 0.4.2 — 2026-10-10
 
 ### New
