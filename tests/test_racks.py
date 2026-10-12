@@ -39,7 +39,8 @@ if [ -n "$key" ]; then
   body=$(cut -d' ' -f2 "$key.pub")
   grep -q "$body" "$F/authorized_keys" 2>/dev/null || { echo "$target: Permission denied (publickey)." >&2; exit 255; }
   app=$(grep "$body" "$F/authorized_keys" | sed -n 's/.* bytebunker:\(.*\)$/\1/p')
-  SSH_ORIGINAL_COMMAND="$*" exec "$F/bin/rack" remote --app "$app"
+  R="$F/bin/rack"; [ -x "$R" ] || R="$F/home/.local/bin/rack"
+  SSH_ORIGINAL_COMMAND="$*" exec "$R" remote --app "$app"
 fi
 [ -f "$F/password-only" ] && { echo "$target: Permission denied (publickey,password)." >&2; exit 255; }
 HOME="$F/home" exec /bin/sh -c "$*"
@@ -48,6 +49,13 @@ HOME="$F/home" exec /bin/sh -c "$*"
 RACK = r'''#!/bin/sh
 F=__F__
 case "$1" in
+  install) mkdir -p "$HOME/.local/bin"; ln -sf "$(cd "$(dirname "$0")" && pwd)/rack" "$HOME/.local/bin/rack"; echo "installed: $HOME/.local/bin/rack" ;;
+  init) echo "box: a DGX Spark, ready to serve" ;;
+  version) echo "rack 1.0.0-test" ;;
+  up) echo "serving $2 here: healthy" ;;
+  platform) echo '{"schema":1,"platform":"mac","description":"Mac (test)","supported":true,"model_budget_mb":8192}' ;;
+  recipes) echo '{"schema":1,"here":"mac","budget_mb":8192,"recipes":[{"name":"qwen3-8b","layout":"v2","location":"/r/qwen3-8b","model":"Qwen/Qwen3-8B","platforms":["mac","dgx"],"variants":{"mac":{"file":"/r/qwen3-8b/mac.env","engine":"llamacpp","weights_gb":5.0,"fits":true}}},{"name":"big","layout":"v2","model":"org/Big","platforms":["dgx"],"variants":{"dgx":{"file":"/r/big/dgx.env"}}}]}' ;;
+  status) echo "serving"; echo "  nothing" ;;
   pair)
     shift; key=""; name=app
     while [ $# -gt 0 ]; do case "$1" in --key) key=$2; shift 2;; --name) name=$2; shift 2;; *) shift;; esac; done
@@ -153,7 +161,8 @@ class AddARack(unittest.TestCase):
         self.assertIn("serving qwen3-8b: healthy", [json.loads(x["data"]).get("line") for x in out])
         app = r["rack"]["app"]
         self.assertEqual(text(os.path.join(self.f, "remote.log")).splitlines(),
-                         ["%s rack %s" % (app, c) for c in ("recipes --json", "status", "recipes show qwen3-8b", "up qwen3-8b")])
+                         ["%s rack %s" % (app, c) for c in ("recipes --json", "status", "platform --json", "version --json",
+                                                             "recipes show qwen3-8b", "up qwen3-8b")])
         # after pairing, ssh only ever went as the app, with nothing else offered
         calls = [l for l in text(os.path.join(self.f, "ssh.log")).splitlines() if not l.startswith("-G")]
         self.assertTrue(all("IdentitiesOnly=yes" in c and "IdentityAgent=none" in c for c in calls[1:]), calls)
@@ -225,6 +234,49 @@ class AddARack(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("serving qwen3-8b: healthy", r.stdout)
 
+    def git_repo(self):
+        """dgx-serve as the install clones it: a repo with the stand-in rack."""
+        repo = os.path.join(self.f, "dgx-serve.git")
+        os.makedirs(repo)
+        shutil.copy(os.path.join(self.f, "bin", "rack"), os.path.join(repo, "rack"))
+        git = lambda *a: subprocess.run(["git", "-C", repo] + list(a), check=True, capture_output=True)
+        git("init", "-q")
+        git("add", "rack")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "rack")
+        return repo
+
+    def install(self, target):
+        frames = self.srv.sse("/api/racks", method="POST", body={"action": "install", "target": target}, timeout=60,
+                              until=lambda fr: json.loads(fr[-1]["data"]).get("phase") == "done")
+        return [json.loads(x["data"]) for x in frames]
+
+    def test_install_over_ssh_then_pair(self):
+        repo = self.git_repo()
+        os.remove(os.path.join(self.f, "bin", "rack"))
+        self.srv.stop()
+        self.srv = Server(os.path.join(self.f, "data"), {}, env={
+            "PATH": os.path.join(self.f, "bin") + os.pathsep + os.environ.get("PATH", ""),
+            "BYTEBUNKER_DGX_SERVE_GIT": repo})
+        errs = [x["error"] for x in self.pair() if x.get("error")]
+        self.assertTrue(errs and "dgx-serve is not on you@box" in errs[0], errs)
+        frames = self.install("you@box")
+        lines = [x.get("line") for x in frames if x.get("line")]
+        self.assertIn("downloading dgx-serve into %s/home/dgx-serve (git clone)" % self.f, lines)
+        self.assertIn("box: a DGX Spark, ready to serve", lines)
+        self.assertEqual([x["error"] for x in frames if x.get("error")], [])
+        got = self.found(frames)
+        self.assertEqual(got["engine"]["url"], "http://127.0.0.1:%d" % self.eng.port)
+        self.assertEqual(len(self.keys()), 1)
+        again = [x.get("line") for x in self.install("you@box")]     # a second time: it is there already
+        self.assertIn("dgx-serve is here already: rack 1.0.0-test", again)
+
+    def test_install_says_what_is_missing(self):
+        os.remove(os.path.join(self.f, "bin", "rack"))
+        os.makedirs(os.path.join(self.f, "home", "dgx-serve"))       # a folder in the way
+        frames = self.install("you@box")
+        self.assertIn("is there and is not dgx-serve", " ".join(x.get("error") or "" for x in frames))
+        self.assertNotEqual(frames[-1]["exit"], 0)
+
     def test_removing_a_rack_takes_its_key_back(self):
         got = self.found(self.pair())
         self.srv.request("POST", "/api/racks", {"action": "save", "pairing": got["pairing"]})
@@ -235,6 +287,66 @@ class AddARack(unittest.TestCase):
         self.assertEqual(self.keys(), [])
         cfg = json.loads(text(self.srv.cfg))
         self.assertEqual((cfg["racks"], cfg["gateways"], cfg["monitors"]), ([], [], []))
+
+
+@unittest.skipIf(sys.platform == "win32", "the stand-in rack is POSIX shell")
+class ThisComputer(unittest.TestCase):
+    """Deploy with no rack: this computer, before and after dgx-serve is here."""
+
+    def setUp(self):
+        self.f = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.f, "bin"))
+        self.home = os.path.join(self.f, "home")
+        os.makedirs(self.home)
+        self.eng = FakeEngine(models=[{"id": "local-model"}], api_key="ek").start()
+        script(os.path.join(self.f, "rack"), RACK.replace("__F__", self.f).replace("__EPORT__", str(self.eng.port))
+               .replace("__MPORT__", "1").replace('"running":true', '"running":false'))
+        self.repo = os.path.join(self.f, "dgx-serve.git")
+        os.makedirs(self.repo)
+        shutil.move(os.path.join(self.f, "rack"), os.path.join(self.repo, "rack"))
+        for a in (["init", "-q"], ["add", "rack"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "r"]):
+            subprocess.run(["git", "-C", self.repo] + a, check=True, capture_output=True)
+        data = os.path.join(self.f, "data")
+        os.makedirs(data)
+        self.srv = Server(data, {}, env={"HOME": self.home, "BYTEBUNKER_LOCAL_RACK": "",
+                                         "BYTEBUNKER_DGX_SERVE_GIT": self.repo,
+                                         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+
+    def tearDown(self):
+        self.srv.stop()
+        self.eng.stop()
+        shutil.rmtree(self.f, ignore_errors=True)
+
+    def test_install_here_then_serve_adds_the_gateway(self):
+        st, d = self.srv.request("GET", "/api/rack")
+        self.assertEqual((d["ok"], d["name"], d["local"], d["installed"]), (False, "local", True, False), d)
+        self.assertTrue(d["platform"]["description"], d)
+        self.assertEqual(d["racks"][-1]["name"], "local")
+        st, r = self.srv.request("POST", "/api/rack", {"action": "up", "recipe": "qwen3-8b"})
+        self.assertEqual(st, 400)
+        self.assertIn("not on this computer yet", r["error"])
+        frames = self.srv.sse("/api/racks", method="POST", body={"action": "install"}, timeout=60,
+                              until=lambda fr: json.loads(fr[-1]["data"]).get("phase") == "done")
+        frames = [json.loads(x["data"]) for x in frames]
+        self.assertEqual(frames[-1]["exit"], 0, frames)
+        self.assertTrue(any(x.get("installed") for x in frames))
+        self.assertTrue(os.path.islink(os.path.join(self.home, ".local", "bin", "rack")))
+        st, d = self.srv.request("GET", "/api/rack")
+        self.assertEqual((d["ok"], d["local"], d["here"], d["rack_version"]), (True, True, "mac", "1.0.0-test"), d)
+        self.assertEqual(d["platform"]["description"], "Mac (test)")
+        q = d["recipes"][0]
+        self.assertEqual((q["name"], q["here"], q["fits"], q["weights_gb"]), ("qwen3-8b", True, True, 5.0))
+        self.assertFalse(d["recipes"][1]["here"])
+        out = self.srv.sse("/api/rack", method="POST", body={"action": "up", "recipe": "qwen3-8b", "rack": "local"},
+                           timeout=30, until=lambda fr: json.loads(fr[-1]["data"]).get("phase") == "done")
+        lines = [json.loads(x["data"]).get("line") for x in out]
+        self.assertIn("serving qwen3-8b here: healthy", lines)
+        self.assertIn("this app talks to it now: gateway this computer", lines)
+        cfg = json.loads(text(self.srv.cfg))
+        self.assertEqual([(g["name"], g["url"], g["key"]) for g in cfg["gateways"]],
+                         [("this computer", "http://127.0.0.1:%d/v1" % self.eng.port, "ek")])
+        self.assertEqual(cfg.get("racks") or [], [])                   # this computer is never a configured rack
+        self.assertIn("local-model", [m["id"] for m in self.srv.request("GET", "/api/models")[1]["data"]])
 
 
 if __name__ == "__main__":

@@ -282,6 +282,12 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 @media (max-width:1100px){.agents-grid{grid-template-columns:1fr}.agents-detail{position:static;max-height:none}}
 .live-dot{color:var(--ok)}
 .pill{display:flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;background:var(--chip);font-size:11px;font-weight:500;color:var(--muted)}
+.deploy-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--soft)}
+.deploy-id{display:flex;flex-direction:column;gap:2px;flex:1;min-width:180px}
+.deploy-meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.pill.ok{color:var(--ok)} .pill.bad{color:var(--err)}
+.deploy-other summary,.deploy-older summary{cursor:pointer}
+.deploy-older{display:flex;flex-direction:column;gap:10px}
 .pill .d{width:5px;height:5px;border-radius:50%;background:var(--ok)}
 .kv-label{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
 .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding-top:2px;border-top:1px solid var(--soft)}

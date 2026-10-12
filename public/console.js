@@ -3345,8 +3345,14 @@
     try { d = await (await fetch("/api/recipes")).json(); } catch (e) {}
     recipesCat = d;
     const left = $("recipes-left"); left.textContent = "";
-    $("recipes-sub").textContent = d.recipes.length + " recipes \u00b7 litellm " + (d.litellm && d.litellm.configured ? "on " + d.litellm.ssh : "not configured");
+    $("recipes-sub").textContent = "this computer, or any machine you add";
     left.appendChild(await rackCard());
+    let older = null;
+    if (d.recipes.length) {
+      older = document.createElement("details"); older.className = "deploy-older";
+      const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Older recipes, without dgx-serve (" + d.recipes.length + ")";
+      older.appendChild(sm); left.appendChild(older);
+    }
     for (const r of d.recipes) {
       const card = document.createElement("div");
       card.className = "card"; card.style.gap = "8px";
@@ -3387,7 +3393,7 @@
       btn.onclick = () => { form.hidden = !form.hidden; btn.textContent = form.hidden ? "Open" : "Close"; };
       prev.onclick = () => previewRecipe(r, params(), note);
       dep.onclick = () => (r.target === "ssh" ? deployRecipe(r, params(), note) : previewRecipe(r, params(), note));
-      left.appendChild(card);
+      older.appendChild(card);
     }
   }
 
@@ -3415,35 +3421,34 @@
   }
 
   async function rackCard() {
-    // machines serving with dgx-serve: driven by `rack` over ssh, never by a console-made docker command
+    // Deploy: this computer or a paired machine, driven by `rack` (here, or over ssh), never by a console-made docker command
     let d = { ok: false };
     const want = state.rack || "";
     try { d = await (await fetch("/api/rack" + (want ? "?rack=" + encodeURIComponent(want) : ""))).json(); } catch (e) { d = { ok: false, error: e.message }; }
     if (want && Array.isArray(d.racks) && !d.racks.some((x) => x.name === want)) { setRack(""); return rackCard(); }
+    const label = (x) => x.local ? "This computer" : x.name;
     const card = document.createElement("div");
-    card.className = "card"; card.style.gap = "8px";
+    card.className = "card"; card.style.gap = "10px"; card.id = "deploy-card";
     const head = document.createElement("div"); head.className = "skill-head";
     head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>';
-    head.querySelector("b").textContent = (d.name || "Racks") + " · rack";
-    head.querySelector(".src").textContent = d.name ? (d.host + (d.dir ? ":" + d.dir : "") + (d.serving ? "  ·  serving " + d.serving : "")) : "none yet";
+    head.querySelector("b").textContent = d.name ? label(d) : "Deploy";
+    head.querySelector(".src").textContent = d.local ? "" : (d.host || "") + (d.dir ? ":" + d.dir : "");
     card.appendChild(head);
     const bar = document.createElement("div"); bar.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
-    if ((d.racks || []).length > 1) {
-      const pick = document.createElement("select"); pick.className = "text-input"; pick.id = "rack-select";
-      for (const x of d.racks) { const o = document.createElement("option"); o.value = x.name; o.textContent = x.name + "  ·  " + x.ssh; pick.appendChild(o); }
-      pick.value = d.name || "";
-      pick.onchange = () => { setRack(pick.value); renderRecipes(); };
-      bar.appendChild(pick);
-    }
-    const add = document.createElement("button"); add.type = "button"; add.className = "ghost-btn"; add.id = "add-rack"; add.textContent = "Add a rack";
+    const pick = document.createElement("select"); pick.className = "text-input"; pick.id = "rack-select";
+    for (const x of d.racks || []) { const o = document.createElement("option"); o.value = x.name; o.textContent = x.local ? "This computer" : x.name + "  ·  " + x.ssh; pick.appendChild(o); }
+    pick.value = d.name || "";
+    pick.onchange = () => { setRack(pick.value); renderRecipes(); };
+    if ((d.racks || []).length) bar.appendChild(pick);
+    const add = document.createElement("button"); add.type = "button"; add.className = "ghost-btn"; add.id = "add-rack"; add.textContent = "Add a machine";
     bar.appendChild(add);
     let rm = null;
-    if (d.name) { rm = document.createElement("button"); rm.type = "button"; rm.className = "ghost-btn"; rm.textContent = "Remove"; bar.appendChild(rm); }
+    if (d.name && !d.local) { rm = document.createElement("button"); rm.type = "button"; rm.className = "ghost-btn"; rm.textContent = "Remove"; bar.appendChild(rm); }
     card.appendChild(bar);
     const addHost = document.createElement("div"); card.appendChild(addHost);
     add.onclick = () => addRackForm(addHost);
     if (rm) rm.onclick = async () => {
-      if (!confirm("Remove the rack " + d.name + "? What it serves keeps running; this app stops driving it" + (d.paired ? " and takes its key back from " + d.host : "") + ".")) return;
+      if (!confirm("Remove " + d.name + "? What it serves keeps running; this app stops driving it" + (d.paired ? " and takes its key back from " + d.host : "") + ".")) return;
       const also = confirm("Also remove the gateway and the monitor that pairing added for " + d.name + "?");
       try {
         const r = await (await fetch("/api/racks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "remove", name: d.name, gateway: also, monitor: also }) })).json();
@@ -3452,58 +3457,143 @@
       } catch (e) { alert("Could not remove it: " + e.message); }
       setRack(""); loadModels(); renderRecipes();
     };
-    const desc = document.createElement("div"); desc.className = "skill-desc";
-    desc.textContent = "A rack is a machine serving models with dgx-serve (the head, for a cluster). Its recipes decide the engine and how many nodes; pick one to read it, then Up. Down stops serving on every node of the rack.";
-    card.appendChild(desc);
+    const plat = d.platform || {};
+    const facts = [plat.description, d.rack_version ? "dgx-serve " + d.rack_version : "", d.serving ? "serving " + d.serving : (d.ok ? "nothing serving" : "")].filter(Boolean);
+    if (facts.length) { const f = document.createElement("div"); f.className = "skill-desc"; f.id = "deploy-facts"; f.textContent = facts.join("  ·  "); card.appendChild(f); }
+    if (d.local && d.installed === false) { card.appendChild(installHere(plat)); card.appendChild(askRecipe(d)); return card; }
     if (!d.ok) {
       const n = document.createElement("div"); n.className = "hint";
-      n.textContent = d.enabled === false ? "No rack yet. Add a rack pairs one over ssh: it finds the engine and the monitor, and drives rack with a key that can run rack and nothing else." : ("rack not reachable: " + (d.error || ""));
+      n.textContent = d.enabled === false ? "Nothing to deploy to yet." : ((d.local ? "dgx-serve on this computer did not answer: " : d.name + " did not answer: ") + (d.error || ""));
       card.appendChild(n); return card;
     }
-    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
-    const sel = document.createElement("select"); sel.className = "text-input"; sel.style.minWidth = "220px";
-    for (const r of d.recipes || []) { const o = document.createElement("option"); o.value = r.name; o.textContent = r.name + "  ·  " + r.mode + (r.model ? "  ·  " + r.model : ""); if (d.serving && r.name === d.serving) { o.textContent += "  (serving now)"; o.selected = true; } sel.appendChild(o); }
-    const show = document.createElement("button"); show.type = "button"; show.className = "ghost-btn"; show.textContent = "Read recipe";
-    const up = document.createElement("button"); up.type = "button"; up.className = "solid-btn"; up.textContent = "rack up";
-    const down = document.createElement("button"); down.type = "button"; down.className = "rate-btn bad"; down.textContent = "rack down";
-    const st = document.createElement("button"); st.type = "button"; st.className = "ghost-btn"; st.textContent = "status";
-    const logs = document.createElement("button"); logs.type = "button"; logs.className = "ghost-btn"; logs.textContent = "logs";
     const note = document.createElement("span"); note.className = "hint";
-    [sel, show, up, down, st, logs, note].forEach((e) => row.appendChild(e));
-    card.appendChild(row);
-    const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap";
-    pre.textContent = d.status_raw || "";
-    const lab = document.createElement("div"); lab.className = "glabel"; lab.textContent = "rack status (cached 15 s)";
-    card.appendChild(lab); card.appendChild(pre);
-    show.onclick = async () => {
-      note.textContent = "reading…";
-      try {
-        const x = await (await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "show", recipe: sel.value, rack: d.name }) })).json();
-        note.textContent = "";
-        const pane = recipePane(x.file || ("recipes/" + sel.value + ".env"));
-        preBlock(pane, "recipe", x.text || x.error || "");
-      } catch (e) { note.textContent = "failed: " + e.message; }
-    };
     const stream = async (action, recipe, confirmText) => {
       if (confirmText && !confirm(confirmText)) return;
-      const pane = recipePane("rack " + action + (recipe ? " " + recipe : "") + " · " + d.name);
+      const pane = recipePane((action === "up" ? "Serve " + recipe : "rack " + action) + " · " + label(d));
       const out = preBlock(pane, "output", "");
       const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
       note.textContent = "running…";
       try {
         await postFrames("/api/rack", { action, recipe, rack: d.name }, (o) => {
-          if (o.phase === "start") append("— " + o.cmd + " on " + o.host + " —");
-          else if (o.phase === "done") { append("— finished: " + (o.killed ? o.killed : "exit " + o.exit) + " —"); note.textContent = o.exit === 0 ? "done" : "exit " + o.exit; if (state.screen === "recipes") setTimeout(renderRecipes, 1500); }
+          if (o.phase === "start") append("— " + o.cmd + " on " + (d.local ? "this computer" : o.host) + " —");
+          else if (o.phase === "done") { append("— finished: " + (o.killed ? o.killed : "exit " + o.exit) + " —"); note.textContent = o.exit === 0 ? "done" : "exit " + o.exit; if (o.exit === 0 && action === "up") loadModels(); if (state.screen === "recipes") setTimeout(renderRecipes, 1500); }
           else if (o.error) append("error: " + o.error);
           else if (o.line != null) append(o.line);
         });
       } catch (e) { append("error: " + e.message); note.textContent = ""; }
     };
-    up.onclick = () => stream("up", sel.value, "rack up " + sel.value + " on " + d.name + " — this stops whatever " + d.name + " serves now and starts this recipe. Continue?");
-    down.onclick = () => stream("down", "", "rack down — stop serving on every node of " + d.name + "?");
+    const read = async (name) => {
+      note.textContent = "reading…";
+      try {
+        const x = await (await fetch("/api/rack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "show", recipe: name, rack: d.name }) })).json();
+        note.textContent = "";
+        const pane = recipePane(x.file || ("recipes/" + name + ".env"));
+        preBlock(pane, "recipe", x.text || x.error || "");
+      } catch (e) { note.textContent = "failed: " + e.message; }
+    };
+    const all = d.recipes || [];
+    const known = all.some((r) => r.here !== undefined) && !!d.here;
+    const here = known ? all.filter((r) => r.here) : all;
+    const other = known ? all.filter((r) => !r.here) : [];
+    const lab = document.createElement("div"); lab.className = "glabel";
+    lab.textContent = here.length ? "Recipes for " + (d.local ? "this computer" : d.name) : "No recipe runs on " + (d.local ? "this computer" : d.name) + " yet";
+    card.appendChild(lab);
+    const list = document.createElement("div"); list.style.cssText = "display:flex;flex-direction:column;gap:6px"; list.id = "deploy-recipes";
+    const row = (r, runs) => {
+      const el = document.createElement("div"); el.className = "deploy-row"; el.dataset.recipe = r.name;
+      const id = document.createElement("div"); id.className = "deploy-id";
+      const b = document.createElement("b"); b.textContent = r.name; id.appendChild(b);
+      const m = document.createElement("span"); m.className = "deploy-meta"; m.textContent = [r.model, r.mode !== "solo" ? r.mode : "", r.weights_gb ? r.weights_gb.toFixed(1) + " GB" : "", r.engine].filter(Boolean).join("  ·  "); id.appendChild(m);
+      el.appendChild(id);
+      const verdict = document.createElement("span"); verdict.className = "pill deploy-fit";
+      if (d.serving === r.name) { verdict.textContent = "serving now"; verdict.classList.add("ok"); }
+      else if (!runs) { verdict.textContent = (r.platforms || []).join(", ") || "other machines"; }
+      else if (r.fits === true) { verdict.textContent = "fits"; verdict.classList.add("ok"); }
+      else if (r.fits === false) { verdict.textContent = "too big here"; verdict.classList.add("bad"); }
+      else verdict.textContent = "size unknown";
+      el.appendChild(verdict);
+      const rd = document.createElement("button"); rd.type = "button"; rd.className = "ghost-btn"; rd.textContent = "Read"; rd.onclick = () => read(r.name);
+      el.appendChild(rd);
+      if (runs) {
+        const up = document.createElement("button"); up.type = "button"; up.className = "solid-btn"; up.textContent = d.serving === r.name ? "Restart" : "Serve";
+        up.onclick = () => stream("up", r.name, (r.fits === false ? r.name + " looks too big for " + label(d) + ": dgx-serve will say so before it starts. " : "") +
+          "Serve " + r.name + " on " + label(d) + "? " + (d.serving ? "It stops " + d.serving + " first. " : "") + (r.weights_gb ? "The first time downloads about " + r.weights_gb.toFixed(1) + " GB." : ""));
+        el.appendChild(up);
+      }
+      return el;
+    };
+    here.forEach((r) => list.appendChild(row(r, true)));
+    card.appendChild(list);
+    if (other.length) {
+      const det = document.createElement("details"); det.className = "deploy-other";
+      const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Recipes for other machines (" + other.length + ")";
+      det.appendChild(sm);
+      const ol = document.createElement("div"); ol.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-top:6px";
+      other.forEach((r) => ol.appendChild(row(r, false)));
+      det.appendChild(ol); card.appendChild(det);
+    }
+    const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+    const down = document.createElement("button"); down.type = "button"; down.className = "ghost-btn"; down.textContent = "Stop serving";
+    down.disabled = !d.serving;
+    const st = document.createElement("button"); st.type = "button"; st.className = "ghost-btn"; st.textContent = "Status";
+    const logs = document.createElement("button"); logs.type = "button"; logs.className = "ghost-btn"; logs.textContent = "Logs";
+    [down, st, logs, note].forEach((e) => acts.appendChild(e));
+    card.appendChild(acts);
+    down.onclick = () => stream("down", "", "Stop serving on " + (d.local ? "this computer" : "every node of " + d.name) + "?");
     st.onclick = () => stream("status", "");
     logs.onclick = () => stream("logs", "");
+    card.appendChild(askRecipe(d));
     return card;
+  }
+
+  // This computer, before dgx-serve is here: what serving here takes, and one button
+  function installHere(plat) {
+    const box = document.createElement("div"); box.style.cssText = "display:flex;flex-direction:column;gap:8px"; box.id = "install-here";
+    const t = document.createElement("div"); t.className = "skill-desc";
+    t.textContent = "Serve models on this computer with dgx-serve, ByteBunker's model server. It installs into ~/dgx-serve and adds the rack command; nothing runs until you pick a recipe and Serve. After that, what it serves shows up in the Playground by itself.";
+    box.appendChild(t);
+    if (plat.support_note) { const n = document.createElement("div"); n.className = "hint"; n.textContent = plat.support_note; box.appendChild(n); }
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center";
+    const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn"; go.id = "install-here-btn"; go.textContent = "Install dgx-serve on this computer";
+    go.disabled = plat.supported === false;
+    const note = document.createElement("span"); note.className = "hint";
+    row.appendChild(go); row.appendChild(note); box.appendChild(row);
+    go.onclick = async () => {
+      go.disabled = true; note.textContent = "installing…";
+      const pane = recipePane("Install dgx-serve · this computer");
+      const out = preBlock(pane, "output", "");
+      const append = (x) => { out.textContent += x + "\n"; out.scrollTop = out.scrollHeight; };
+      let ok = false;
+      try {
+        await postFrames("/api/racks", { action: "install", target: "local" }, (o) => {
+          if (o.line != null) append(o.line);
+          else if (o.error) append("error: " + o.error);
+          else if (o.installed) ok = true;
+        });
+      } catch (e) { append("error: " + e.message); }
+      note.textContent = ok ? "done" : "did not finish: the log says why";
+      go.disabled = false;
+      if (ok) { setRack("local"); renderRecipes(); }
+    };
+    return box;
+  }
+
+  // Ask for a recipe: the user's own mail app, filled in; nothing leaves from here
+  function askRecipe(d) {
+    const box = document.createElement("div"); box.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--soft)";
+    const lab = document.createElement("span"); lab.className = "hint"; lab.textContent = "A model with no recipe yet?";
+    const what = inputEl("model name or Hugging Face link"); what.id = "ask-recipe-model"; what.style.minWidth = "240px";
+    const ask = document.createElement("button"); ask.type = "button"; ask.className = "ghost-btn"; ask.id = "ask-recipe"; ask.textContent = "Ask for a recipe";
+    [lab, what, ask].forEach((e) => box.appendChild(e));
+    ask.onclick = () => {
+      const m = what.value.trim();
+      if (!m) { what.focus(); return; }
+      const plat = d.platform || {};
+      const body = "Please add a dgx-serve recipe for:\n" + m + "\n\nWhere I would serve it: " + (plat.description || (d.local ? "this computer" : "a " + (d.here || "machine"))) +
+        (d.rack_version ? "\ndgx-serve: " + d.rack_version : "") + "\nByteBunker: " + (d.app_version || "") + "\n";
+      openOut("mailto:support@bytebunkerlabs.ai?subject=" + encodeURIComponent("Recipe request: " + m) + "&body=" + encodeURIComponent(body));
+    };
+    return box;
   }
 
   // Add a rack: pair over ssh, show what was found, keep what you tick
@@ -3511,7 +3601,7 @@
     host.textContent = "";
     const box = document.createElement("div"); box.className = "card"; box.style.gap = "8px"; box.id = "add-rack-form";
     const h = document.createElement("div"); h.className = "skill-head";
-    h.innerHTML = '<div class="skill-id"><b>Add a rack</b><span class="src mono">the machine that serves (the head, for a cluster), as you reach it with ssh</span></div>';
+    h.innerHTML = '<div class="skill-id"><b>Add a machine</b><span class="src mono">a Spark, a Linux GPU box, a Mac, a Windows PC&rsquo;s WSL2: as you reach it with ssh (the head, for a cluster)</span></div>';
     box.appendChild(h);
     const how = document.createElement("div"); how.className = "hint";
     how.textContent = "ByteBunker asks it once with your own ssh. dgx-serve there adds this app's own key, allowed to run rack and nothing else, and says where its engine and monitor are.";
@@ -3536,7 +3626,7 @@
       try {
         await postFrames("/api/racks", { action: "pair", target: t }, (o) => {
           if (o.line != null) say(o.line);
-          else if (o.error) { say("error: " + o.error); note.textContent = ""; }
+          else if (o.error) { say("error: " + o.error); note.textContent = ""; if (/dgx-serve is not on /.test(o.error)) offerInstall(result, t, say, host); }
           else if (o.needs_key) needsKey(result, o.needs_key, go);
           else if (o.found) foundRack(result, o.found, host);
           else if (o.phase === "done") note.textContent = o.exit === 0 ? "" : note.textContent;
@@ -3547,6 +3637,27 @@
     pair.onclick = go;
     target.onkeydown = (e) => { if (e.key === "Enter") go(); };
     target.focus();
+  }
+  // pairing found no rack there: install dgx-serve with your own ssh, then pair, in one run
+  function offerInstall(box, target, say, host) {
+    box.textContent = "";
+    const t = document.createElement("div"); t.className = "skill-desc";
+    t.textContent = "ByteBunker can install dgx-serve on " + target + " now, with your own ssh: it downloads into ~/dgx-serve there, adds the rack command and checks what serving there needs, then pairs. (A Windows PC: give its WSL2 Ubuntu, as you reach it with ssh.)";
+    box.appendChild(t);
+    const b = document.createElement("button"); b.type = "button"; b.className = "solid-btn"; b.id = "rack-install"; b.textContent = "Install dgx-serve on " + target;
+    box.appendChild(b);
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await postFrames("/api/racks", { action: "install", target }, (o) => {
+          if (o.line != null) say(o.line);
+          else if (o.error) say("error: " + o.error);
+          else if (o.needs_key) needsKey(box, o.needs_key, () => offerInstall(box, target, say, host));
+          else if (o.found) foundRack(box, o.found, host);
+        });
+      } catch (e) { say("error: " + e.message); }
+      b.disabled = false;
+    };
   }
   function needsKey(box, need, again) {
     box.textContent = "";

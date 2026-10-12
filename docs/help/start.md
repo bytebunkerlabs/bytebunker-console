@@ -10,7 +10,7 @@ ByteBunker talks to the models you run yourself: on this computer, on a box unde
 
 1. **Connect a model server.** Open [Gateways](#gateways) and press **Find engines**, or add one by address. Any OpenAI-compatible server works. → [Connect a model server](help:gateways)
 2. **Say something in the [Playground](#playground).** Pick the model at the top and type. → [The Playground](help:playground)
-3. **Add your machines.** If you serve models with dgx-serve, **Add a rack** on [Recipes](#recipes) pairs a machine over ssh: its engine comes in as a gateway and its monitor on [Cluster](#cluster). → [Serve a model](help:recipes)
+3. **Add your machines.** If you serve models with dgx-serve, **Add a machine** on [Deploy](#recipes) pairs a machine over ssh: its engine comes in as a gateway and its monitor on [Cluster](#cluster). → [Serve a model](help:recipes)
 
 The checklist on the Help home measures each of these and links to the fix.
 

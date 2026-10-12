@@ -40,7 +40,56 @@ class PairError(Exception):
     """Pairing failed; the message says why and what to do."""
 
 
+LOCAL = "local"                 # this computer, as a rack: rack runs here, no ssh
+DGX_SERVE_GIT = "https://github.com/bytebunkerlabs/dgx-spark-serve.git"
+DGX_SERVE_TARBALL = "https://codeload.github.com/bytebunkerlabs/dgx-spark-serve/tar.gz/refs/heads/main"
+
+
+def local_rack():
+    """The rack command on this computer: a path (on Windows, "wsl" when
+    WSL2 has one), or None. BYTEBUNKER_LOCAL_RACK points at another, or "off"."""
+    import shutil
+    env = os.environ.get("BYTEBUNKER_LOCAL_RACK")
+    if env:
+        return None if env == "off" else env
+    if sys.platform == "win32":
+        return "wsl" if _wsl_has_rack() else None
+    home = os.path.expanduser("~")
+    path = os.pathsep.join([os.path.join(home, ".local", "bin"), "/usr/local/bin", os.environ.get("PATH", "")])
+    found = shutil.which("rack", path=path)
+    if found:
+        return found
+    own = os.path.join(home, "dgx-serve", "rack")
+    return own if os.access(own, os.X_OK) else None
+
+
+_wsl_seen = [0.0, False]
+
+
+def _wsl_has_rack():
+    if time.time() - _wsl_seen[0] < 60:
+        return _wsl_seen[1]
+    try:
+        r = subprocess.run(["wsl.exe", "-e", "bash", "-lc", 'export PATH="$HOME/.local/bin:$PATH"; command -v rack'],
+                           capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        ok = r.returncode == 0 and bool(r.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    _wsl_seen[:] = [time.time(), ok]
+    return ok
+
+
+def local_entry():
+    return {"name": LOCAL, "ssh": LOCAL, "dir": "", "paired": False, "app": "", "platform": "", "gateway": "",
+            "monitor": "", "paired_at": 0, "local": True, "installed": bool(local_rack())}
+
+
 def entries(cfg):
+    """The configured racks, then this computer."""
+    return configured(cfg) + [local_entry()]
+
+
+def configured(cfg):
     out = []
     for r in cfg.get("racks") or []:
         if not isinstance(r, dict) or not TARGET.match(str(r.get("ssh") or "")):
@@ -48,7 +97,8 @@ def entries(cfg):
         out.append({"name": str(r.get("name") or r["ssh"])[:60], "ssh": r["ssh"], "dir": str(r.get("dir") or ""),
                     "paired": bool(r.get("paired")), "app": str(r.get("app") or ""),
                     "platform": str(r.get("platform") or ""), "gateway": str(r.get("gateway") or ""),
-                    "monitor": str(r.get("monitor") or ""), "paired_at": r.get("paired_at") or 0})
+                    "monitor": str(r.get("monitor") or ""), "paired_at": r.get("paired_at") or 0,
+                    "local": False})
     return out
 
 
@@ -137,6 +187,13 @@ def rack_argv(keys, rack, args):
     for w in args:
         if not WORD.match(str(w)):
             raise ValueError("not something rack takes: %r" % w)
+    if rack.get("local"):
+        path = local_rack()
+        if not path:
+            raise PairError("dgx-serve is not on this computer yet: Install dgx-serve, on the Deploy screen")
+        if path == "wsl":
+            return ["wsl.exe", "-e", "bash", "-lc", 'export PATH="$HOME/.local/bin:$PATH"; rack ' + " ".join(args)]
+        return [path] + [str(a) for a in args]
     if rack.get("paired"):
         return keys.argv(rack["ssh"]) + ["rack " + " ".join(args)]
     inner = "export PATH=$HOME/.local/bin:$PATH; cd %s && ./rack %s" % (
@@ -158,6 +215,56 @@ def _rq(path):
 PAIR_CMD = ("export PATH=\"$HOME/.local/bin:$PATH\"; "
             "command -v rack >/dev/null 2>&1 || { echo BB_NO_RACK; exit 3; }; "
             "rack pair --json --key '%s' --name %s")
+
+
+INSTALL_SH = r"""
+export PATH="$HOME/.local/bin:$PATH"
+D="$HOME/dgx-serve"
+if command -v rack >/dev/null 2>&1; then
+  echo "dgx-serve is here already: $(rack version 2>/dev/null | head -1)"
+else
+  if ! python3 -c 1 >/dev/null 2>&1; then
+    case "$(uname -s)" in
+      Darwin) echo "BB_ERR python3 is missing: on this Mac, run xcode-select --install (Apple's command line tools), then try again" ;;
+      *) echo "BB_ERR python3 is missing: sudo apt install -y python3 git, then try again" ;;
+    esac
+    exit 4
+  fi
+  if [ -e "$D" ] && [ ! -x "$D/rack" ]; then echo "BB_ERR $D is there and is not dgx-serve: move it away, then try again"; exit 4; fi
+  if [ ! -x "$D/rack" ]; then
+    if git --version >/dev/null 2>&1; then
+      echo "downloading dgx-serve into $D (git clone)"
+      git clone -q --depth 1 "$BB_GIT" "$D" || exit 5
+    elif command -v curl >/dev/null 2>&1; then
+      echo "downloading dgx-serve into $D"
+      mkdir -p "$D" && curl -fsSL "$BB_TARBALL" | tar -xz --strip-components 1 -C "$D" || exit 5
+    else
+      echo "BB_ERR neither git nor curl is here to download dgx-serve: sudo apt install -y git, then try again"; exit 4
+    fi
+  fi
+  "$D/rack" install || exit 5
+fi
+echo "rack init: what this machine is and what serving here needs"
+rack init || exit 6
+echo "BB_INSTALLED"
+"""
+
+
+def install_script():
+    import shlex
+    return "BB_GIT=%s; BB_TARBALL=%s; %s" % (shlex.quote(os.environ.get("BYTEBUNKER_DGX_SERVE_GIT") or DGX_SERVE_GIT),
+                                             shlex.quote(os.environ.get("BYTEBUNKER_DGX_SERVE_TARBALL") or DGX_SERVE_TARBALL),
+                                             INSTALL_SH)
+
+
+def install_argv(keys, target):
+    """The command that installs dgx-serve on target (LOCAL: here; else over your own ssh)."""
+    import shlex
+    if target == LOCAL:
+        if sys.platform == "win32":
+            return ["wsl.exe", "-e", "bash", "-lc", install_script()]
+        return ["/bin/bash", "-c", install_script()]
+    return keys.argv(target, own_key=False, first=True) + ["bash -c " + shlex.quote(install_script())]
 
 
 def _last(text, n=3):
@@ -368,3 +475,33 @@ def apply(cfg, item, gateway=True, monitor=True, gw_normalize=None, now_ms=None)
         racks.append(rack)
     cfg["racks"] = racks
     return rack
+
+
+def apply_local(cfg, info, gw_normalize=None):
+    """After serving on this computer: its engine as the gateway "this computer"
+    (and its monitor, when one runs), from `rack pair --json` read here."""
+    eng, mon = info.get("engine") or {}, info.get("monitor") or {}
+    added = {}
+    if eng.get("port"):
+        gws = [g for g in (cfg.get("gateways") or []) if isinstance(g, dict)]
+        url = "http://127.0.0.1:%d/v1" % int(eng["port"])
+        g = next((g for g in gws if g.get("url") == url), None) or next((g for g in gws if g.get("name") == "this computer"), None)
+        if g is None:
+            g = {"name": unique("this computer", {x.get("name") for x in gws}), "enabled": True}
+            gws.append(g)
+        g.update(url=url, key=eng.get("key") or "", kind="dgx-serve")
+        cfg["gateways"] = gws
+        added["gateway"] = g["name"]
+        if gw_normalize:
+            gw_normalize(cfg)
+    if mon.get("running") and mon.get("port") and mon.get("token"):
+        mons = [m for m in (cfg.get("monitors") or []) if isinstance(m, dict)]
+        url = "http://127.0.0.1:%d" % int(mon["port"])
+        m = next((m for m in mons if m.get("url") == url), None)
+        if m is None:
+            m = {"name": unique("this computer", {x.get("name") for x in mons}), "enabled": True}
+            mons.append(m)
+        m.update(url=url, token=mon["token"])
+        cfg["monitors"] = mons
+        added["monitor"] = m["name"]
+    return added

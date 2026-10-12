@@ -138,7 +138,7 @@ class Bridge:
 
     def open_external(self, url):
         import webbrowser
-        if str(url).startswith(("http://", "https://")):
+        if str(url).startswith(("http://", "https://", "mailto:")):
             webbrowser.open(str(url))
             return True
         return False

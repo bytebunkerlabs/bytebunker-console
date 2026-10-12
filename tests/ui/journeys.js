@@ -124,6 +124,11 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   // ---- Add a rack: pair over ssh, see what was found, keep it; the card then drives it
   await page.click('[data-nav="recipes"]');
   await page.waitForTimeout(1200);
+  // with no machine added, Deploy opens on this computer, and offers to install dgx-serve here
+  const here = await page.locator("#deploy-card").innerText().catch(() => "");
+  check("deploy: this computer first, with the install", here.startsWith("This computer") && await page.locator("#install-here-btn").isVisible().catch(() => false),
+        here.slice(0, 160).replace(/\n/g, " | "));
+  check("deploy: ask for a recipe", await page.locator("#ask-recipe").isVisible().catch(() => false));
   await page.click("#add-rack");
   await page.fill("#rack-target", "you@box");
   await page.click("#rack-pair");
@@ -135,7 +140,7 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   await page.click("#rack-save").catch(() => {});
   await page.waitForTimeout(2000);
   const rackHead = await page.locator("#recipes-left .card").first().innerText().catch(() => "");
-  check("racks: saved, the card drives it", rackHead.includes("box \u00b7 rack") && rackHead.includes("qwen3-8b"),
+  check("racks: saved, the card drives it", rackHead.startsWith("box") && rackHead.includes("Recipes for box") && rackHead.includes("qwen3-8b"),
         rackHead.slice(0, 200).replace(/\n/g, " | "));
 
   check("no page or console errors", errors.length === 0, errors.join(" || ").slice(0, 400));

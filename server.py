@@ -395,14 +395,18 @@ PAIRINGS = racksmod.Pending()
 
 
 def racks():
-    return racksmod.entries(CFG)
+    """The racks in config (this computer is not one of them: see rack_named)."""
+    return racksmod.configured(CFG)
 
 
 def rack_named(name=None):
-    """A rack by name, or the first one; None when there is none."""
+    """A rack by name, or the first one; with none configured, this computer
+    (racks.LOCAL), which is always there to name."""
     rs = racks()
+    if name == racksmod.LOCAL:
+        return racksmod.local_entry()
     if not name:
-        return rs[0] if rs else None
+        return rs[0] if rs else racksmod.local_entry()
     return next((r for r in rs if r["name"] == name), None)
 
 
@@ -439,7 +443,10 @@ def rack_recipes(text):
                 files.insert(0, r["location"].rstrip("/") + "/model.env")   # what the variant sources
             out.append({"name": r.get("name") or "", "mode": "TP=%d" % tp if tp > 1 else "solo",
                         "model": r.get("model") or v.get("model") or v.get("artifact") or "",
-                        "platforms": r.get("platforms") or [], "files": [f for f in files if f]})
+                        "platforms": r.get("platforms") or [], "files": [f for f in files if f],
+                        "here": bool(d.get("here")) and d.get("here") in vs, "fits": v.get("fits"),
+                        "weights_gb": v.get("weights_gb"), "engine": v.get("engine") or "",
+                        "roles": r.get("roles") or []})
         return out
     recipes = []
     for ln in _ANSI.sub("", text).splitlines():
@@ -459,26 +466,59 @@ def rack_serving(status):
     return m.group(1) if m else ""
 
 
+def connect_local(emit=None):
+    """This computer's engine (and monitor) as a gateway, after rack up here."""
+    import subprocess
+    try:
+        out = subprocess.run(rack_cmd(["pair", "--json"], racksmod.local_entry()), capture_output=True, text=True, timeout=30)
+        info = racksmod.parse(out.stdout)
+    except (racksmod.PairError, OSError, subprocess.SubprocessError) as e:
+        if emit:
+            emit({"line": "could not read this computer's engine to add it: %s" % e})
+        return {}
+    added = racksmod.apply_local(CFG, info, gw_normalize=gwmod.normalize)
+    if added:
+        save_config()
+        GW.refresh(force=True)
+        MON.invalidate()
+        BUS.publish("config", "racks", {"racks": [x["name"] for x in racks()]})
+    return added
+
+
 def rack_overview(name=None, max_age=15):
     """recipes + status, cached briefly: `rack status` sshes to every node."""
     import subprocess
     r = rack_named(name)
-    listing = [{"name": x["name"], "ssh": x["ssh"], "paired": x["paired"]} for x in racks()]
+    here = racksmod.local_entry()
+    listing = [{"name": x["name"], "ssh": x["ssh"], "paired": x["paired"], "local": x["local"]} for x in racks()] + \
+        [{"name": here["name"], "ssh": "", "paired": False, "local": True, "installed": here["installed"]}]
+    if r is not None and r.get("local") and not r.get("installed"):
+        return {"ok": False, "enabled": True, "name": r["name"], "local": True, "installed": False, "host": "this computer",
+                "paired": False, "dir": "", "racks": listing,
+                "platform": local_platform(), "app_version": app_version(),
+                "error": "dgx-serve is not on this computer yet"}
     if r is None:
         if name:
             return {"ok": False, "enabled": bool(listing), "racks": listing, "error": "no rack named %r" % name}
         return {"ok": False, "enabled": False, "racks": [],
-                "error": "no rack yet: Add a rack pairs one over ssh"}
+                "error": "no machine yet: Add a machine pairs one over ssh"}
     now = time.time()
     hit = _rack_cache.get(r["name"])
     if hit and now - hit[0] < max_age:
         return dict(hit[1], racks=listing)
-    val = {"ok": True, "enabled": True, "name": r["name"], "host": r["ssh"], "paired": r["paired"],
-           "dir": "" if r["paired"] else (r["dir"] or "~/dgx/dgx-spark-serve"), "racks": listing}
+    drives = r["paired"] or r.get("local")
+    val = {"ok": True, "enabled": True, "name": r["name"], "host": "this computer" if r.get("local") else r["ssh"],
+           "paired": r["paired"], "local": bool(r.get("local")), "installed": True, "app_version": app_version(),
+           "dir": "" if drives else (r["dir"] or "~/dgx/dgx-spark-serve"), "racks": listing}
     try:
         out = subprocess.run(rack_cmd(["recipes", "--json"], r), capture_output=True, text=True, timeout=25)
         recipes = rack_recipes(out.stdout)
-        if not recipes and out.returncode != 0 and not r["paired"]:   # a rack from before 1.0 that refuses --json
+        try:
+            d = json.loads(out.stdout)
+            val.update(here=d.get("here") or "", budget_mb=d.get("budget_mb"))
+        except ValueError:
+            pass
+        if not recipes and out.returncode != 0 and not drives:   # a rack from before 1.0 that refuses --json
             out = subprocess.run(rack_cmd(["recipes"], r), capture_output=True, text=True, timeout=25)
             recipes = rack_recipes(out.stdout)
         if not recipes and out.returncode != 0:
@@ -494,8 +534,48 @@ def rack_overview(name=None, max_age=15):
         val["serving"] = rack_serving(val["status_raw"])
     except Exception as e:   # noqa: BLE001
         val["status_raw"] = "rack status failed: %s" % str(e)[:120]
+    if drives:
+        try:
+            out = subprocess.run(rack_cmd(["platform", "--json"], r), capture_output=True, text=True, timeout=25)
+            p = json.loads(out.stdout)
+            val["platform"] = {k: p.get(k) for k in ("platform", "description", "supported", "support_note", "model_budget_mb")}
+        except Exception:   # noqa: BLE001  (an older rack, or no answer: the screen goes without)
+            pass
+        try:
+            out = subprocess.run(rack_cmd(["version", "--json"], r), capture_output=True, text=True, timeout=25)
+            try:
+                v = json.loads(out.stdout) or {}
+                val["rack_version"] = (str(v.get("version") or "") + (" " + v["commit"] if v.get("commit") else "")).strip()
+            except ValueError:                                  # "rack 1.0.0 ..." from a rack without --json
+                val["rack_version"] = (out.stdout.split() + ["", ""])[1] if out.stdout.startswith("rack ") else ""
+        except Exception:   # noqa: BLE001
+            pass
     _rack_cache[r["name"]] = (now, val)
     return val
+
+
+def local_platform():
+    """What this computer is, for the Deploy screen before dgx-serve is here."""
+    import platform as _pf
+    mem = 0
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            mem = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+        elif hasattr(os, "sysconf") and "SC_PHYS_PAGES" in os.sysconf_names:
+            mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (OSError, ValueError):
+        mem = 0
+    kind = {"darwin": "mac", "win32": "windows"}.get(sys.platform, "linux")
+    name = {"mac": "Mac", "windows": "Windows PC", "linux": "Linux machine"}[kind]
+    arch = _pf.machine()
+    desc = "%s (%s%s)" % (name, arch, ", %d GiB memory" % round(mem / 2 ** 30) if mem else "")
+    note = ""
+    if kind == "mac" and arch != "arm64":
+        note = "dgx-serve serves on Apple Silicon Macs, not on Intel ones"
+    elif kind == "windows":
+        note = "on Windows, dgx-serve runs inside WSL2 (Ubuntu 24.04), with the GPU passed through"
+    return {"platform": kind, "description": desc, "supported": not note or kind == "windows", "support_note": note}
 
 
 # ---------------------------------------------------------------- uploads --
@@ -1161,9 +1241,9 @@ _NET_LOCK = threading.Lock()
 
 
 def netcheck(fresh=False):
-    target, rack = CFG.get("netcheck_ssh", ""), rack_named()
+    target, rack = CFG.get("netcheck_ssh", ""), (racks() or [None])[0]
     if not target and not rack:
-        return {"ok": False, "error": "no rack to ask: Add a rack (or set netcheck_ssh)"}
+        return {"ok": False, "error": "no rack to ask: Add a machine on Deploy (or set netcheck_ssh)"}
     with _NET_LOCK:
         if not fresh and _NET["result"] and time.time() - _NET["at"] < 300:
             return _NET["result"]
@@ -1256,11 +1336,13 @@ def setup_checklist():
         {"id": "models", "title": "A model to talk to", "ok": bool(GW.models),
          "detail": "%d model%s" % (len(GW.models), "" if len(GW.models) == 1 else "s"),
          "action": {"label": "Models", "screen": "models"}, "help": "gateways"},
-        {"id": "rack", "title": "A rack paired", "optional": True, "ok": any(r["paired"] for r in racks()),
-         "detail": ", ".join(r["name"] for r in racks() if r["paired"]) or (
+        {"id": "rack", "title": "A machine to serve on", "optional": True,
+         "ok": any(r["paired"] for r in racks()) or racksmod.local_entry()["installed"],
+         "detail": ", ".join((["this computer"] if racksmod.local_entry()["installed"] else []) +
+                             [r["name"] for r in racks() if r["paired"]]) or (
              "%s, reached with your own ssh: pair it to drive it with this app's key" % racks()[0]["name"] if racks()
-             else "for machines serving with dgx-serve"),
-         "action": {"label": "Add a rack", "screen": "recipes"}, "help": "recipes"},
+             else "dgx-serve on this computer, or a machine you add"),
+         "action": {"label": "Deploy", "screen": "recipes"}, "help": "recipes"},
         {"id": "monitor", "title": "A rack monitor", "optional": True, "ok": bool(MON.list()),
          "detail": "%d monitor%s" % (len(MON.list()), "" if len(MON.list()) == 1 else "s"),
          "action": {"label": "Cluster", "screen": "cluster"}, "help": "cluster"},
@@ -2514,7 +2596,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/rack":
             self._json(rack_overview((urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("rack") or [None])[0]))
         elif path == "/api/racks":
-            self._json({"racks": racks(), "app": {"key": os.path.exists(KEYS.key), "known_hosts": KEYS.known_hosts}})
+            self._json({"racks": racks(), "local": racksmod.local_entry(),
+                        "app": {"key": os.path.exists(KEYS.key), "known_hosts": KEYS.known_hosts}})
         elif path.startswith("/api/uploads/"):
             rel = path[len("/api/uploads/"):]
             parts = [urllib.parse.unquote(x) for x in rel.split("/") if x]
@@ -2967,7 +3050,7 @@ class Handler(BaseHTTPRequestHandler):
         r = rack_named(body.get("rack"))
         if r is None:
             self._json({"error": ("no rack named %r" % body["rack"]) if body.get("rack")
-                        else "no rack yet: Add a rack pairs one over ssh"}, 400)
+                        else "no machine yet: Add a machine pairs one over ssh"}, 400)
             return
         action = str(body.get("action") or "")
         recipe = str(body.get("recipe") or "").strip()
@@ -2978,8 +3061,12 @@ class Handler(BaseHTTPRequestHandler):
             if not recipe:
                 self._json({"error": "recipe required"}, 400)
                 return
-            if r["paired"]:
-                cmd, files = rack_cmd(["recipes", "show", recipe], r), None
+            if r["paired"] or r.get("local"):
+                try:
+                    cmd, files = rack_cmd(["recipes", "show", recipe], r), None
+                except racksmod.PairError as e:
+                    self._json({"error": str(e)}, 400)
+                    return
             else:
                 # where rack says the recipe is (1.0: yours live outside the checkout), else the old place
                 files = next((x.get("files") for x in rack_overview(r["name"]).get("recipes") or []
@@ -3003,6 +3090,11 @@ class Handler(BaseHTTPRequestHandler):
         args = [action] + ([recipe] if recipe and action in ("up", "bench", "gateway") else [])
         if action == "logs":
             args = ["logs"]
+        try:
+            rack_cmd(args, r)
+        except racksmod.PairError as e:
+            self._json({"error": str(e)}, 400)
+            return
         _rack_cache.pop(r["name"], None)           # status changes after this
 
         def work(run, emit):
@@ -3019,6 +3111,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:   # noqa: BLE001
                 emit({"error": str(e)})
                 code, killed = -1, "error"
+            if code == 0 and action == "up" and r.get("local"):
+                added = connect_local(emit)
+                if added:
+                    emit({"line": "this app talks to it now: " + ", ".join("%s %s" % kv for kv in sorted(added.items()))})
             emit({"phase": "done", "exit": code, "killed": killed})
             TRACE.log("rack", action=action, recipe=recipe, rack=r["name"], host=r["ssh"], exit=code, run=run.id,
                       killed=killed or False, output=captured[-200:])
@@ -3073,6 +3169,70 @@ class Handler(BaseHTTPRequestHandler):
                 TRACE.log("rack", action="pair", target=target, ok=True, engine=engine_url, monitor=monitor_url, run=run.id)
                 return {"ok": True}
             self._run_streamed("pair", "pair " + target, work, meta={"target": target}, key="pair:" + target, detach=False)
+            return
+        if action == "install":
+            target = str(body.get("target") or racksmod.LOCAL).strip()
+            if target != racksmod.LOCAL and not racksmod.TARGET.match(target):
+                self._json({"error": "an ssh destination: user@host, or a host from ~/.ssh/config"}, 400)
+                return
+            where = "this computer" if target == racksmod.LOCAL else target
+
+            def work(run, emit):
+                say = lambda t: emit({"line": t})
+                say("installing dgx-serve on %s" % where)
+                errors = []
+
+                def on_line(text):
+                    text = _ANSI.sub("", text)
+                    if text.startswith("BB_ERR "):
+                        errors.append(text[7:])
+                        emit({"error": text[7:]})
+                    elif text != "BB_INSTALLED":
+                        say(text)
+                try:
+                    code, killed = agentmod.run_streaming(racksmod.install_argv(KEYS, target), ROOT, on_line,
+                                                          run.cancel_event, timeout_s=1800)
+                except Exception as e:   # noqa: BLE001
+                    code, killed = -1, "error"
+                    errors.append(str(e))
+                    emit({"error": str(e)})
+                _rack_cache.pop(racksmod.LOCAL, None)
+                if code != 0:
+                    msg = errors[0] if errors else ("could not reach %s" % target if code == 255 else
+                                                    "the install stopped (exit %s)" % code)
+                    if not errors and code != 255:
+                        emit({"error": msg})
+                    emit({"phase": "done", "exit": code or 1, "killed": killed})
+                    TRACE.log("rack", action="install", target=target, ok=False, exit=code, error=msg[:300], run=run.id)
+                    return {"ok": False, "error": msg}
+                TRACE.log("rack", action="install", target=target, ok=True, run=run.id)
+                if target == racksmod.LOCAL:
+                    say("dgx-serve is on this computer: pick a recipe and Serve")
+                    emit({"installed": {"target": target}})
+                    emit({"phase": "done", "exit": 0, "killed": False})
+                    BUS.publish("config", "racks", {"racks": [x["name"] for x in racks()]})
+                    return {"ok": True}
+                say("now pairing with %s" % target)          # the same as Add a rack, from here on
+                try:
+                    kind, got = racksmod.ask(KEYS, target, say)
+                except racksmod.PairError as e:
+                    emit({"error": str(e)})
+                    emit({"phase": "done", "exit": 1, "killed": False})
+                    return {"ok": False, "error": str(e)}
+                if kind == "needs_key":
+                    emit({"needs_key": got})
+                    emit({"phase": "done", "exit": 2, "killed": False})
+                    return {"ok": False, "error": "needs the app's key on %s first" % target}
+                engine_url, monitor_url, tried = racksmod.find(target, got)
+                found = racksmod.summary(target, got, engine_url, monitor_url)
+                found["pairing"] = PAIRINGS.put({"target": target, "info": got, "engine_url": engine_url,
+                                                 "monitor_url": monitor_url, "app": KEYS.app_name()})
+                found["tried"] = tried
+                emit({"found": found})
+                emit({"phase": "done", "exit": 0, "killed": False})
+                return {"ok": True}
+            self._run_streamed("install", "install dgx-serve on " + where, work, meta={"target": target},
+                               key="install:" + target, detach=True)
             return
         if action == "save":
             item = PAIRINGS.take(str(body.get("pairing") or ""))

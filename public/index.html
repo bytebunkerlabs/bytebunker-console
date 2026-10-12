@@ -28,7 +28,7 @@
     <nav class="nav">
       <button data-nav="gateways"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 2.2v2.4M8 11.4v2.4M2.2 8h2.4M11.4 8h2.4M4 4l1.7 1.7M10.3 10.3 12 12M12 4l-1.7 1.7M5.7 10.3 4 12"/></svg><span>Gateways</span></button>
       <button data-nav="models"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2.5" y="2.6" width="11" height="4.2" rx="1.3"/><rect x="2.5" y="9.2" width="11" height="4.2" rx="1.3"/></svg><span>Models</span></button>
-      <button data-nav="recipes"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v9.2H3z"/><path d="M5.4 6.4h5.2M5.4 8.6h5.2M5.4 10.8h3"/></svg><span>Recipes</span></button>
+      <button data-nav="recipes"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v9.2H3z"/><path d="M5.4 6.4h5.2M5.4 8.6h5.2M5.4 10.8h3"/></svg><span>Deploy</span></button>
     </nav>
 
     <div class="nav-label">Extend</div>
@@ -138,10 +138,10 @@
 
     <!-- Agents -->
     <section class="screen" id="screen-recipes">
-      <header><h1>Recipes</h1><span class="sub">Deploy a model from here · the exact script is shown before it runs · <span id="recipes-sub">—</span></span></header>
+      <header><h1>Deploy</h1><span class="sub">Serve a model with dgx-serve · <span id="recipes-sub">—</span></span></header>
       <div class="scroll agents-grid">
         <div class="agents-left" id="recipes-left"></div>
-        <aside class="agents-detail" id="recipes-detail"><div class="hint">Pick a recipe. Preview shows every file it would write; Deploy runs it over ssh and streams the log here; Register adds the model to litellm so the console and the agents see it by name.</div></aside>
+        <aside class="agents-detail" id="recipes-detail"><div class="hint">Pick a machine and a recipe. Read shows the files it runs; Serve starts it and streams the log here.</div></aside>
       </div>
     </section>
 
@@ -289,7 +289,7 @@
         </div>
         <div class="empty-state">
           <b>Deploying or switching a model</b>
-          <span>The Sparks are served by <span class="mono">rack</span> and other hosts by the console's recipes — both on the <button class="linky" type="button" id="models-to-recipes">Recipes</button> screen. This list is what the gateway serves right now.</span>
+          <span>Models are served with dgx-serve, on this computer or any machine you add, from the <button class="linky" type="button" id="models-to-recipes">Deploy</button> screen. This list is what your gateways serve right now.</span>
         </div>
       </div>
     </section>
