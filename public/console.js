@@ -76,6 +76,7 @@
 
   /* ---------------- nav ---------------- */
   const screens = ["playground", "sessions", "projects", "video", "skills", "plugins", "mcp", "agents", "workflows", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
+  const GROUPS = { models: ["models", "recipes", "gateways"], tools: ["mcp", "skills", "plugins"] };
   function go(s) {
     // a screen whose nav entry is hidden (not set up here) is not reachable by link
     const nav = document.querySelector(`[data-nav="${s}"]`);
@@ -87,6 +88,17 @@
       $("screen-" + id).classList.toggle("on", id === s);
       document.querySelector(`[data-nav="${id}"]`).classList.toggle("on", id === s);
     });
+    // a grouped screen: its group lights up in the sidebar, and the group's tabs sit under its header
+    const grp = Object.keys(GROUPS).find((g) => GROUPS[g].includes(s));
+    document.querySelectorAll("[data-group]").forEach((b) => b.classList.toggle("on", b.dataset.group === grp));
+    for (const g of Object.keys(GROUPS)) {
+      const strip = $("group-" + g);
+      strip.hidden = g !== grp;
+      if (g === grp) {
+        $("screen-" + s).querySelector("header").insertAdjacentElement("afterend", strip);
+        try { localStorage.setItem("bb.group." + g, s); } catch (e) {}
+      }
+    }
     $("panel").classList.toggle("on", s === "playground" && panelWanted);
     if (s === "sessions") renderSessions();
     if (s === "projects") renderProjects();
@@ -104,6 +116,12 @@
     if (s === "video") vidRefresh();
   }
   document.querySelectorAll("[data-nav]").forEach((b) => (b.onclick = () => go(b.dataset.nav)));
+  // the sidebar's Models and Tools open the screen of their group used last
+  document.querySelectorAll("[data-group]").forEach((b) => (b.onclick = () => {
+    let last = null;
+    try { last = localStorage.getItem("bb.group." + b.dataset.group); } catch (e) {}
+    go(GROUPS[b.dataset.group].includes(last) ? last : GROUPS[b.dataset.group][0]);
+  }));
 
   let panelWanted = window.innerWidth >= 1080;
   $("panel-btn").onclick = () => { panelWanted = !panelWanted; go(state.screen); };
@@ -117,6 +135,7 @@
 
   /* ---------------- params ---------------- */
   const P = state.params;
+  const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
   const fmtTok = (v) => (v >= 1000 ? (v / 1000).toFixed(1).replace(".0", "") + "k" : String(v));
   function bindRange(id, valId, key, fmt) {
     $(id).oninput = (e) => { P[key] = +e.target.value; $(valId).textContent = fmt(P[key]); };
@@ -138,6 +157,17 @@
   };
   $("tools-switch").onclick = () => { state.toolsOn = !state.toolsOn; $("tools-switch").classList.toggle("on", state.toolsOn); };
   $("reset-params").onclick = () => location.reload();
+  // Advanced stays folded unless opened; its title says when something in it differs from the defaults
+  (() => {
+    const adv = $("adv-params"), sum = adv.querySelector("summary");
+    try { adv.open = localStorage.getItem("bb.adv") === "1"; } catch (e) {}
+    adv.addEventListener("toggle", () => { try { localStorage.setItem("bb.adv", adv.open ? "1" : "0"); } catch (e) {} });
+    const mark = () => {
+      const changed = P.temp !== 0.7 || P.topP !== 0.95 || P.topK !== 40 || P.rep !== 1.05 || P.seed || P.json || P.stops.trim();
+      sum.textContent = "Advanced: sampling and output" + (changed ? " \u00b7 changed" : "");
+    };
+    adv.addEventListener("input", mark); adv.addEventListener("click", () => setTimeout(mark));
+  })();
   $("model-select").onchange = (e) => { state.model = e.target.value; servingLine(); };
 
   function snippet() {
@@ -1061,7 +1091,7 @@
               method: "POST", headers: traceHeaders(bot),
               body: JSON.stringify({ name: c.name, arguments: args }),
             })).json();
-          } catch (e) { out = { content: "console could not reach the tool: " + e.message, isError: true }; }
+          } catch (e) { out = { content: "the app could not reach the tool: " + e.message, isError: true }; }
           // the model gets 20k of it and the screen shows 20k: storing all of it
           // made one session 45 MB, re-sent and rewritten after every turn
           const full = String(out.content);
@@ -1760,7 +1790,7 @@
     servingLine();
     const gwCount = Object.keys(state.gatewayStatus || {}).length;
     $("models-sub").textContent = state.models.length
-      ? `${state.models.length} models across ${gwCount} gateway${gwCount === 1 ? "" : "s"}`
+      ? `${plural(state.models.length, "model")} across ${plural(gwCount, "gateway")}`
       : (gwCount ? "no models reachable — see the Gateways screen" : "no gateway configured — add one on the Gateways screen");
     const facts = $("model-facts");
     facts.innerHTML = "";
@@ -1785,7 +1815,7 @@
       lm.appendChild(c);
     }
     if (!state.models.length) {
-      lm.innerHTML = '<div class="empty-state"><b>Upstream unreachable</b><span>Point config.json upstream_url at the gateway or a vLLM server, then reload.</span></div>';
+      lm.innerHTML = '<div class="empty-state"><b>No model server answers</b><span>Deploy a model, or add a gateway, then reload.</span></div>';
     }
   }
 
@@ -1806,7 +1836,7 @@
     } catch (e) {}
     renderServers(d.servers || {}, d.config || {});
     $("tools-count").textContent = state.tools.length
-      ? state.tools.length + " tools available" : "no tools";
+      ? plural(state.tools.length, "tool") + " available" : "no tools";
     $("tools-switch").classList.toggle("on", state.toolsOn);
   }
 
@@ -1922,7 +1952,7 @@
   }
 
   async function deleteSkill(name) {
-    if (!confirm("Delete skill \"" + name + "\" from the console and the agent worker?")) return;
+    if (!confirm("Delete skill \"" + name + "\" from this app and the agent worker?")) return;
     try {
       const r = await fetch("/api/skills", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete", name }) });
       const d = await r.json();
@@ -2041,7 +2071,7 @@
   }
 
   async function removePlugin(name) {
-    if (!confirm("Remove plugin \"" + name + "\" (deletes its folder under the console's plugins dir)?")) return;
+    if (!confirm("Remove plugin \"" + name + "\" (deletes its folder in the app's plugins folder)?")) return;
     try {
       const r = await fetch("/api/plugins", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "remove", name }) });
       const d = await r.json(); if (d.error) alert(d.error);
@@ -2089,7 +2119,7 @@
       t.textContent = bits.length ? bits.join("  ·  ") : "contributes nothing loadable";
       card.appendChild(t);
       const rm = document.createElement("button");
-      rm.type = "button"; rm.className = "linky"; rm.textContent = "remove";
+      rm.type = "button"; rm.className = "ghost-btn danger"; rm.textContent = "Remove";
       rm.onclick = () => removePlugin(p.name);
       card.appendChild(rm);
       box.appendChild(card);
@@ -2112,7 +2142,7 @@
   async function renderSettings() {
     let d = {};
     try { d = await (await fetch("/api/settings")).json(); } catch (e) {}
-    $("settings-sub").textContent = (d.desktop ? "ByteBunker " + (d.version || "") + " \u00b7 desktop" : "console") + " \u00b7 " + (d.platform || "") + " \u00b7 Python " + (d.python || "");
+    $("settings-sub").textContent = "ByteBunker " + (d.version || "") + (d.desktop ? " \u00b7 desktop" : " \u00b7 server") + " \u00b7 " + (d.platform || "") + " \u00b7 Python " + (d.python || "");
     const box = $("settings-box"); box.textContent = "";
     const card = (title, sub) => { const c = document.createElement("div"); c.className = "card"; c.style.gap = "10px"; const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>'; h.querySelector("b").textContent = title; h.querySelector(".src").textContent = sub || ""; c.appendChild(h); box.appendChild(c); return c; };
     const line = (c, k, v) => { const r = document.createElement("div"); r.className = "mono"; r.style.cssText = "font-size:12px;color:var(--muted);word-break:break-all"; r.textContent = k + "  " + v; c.appendChild(r); return r; };
@@ -2365,7 +2395,7 @@
   }
   function gatewayEditor(g) {
     const pane = $("gateways-detail"); pane.textContent = "";
-    const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono">changes apply at once; the key is stored in the console config on this machine</span></div>';
+    const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono">changes apply at once; the key is stored in this app\u2019s settings on this computer</span></div>';
     h.querySelector("b").textContent = "Edit " + g.name; pane.appendChild(h);
     const nm = inputEl("name"); nm.value = g.name;
     const url = inputEl("http://host:port/v1"); url.value = g.url;
@@ -2420,14 +2450,14 @@
     try { d = await (await fetch("/api/gateways")).json(); } catch (e) {}
     const left = $("gateways-left"); left.textContent = "";
     const up = d.gateways.filter((g) => g.ok).length;
-    $("gateways-sub").textContent = d.gateways.length + " configured \u00b7 " + up + " reachable \u00b7 " + d.models + " models";
+    $("gateways-sub").textContent = d.gateways.length + " configured \u00b7 " + up + " reachable \u00b7 " + plural(d.models, "model");
     for (const g of d.gateways) {
       const card = document.createElement("div"); card.className = "card"; card.style.gap = "8px"; if (!g.enabled) card.style.opacity = ".6";
       const head = document.createElement("div"); head.className = "skill-head";
       head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div><span class="pill"><span class="d"></span><span class="pt"></span></span>';
       head.querySelector("b").textContent = g.name;
       head.querySelector(".src").textContent = g.url + (g.kind ? "  \u00b7  " + g.kind : "") + (g.has_key ? "  \u00b7  key set" : "  \u00b7  no key");
-      head.querySelector(".pt").textContent = !g.enabled ? "disabled" : g.ok ? g.models.length + " models \u00b7 " + g.ms + " ms" : "unreachable";
+      head.querySelector(".pt").textContent = !g.enabled ? "disabled" : g.ok ? plural(g.models.length, "model") + " \u00b7 " + g.ms + " ms" : "unreachable";
       if (!g.ok) head.querySelector(".pill").style.opacity = ".6";
       card.appendChild(head);
       if (g.error) { const e = document.createElement("div"); e.className = "hint"; e.style.color = "var(--err)"; e.textContent = g.error; card.appendChild(e); }
@@ -2435,9 +2465,9 @@
       const lv = document.createElement("div"); lv.className = "mono gw-live"; lv.dataset.gw = g.name; lv.style.cssText = "font-size:11.5px;color:var(--muted)"; card.appendChild(lv);
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
-      mk(g.enabled ? "disable" : "enable", "ghost-btn", async () => { try { await gwPost({ action: "toggle", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
-      mk("edit", "ghost-btn", () => gatewayEditor(g));
-      mk("remove", "rate-btn bad", async () => { if (!confirm("Remove gateway " + g.name + "?")) return; try { await gwPost({ action: "remove", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
+      mk(g.enabled ? "Disable" : "Enable", "ghost-btn", async () => { try { await gwPost({ action: "toggle", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
+      mk("Edit", "ghost-btn", () => gatewayEditor(g));
+      mk("Remove", "ghost-btn danger", async () => { if (!confirm("Remove gateway " + g.name + "?")) return; try { await gwPost({ action: "remove", name: g.name }); } catch (e) { alert(e.message); } renderGateways(); afterGatewayChange(); });
       card.appendChild(acts); left.appendChild(card);
     }
     // add by address
@@ -2585,7 +2615,7 @@
     }
     const on = d.jobs.filter((j) => j.enabled).length;
     const nrun = Object.keys(running).length;
-    $("jobs-sub").textContent = d.jobs.length + " jobs \u00b7 " + on + " enabled" + (nrun ? " \u00b7 " + nrun + " running" : "");
+    $("jobs-sub").textContent = plural(d.jobs.length, "job") + " \u00b7 " + on + " enabled" + (nrun ? " \u00b7 " + nrun + " running" : "");
     if (!d.jobs.length) { const e = document.createElement("div"); e.className = "hint job-item"; e.textContent = "No jobs yet. A morning summary of the trace log, a nightly CVE sweep for your products, a weekly report written to a file: anything you would ask in the Playground, on a timer."; left.appendChild(e); }
     for (const j of d.jobs) {
       const card = document.createElement("div"); card.className = "card job-item" + (jobsSelected === j.id ? " skill-card on" : ""); card.style.gap = "8px"; card.style.cursor = "pointer";
@@ -2600,10 +2630,10 @@
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = (e) => { e.stopPropagation(); fn(); }; acts.appendChild(b); };
       const post = async (payload) => { try { const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const x = await r.json(); if (x.error) alert(x.error); } catch (e) { alert(e.message); } renderJobs(true); };
-      mk("run now", "solid-btn", () => post({ action: "run_now", id: j.id }));
-      mk(j.enabled ? "pause" : "resume", "ghost-btn", () => post({ action: "toggle", id: j.id }));
-      mk("edit", "ghost-btn", () => { jobsDetail = "edit"; const pane = $("jobs-detail"); pane.textContent = ""; pane.appendChild(jobForm(j)); });
-      mk("delete", "rate-btn bad", () => { if (confirm("Delete job \"" + j.name + "\" and its history?")) post({ action: "delete", id: j.id }); });
+      mk("Run now", "solid-btn", () => post({ action: "run_now", id: j.id }));
+      mk(j.enabled ? "Pause" : "Resume", "ghost-btn", () => post({ action: "toggle", id: j.id }));
+      mk("Edit", "ghost-btn", () => { jobsDetail = "edit"; const pane = $("jobs-detail"); pane.textContent = ""; pane.appendChild(jobForm(j)); });
+      mk("Delete", "ghost-btn danger", () => { if (confirm("Delete job \"" + j.name + "\" and its history?")) post({ action: "delete", id: j.id }); });
       card.appendChild(head); card.appendChild(desc); card.appendChild(last); card.appendChild(acts);
       card.onclick = () => { jobsSelected = j.id; showJobRuns(j); };
       left.appendChild(card);
@@ -2995,7 +3025,7 @@
     mk("Open in terminal", "ghost-btn", () => openTerminal({ project: p.id }, note));
     mk("Chats", "ghost-btn", async () => { list.hidden = !list.hidden; if (!list.hidden) await fillProjectChats(p, list); });
     mk("Edit", "ghost-btn", () => projectForm(formHost, p));
-    mk("Delete", "rate-btn bad", async () => {
+    mk("Delete", "ghost-btn danger", async () => {
       if (!confirm("Delete the project “" + p.name + "”? Its chats stay, without a project, and its folder is not touched.")) return;
       await fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete", id: p.id }) }).catch(() => {});
       if (state.project === p.id) setProject("");
@@ -3135,9 +3165,9 @@
       const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = w.description || oneLine(w.prompt, 200);
       const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = (e) => { e.stopPropagation(); fn(); }; acts.appendChild(b); };
-      mk("run", "solid-btn", () => { wfSelected = n; wfDetail = "run"; showWorkflowRun(n, w); });
-      mk("edit", "ghost-btn", () => { wfSelected = n; wfDetail = "edit"; const pane = $("workflows-detail"); pane.textContent = ""; pane.appendChild(workflowForm(n, w)); });
-      mk("delete", "rate-btn bad", async () => { if (!confirm("Delete workflow " + n + "? Jobs that run it will fail until you pick another.")) return; try { await wfPost({ action: "delete", name: n }); } catch (e) { alert(e.message); } renderWorkflows(); });
+      mk("Run", "solid-btn", () => { wfSelected = n; wfDetail = "run"; showWorkflowRun(n, w); });
+      mk("Edit", "ghost-btn", () => { wfSelected = n; wfDetail = "edit"; const pane = $("workflows-detail"); pane.textContent = ""; pane.appendChild(workflowForm(n, w)); });
+      mk("Delete", "ghost-btn danger", async () => { if (!confirm("Delete workflow " + n + "? Jobs that run it will fail until you pick another.")) return; try { await wfPost({ action: "delete", name: n }); } catch (e) { alert(e.message); } renderWorkflows(); });
       card.appendChild(head); card.appendChild(desc); card.appendChild(acts);
       card.onclick = () => { wfSelected = n; wfDetail = "run"; showWorkflowRun(n, w); };
       left.appendChild(card);
@@ -3228,7 +3258,7 @@
 
     // configured servers
     const cfgCard = document.createElement("div"); cfgCard.className = "card"; cfgCard.style.gap = "8px";
-    cfgCard.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Configured servers</b><span class="src mono">started by the console as subprocesses \u00b7 config.json \u2192 mcp_servers</span></div></div>';
+    cfgCard.innerHTML = '<div class="skill-head"><div class="skill-id"><b>Configured servers</b><span class="src mono">started by the app on this computer</span></div></div>';
     if (!names.length) { const n = document.createElement("div"); n.className = "hint"; n.textContent = "None yet. Add one from the catalog below."; cfgCard.appendChild(n); }
     for (const name of names) {
       const st = d.servers[name] || { state: "unknown", tools: 0 };
@@ -3241,18 +3271,18 @@
       row.querySelector("b").textContent = name;
       const isTerminal = /(^|[\\/])mcp_terminal\.py$/.test((cfg.args || [])[0] || "");
       row.querySelector(".s").textContent = !on ? (isTerminal ? "off \u00b7 gives the model a shell on this computer" : "off")
-        : st.state === "ready" ? st.tools + " tools" : (st.state || "") + (st.error ? " \u00b7 " + st.error.slice(0, 160) : "");
+        : st.state === "ready" ? plural(st.tools, "tool") : (st.state || "") + (st.error ? " \u00b7 " + st.error.slice(0, 160) : "");
       row.querySelector(".cmd").textContent = (cfg.command || "") + " " + (cfg.args || []).join(" ");
       row.querySelector(".cmd").title = row.querySelector(".cmd").textContent;
       const acts = row.querySelector(".acts");
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
-      mk("tools", "ghost-btn", () => showServerTools(name));
-      mk(on ? "disable" : "enable", "ghost-btn", async () => { try { await mcpPost({ action: "toggle", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
-      mk("restart", "ghost-btn", async () => { try { await mcpPost({ action: "restart", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
+      mk("Tools", "ghost-btn", () => showServerTools(name));
+      mk(on ? "Disable" : "Enable", "ghost-btn", async () => { try { await mcpPost({ action: "toggle", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
+      mk("Restart", "ghost-btn", async () => { try { await mcpPost({ action: "restart", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
       const envKeys = Object.keys(cfg.env || {});
-      mk("env" + (envKeys.length ? " (" + envKeys.length + ")" : ""), "ghost-btn", () => {
+      mk("Env" + (envKeys.length ? " (" + envKeys.length + ")" : ""), "ghost-btn", () => {
         const pane = mcpPane(name + " \u00b7 environment");
-        const hint = document.createElement("div"); hint.className = "hint"; hint.textContent = "Values are stored in the console's config.json and passed only to this server's process. Empty a value to remove it."; pane.appendChild(hint);
+        const hint = document.createElement("div"); hint.className = "hint"; hint.textContent = "Values are stored in this app's settings and passed only to this server's process. Empty a value to remove it."; pane.appendChild(hint);
         const form = document.createElement("div"); form.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:8px";
         const inputs = {};
         const addRow = (k, v) => { const i = inputEl("value"); i.value = v || ""; if (/token|key|secret|password/i.test(k)) i.type = "password"; inputs[k] = i; form.appendChild(formRow(k, i)); };
@@ -3264,7 +3294,7 @@
         const row2 = document.createElement("div"); row2.style.cssText = "display:flex;gap:10px;align-items:center"; row2.appendChild(save); row2.appendChild(note);
         form.appendChild(row2); pane.appendChild(form);
       });
-      mk("remove", "rate-btn bad", async () => { if (!confirm("Remove MCP server \"" + name + "\"?")) return; try { await mcpPost({ action: "remove", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
+      mk("Remove", "ghost-btn danger", async () => { if (!confirm("Remove MCP server \"" + name + "\"?")) return; try { await mcpPost({ action: "remove", name }); } catch (e) { alert(e.message); } renderMcp(); loadTools(); });
       cfgCard.appendChild(row);
     }
     left.appendChild(cfgCard);
@@ -3307,7 +3337,7 @@
           const r = await mcpPost(Object.assign({ action: "catalog_add" }, payload()));
           const st2 = (r.servers || {})[r.name || nameIn.value.trim()] || {};
           const made = (st2.created || []).length ? " \u00b7 created " + st2.created.join(", ") : "";
-          note.textContent = st2.state === "ready" ? (again ? "on" : "added") + " \u00b7 " + st2.tools + " tools" + made
+          note.textContent = st2.state === "ready" ? (again ? "on" : "added") + " \u00b7 " + plural(st2.tools, "tool") + made
             : "added \u00b7 " + (st2.state || "") + (st2.error ? ": " + st2.error.slice(0, 200) : "");
           renderMcp(); loadTools();
         } catch (e) { note.textContent = e.message; go1.disabled = false; }
@@ -3340,7 +3370,7 @@
         buf += dec.decode(value, { stream: true }); const parts = buf.split("\n"); buf = parts.pop();
         for (const ln of parts) {
           if (!ln.startsWith("data:")) continue; let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
-          if (o.phase === "start") append("\u2014 " + (o.steps || []).length + " install step(s) on the console host \u2014");
+          if (o.phase === "start") append("\u2014 " + (o.steps || []).length + " install step(s) on this computer \u2014");
           else if (o.phase === "done") { append("\u2014 " + (o.added ? "installed and added" : "stopped: exit " + o.exit) + " \u2014"); renderMcp(); loadTools(); }
           else if (o.error) append("error: " + o.error);
           else if (o.line != null) append(o.line);
@@ -3455,7 +3485,7 @@
     const add = document.createElement("button"); add.type = "button"; add.className = "ghost-btn"; add.id = "add-rack"; add.textContent = "Add a machine";
     bar.appendChild(add);
     let rm = null;
-    if (d.name && !d.local) { rm = document.createElement("button"); rm.type = "button"; rm.className = "ghost-btn"; rm.textContent = "Remove"; bar.appendChild(rm); }
+    if (d.name && !d.local) { rm = document.createElement("button"); rm.type = "button"; rm.className = "ghost-btn danger"; rm.textContent = "Remove"; bar.appendChild(rm); }
     card.appendChild(bar);
     const addHost = document.createElement("div"); card.appendChild(addHost);
     add.onclick = () => addRackForm(addHost);
@@ -3944,7 +3974,7 @@
       const ml = document.createElement("span"); ml.className = "deploy-meta"; ml.textContent = "min";
       [tok, tl, min, ml].forEach((x) => tune.appendChild(x));
       if (!b) {
-        const rm = document.createElement("button"); rm.type = "button"; rm.className = "linky"; rm.textContent = "remove";
+        const rm = document.createElement("button"); rm.type = "button"; rm.className = "ghost-btn danger"; rm.textContent = "Remove";
         rm.onclick = () => { delete court.roles[row.id]; el.remove(); }; tune.appendChild(rm);
       }
       id.appendChild(tune);
@@ -4538,7 +4568,7 @@
         st.state === "ready" ? "var(--ok)" : st.state === "error" ? "var(--err)" : "var(--faint)";
       r.querySelector(".n").textContent = name;
       r.querySelector(".s").textContent =
-        st.state === "ready" ? st.tools + " tools"
+        st.state === "ready" ? plural(st.tools, "tool")
         : st.state === "error" ? "error" : st.state;
       if (st.error) r.querySelector(".s").title = st.error;
       r.querySelector(".t").onclick = () => mcpAdmin({ action: "toggle", name });
@@ -4918,8 +4948,12 @@
       const nm = rkEl("span", "mono", n.name);
       nm.style.color = "var(--muted)";
       row.appendChild(nm);
-      row.appendChild(rkEl("b", "mono", n.ok === false ? "down" : util != null ? Math.round(util) + "%" : "—"));
+      row.appendChild(rkEl("b", "mono", n.ok === false ? "down" : util != null ? "GPU " + Math.round(util) + "%" : "—"));
       mini.appendChild(row);
+      const mem = n.mem || {};
+      mini.title = n.ok === false ? n.name + " is not answering"
+        : n.name + ": GPU " + (util != null ? Math.round(util) + "% busy" : "use unknown")
+          + (mem.total ? " · memory " + Math.round((mem.used || 0) / GiB) + " of " + Math.round(mem.total / GiB) + " GiB" : "");
       const bar = rkEl("div", "bar");
       const f = rkEl("div");
       f.style.width = (util || 0) + "%";
@@ -4997,7 +5031,7 @@
       const id = rkEl("div", "rk-monid");
       id.appendChild(rkEl("b", "mono", m.name));
       id.appendChild(rkEl("span", "mono", m.url + (m.has_token ? "" : " · no token")));
-      id.appendChild(rkEl("span", "rk-sub", !m.enabled ? "disabled" : st.ok ? (st.nodes || 0) + " nodes · " + st.ms + " ms · rack-monitor " + (st.version || "") : st.error || "checking…"));
+      id.appendChild(rkEl("span", "rk-sub", !m.enabled ? "disabled" : st.ok ? plural(st.nodes || 0, "node") + " · " + st.ms + " ms · rack-monitor " + (st.version || "") : st.error || "checking…"));
       row.appendChild(id);
       const act = async (payload) => { const r = await monPost(payload); if (r.error) alert(r.error); renderMonitorsPanel(true); pollCluster(true); };
       const tok = rkEl("button", "ghost-btn", "token");
@@ -5015,9 +5049,9 @@
       const tg = rkEl("button", "ghost-btn", m.enabled ? "disable" : "enable");
       tg.type = "button";
       tg.onclick = () => act({ action: "toggle", name: m.name });
-      const rm = rkEl("button", "ghost-btn", "remove");
+      const rm = rkEl("button", "ghost-btn danger", "Remove");
       rm.type = "button";
-      rm.onclick = () => { if (confirm("Remove monitor " + m.name + "? The rack keeps running; this console stops reading it.")) act({ action: "remove", name: m.name }); };
+      rm.onclick = () => { if (confirm("Remove monitor " + m.name + "? The rack keeps running; this app stops reading it.")) act({ action: "remove", name: m.name }); };
       row.append(tok, tg, rm);
       card.appendChild(row);
     }
@@ -5186,7 +5220,7 @@
     const tot = u.total_out || 0;
     mk("Tokens generated", tot >= 1e6 ? (tot / 1e6).toFixed(1) + " M" : tot.toLocaleString(), "completion tokens, 14 days");
     mk("Median throughput", u.median_tok_s ? u.median_tok_s.toFixed(1) : "—", "tok/s per request");
-    mk("Requests", u.requests != null ? String(u.requests) : "—", "through this console");
+    mk("Requests", u.requests != null ? String(u.requests) : "—", "through this app");
     const ag = u.agents && !u.agents.error && !u.agents.pending ? u.agents : null;
     const fmtTok = (n) => (n || 0) >= 1e6 ? ((n || 0) / 1e6).toFixed(1) + " M" : (n || 0).toLocaleString();
     if (ag) mk("Agent tokens", fmtTok(ag.total), (ag.goals || 0) + " goals \u00b7 " + (ag.slaves || 0) + " agents \u00b7 " + (ag.master_rounds || 0) + " master rounds, 14 days");
@@ -5321,6 +5355,72 @@
       e.preventDefault(); newChat();
     }
   });
+
+  /* ---------------- Cmd/Ctrl-K: jump to any screen, guide or action ---------------- */
+  const JUMPS = [
+    ["Playground", "playground", "chat"], ["Sessions", "sessions", "history chats traces"], ["Projects", "projects", "folders"],
+    ["Models", "models", "list"], ["Deploy", "recipes", "recipes serve machines install dgx-serve"], ["Gateways", "gateways", "endpoints engines"],
+    ["Cluster", "cluster", "gpu monitor nodes"], ["MCP servers", "mcp", "tools"], ["Skills", "skills", "tools"], ["Plugins", "plugins", "tools"],
+    ["Agents", "agents", "master sultan run goal"], ["Workflows", "workflows", "prompts"], ["Jobs", "jobs", "schedule cron"],
+    ["Usage", "usage", "tokens cost"], ["Settings", "settings", "profiles roles updates"], ["Video studio", "video", ""],
+  ];
+  function paletteItems() {
+    const items = JUMPS.filter(([, s]) => { const n = document.querySelector(`[data-nav="${s}"]`); return n && !n.hidden; })
+      .map(([label, s, kw]) => ({ label, kind: "screen", kw, run: () => go(s) }));
+    items.push({ label: "Agents settings", kind: "screen", kw: "court plane workers", run: () => { go("agents"); agentsTab("settings"); } });
+    items.push({ label: "New chat", kind: "action", kw: "", run: newChat });
+    items.push({ label: "Light or dark theme", kind: "action", kw: "theme", run: () => $("theme-btn").click() });
+    items.push({ label: "Help contents", kind: "help", kw: "guides docs", run: () => helpHome() });
+    for (const g of help.guides || []) items.push({ label: g.title, kind: "help", kw: g.summary || "", run: () => openHelp(g.id) });
+    return items;
+  }
+  function openPalette() {
+    if ($("palette")) return;
+    helpIndex();   // guides join the list once they have loaded
+    const wrap = document.createElement("div"); wrap.id = "palette"; wrap.className = "palette-wrap";
+    const box = document.createElement("div"); box.className = "palette";
+    const inp = document.createElement("input"); inp.className = "text-input"; inp.placeholder = "Go to a screen, a guide or an action";
+    const list = document.createElement("div"); list.className = "palette-list";
+    box.appendChild(inp); box.appendChild(list); wrap.appendChild(box); document.body.appendChild(wrap);
+    let shown = [], sel = 0;
+    const close = () => wrap.remove();
+    const draw = () => {
+      const q = inp.value.trim().toLowerCase();
+      // a title that starts with the text first, then one that contains it, then a keyword match
+      const rank = (it) => { const l = it.label.toLowerCase(); return l.startsWith(q) ? 0 : l.split(/\W+/).some((w) => w.startsWith(q)) ? 1 : l.includes(q) ? 2 : 3; };
+      shown = paletteItems().filter((it) => !q || (it.label + " " + it.kw).toLowerCase().includes(q))
+        .map((it, i) => [q ? rank(it) : 0, i, it]).sort((x, y) => x[0] - y[0] || x[1] - y[1]).map((x) => x[2]).slice(0, 12);
+      sel = Math.min(sel, Math.max(0, shown.length - 1));
+      list.textContent = "";
+      shown.forEach((it, i) => {
+        const b = document.createElement("button"); b.type = "button"; b.className = "palette-item" + (i === sel ? " on" : "");
+        const l = document.createElement("span"); l.textContent = it.label;
+        const k = document.createElement("small"); k.textContent = it.kind === "help" ? "guide" : it.kind;
+        b.appendChild(l); b.appendChild(k);
+        b.onclick = () => { close(); it.run(); };
+        list.appendChild(b);
+      });
+      if (!shown.length) { const e = document.createElement("div"); e.className = "hint"; e.style.padding = "8px 10px"; e.textContent = "Nothing matches."; list.appendChild(e); }
+    };
+    inp.oninput = () => { sel = 0; draw(); };
+    inp.onkeydown = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(sel + 1, shown.length - 1); draw(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(sel - 1, 0); draw(); }
+      else if (e.key === "Enter" && shown[sel]) { e.preventDefault(); const it = shown[sel]; close(); it.run(); }
+    };
+    wrap.onclick = (e) => { if (e.target === wrap) close(); };
+    draw(); inp.focus();
+    helpIndex().then(() => { if ($("palette")) draw(); });
+  }
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      if ($("palette")) $("palette").remove(); else openPalette();
+    }
+  });
+  $("jump-btn").onclick = openPalette;
+  $("jump-btn").querySelector("kbd").textContent = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "\u2318K" : "Ctrl K";
 
   /* ---------------- panel links into screens ---------------- */
   $("mcp-manage").onclick = () => go("mcp");
@@ -5517,7 +5617,7 @@
       const time = document.createElement("span"); time.className = "mono";
       time.style.cssText = "font-size:12px;color:var(--muted)";
       const grow = document.createElement("span"); grow.className = "grow";
-      const del = document.createElement("button"); del.className = "ghost-btn";
+      const del = document.createElement("button"); del.className = "ghost-btn danger";
       del.textContent = "Delete";
       del.onclick = async () => {
         del.disabled = true;

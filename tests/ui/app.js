@@ -15,6 +15,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.goto(BASE + "/");
   await sleep(1500);
 
+  // ---- Cmd/Ctrl-K jumps anywhere; a grouped screen shows its group's tabs
+  check("playground: sampling folded under Advanced", await page.locator("#temp").isVisible() === false && await page.locator("#maxtok").isVisible());
+  await page.keyboard.press("Control+K");
+  await sleep(200);
+  await page.locator("#palette input").fill("gatew");
+  await page.keyboard.press("Enter");
+  await sleep(400);
+  check("palette: jumps to Gateways, under the Models group", await page.locator("#screen-gateways.on").count() === 1
+        && await page.locator("#screen-gateways #group-models").isVisible() && await page.locator('[data-group="models"].on').count() === 1);
+  check("palette: closes after the jump", await page.locator("#palette").count() === 0);
+
   // ---- Workflows: create one in the app, run it, watch the answer come in
   await page.click('[data-nav="workflows"]');
   await sleep(500);

@@ -22,6 +22,12 @@ The checklist on the Help home measures each of these and links to the fix.
 - **Agents**: a goal for a team of agents on a separate worker. → [Agents](help:agents)
 - **Tools**: let the model read files, search, or run commands. → [Tools (MCP)](help:mcp)
 
+## Finding your way
+
+- **Models** in the sidebar holds three tabs: Models, Deploy and Gateways. **Tools** holds MCP servers, Skills and Plugins.
+- Press **Cmd-K** on a Mac, or **Ctrl-K** elsewhere, to jump to any screen, guide or action by typing part of its name.
+- The Playground keeps the controls most people use in view. Temperature, top-p, seed, JSON mode and the rest are under **Advanced**, which says "changed" when any of them differs from the default.
+
 ## Where things live
 
 Everything ByteBunker keeps (sessions, the trace log, usage, settings) is in one folder on this machine, shown in [Settings](#settings). Deleting the app does not delete it.

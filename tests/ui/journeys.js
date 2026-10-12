@@ -135,6 +135,11 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   try { require("fs").rmSync(require("path").dirname(projDir), { recursive: true, force: true }); } catch (e) {}
 
   // ---- Add a rack: pair over ssh, see what was found, keep it; the card then drives it
+  // Deploy sits in the sidebar's Models group, as its second tab
+  await page.click('[data-group="models"]');
+  await page.waitForTimeout(300);
+  check("sidebar: Models opens a group with Models, Deploy and Gateways tabs",
+        (await page.locator("#group-models").innerText().catch(() => "")).replace(/\s+/g, " ").trim() === "Models Deploy Gateways");
   await page.click('[data-nav="recipes"]');
   await page.waitForTimeout(1200);
   // with no machine added, Deploy opens on this computer, and offers to install dgx-serve here

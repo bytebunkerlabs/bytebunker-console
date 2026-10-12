@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ByteBunker Console</title>
+<title>ByteBunker</title>
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/console.css">
 </head>
@@ -17,6 +17,7 @@
     </div>
 
     <button class="new-chat" id="new-chat"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>New chat</button>
+    <button class="jump-btn" id="jump-btn" type="button" title="Jump to any screen, guide or action"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg><span>Go to…</span><kbd></kbd></button>
 
     <nav class="nav">
       <button data-nav="playground"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><rect x="2" y="3" width="12" height="9" rx="2"/><path d="M5.5 14.2h5"/></svg><span>Playground</span></button>
@@ -27,26 +28,22 @@
 
     <div class="nav-label">Serving</div>
     <nav class="nav">
-      <button data-nav="gateways"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 2.2v2.4M8 11.4v2.4M2.2 8h2.4M11.4 8h2.4M4 4l1.7 1.7M10.3 10.3 12 12M12 4l-1.7 1.7M5.7 10.3 4 12"/></svg><span>Gateways</span></button>
-      <button data-nav="models"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2.5" y="2.6" width="11" height="4.2" rx="1.3"/><rect x="2.5" y="9.2" width="11" height="4.2" rx="1.3"/></svg><span>Models</span></button>
-      <button data-nav="recipes"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v9.2H3z"/><path d="M5.4 6.4h5.2M5.4 8.6h5.2M5.4 10.8h3"/></svg><span>Deploy</span></button>
+      <button data-group="models" title="Models, Deploy and Gateways"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2.5" y="2.6" width="11" height="4.2" rx="1.3"/><rect x="2.5" y="9.2" width="11" height="4.2" rx="1.3"/></svg><span>Models</span></button>
+      <button data-nav="cluster"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="2.6" width="12" height="4.4" rx="1.3"/><rect x="2" y="9" width="12" height="4.4" rx="1.3"/><circle cx="4.7" cy="4.8" r="0.75" fill="currentColor" stroke="none"/><circle cx="4.7" cy="11.2" r="0.75" fill="currentColor" stroke="none"/></svg><span>Cluster</span></button>
     </nav>
 
     <div class="nav-label">Extend</div>
     <nav class="nav">
-      <button data-nav="skills"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8 3 4v3.4c0 3 2.1 5 5 6.8 2.9-1.8 5-3.8 5-6.8V4z"/><path d="M6 7.8 7.4 9.3 10.4 6"/></svg><span>Skills</span></button>
-      <button data-nav="plugins"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6v2.2M10 2.6v2.2M4 4.8h8v3.4a4 4 0 0 1-8 0zM8 12.2v1.6"/></svg><span>Plugins</span></button>
-      <button data-nav="mcp"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="2"/><path d="M5.2 7l2 1.6-2 1.6M8.6 10.2h2.4"/></svg><span>MCP</span></button>
+      <button data-group="tools" title="MCP servers, Skills and Plugins"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="2"/><path d="M5.2 7l2 1.6-2 1.6M8.6 10.2h2.4"/></svg><span>Tools</span></button>
       <button data-nav="agents"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="5" r="2.4"/><path d="M3.4 13.2a4.6 4.6 0 0 1 9.2 0"/></svg><span>Agents</span></button>
       <button data-nav="workflows"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2.4" width="4.4" height="3.6" rx="1"/><rect x="9.6" y="10" width="4.4" height="3.6" rx="1"/><path d="M6.4 4.2h3.2a1.6 1.6 0 0 1 1.6 1.6V10"/></svg><span>Workflows</span></button>
       <button data-nav="jobs"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.4 1.6"/></svg><span>Jobs</span></button>
     </nav>
 
-    <div class="nav-label">Observe</div>
+    <div class="nav-label">App</div>
     <nav class="nav">
-      <button data-nav="cluster"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="2.6" width="12" height="4.4" rx="1.3"/><rect x="2" y="9" width="12" height="4.4" rx="1.3"/><circle cx="4.7" cy="4.8" r="0.75" fill="currentColor" stroke="none"/><circle cx="4.7" cy="11.2" r="0.75" fill="currentColor" stroke="none"/></svg><span>Cluster</span></button>
-      <button data-nav="settings"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.6M8 12.5v1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M1.9 8h1.6M12.5 8h1.6M3.7 12.3l1.1-1.1M11.2 4.8l1.1-1.1"/></svg><span>Settings</span></button>
       <button data-nav="usage"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3.2 13V8.4M8 13V3.4M12.8 13v-3.1"/></svg><span>Usage</span></button>
+      <button data-nav="settings"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.6M8 12.5v1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M1.9 8h1.6M12.5 8h1.6M3.7 12.3l1.1-1.1M11.2 4.8l1.1-1.1"/></svg><span>Settings</span></button>
       <button type="button" id="nav-help"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><circle cx="8" cy="8" r="5.8"/><path d="M6.4 6.3a1.7 1.7 0 0 1 3.2.6c0 1.1-1.6 1.4-1.6 2.5M8 11.4v.1"/></svg><span>Help</span></button>
     </nav>
 
@@ -71,6 +68,8 @@
       <div class="help-body" id="help-body"></div>
     </aside>
     <div class="app-banner msg-note" id="app-banner" hidden><span id="app-banner-text"></span><button type="button" class="linky" id="app-banner-close">dismiss</button></div>
+    <div class="chat-tabs sub-tabs group-tabs" id="group-models" hidden><button data-nav="models">Models</button><button data-nav="recipes">Deploy</button><button data-nav="gateways">Gateways</button></div>
+    <div class="chat-tabs sub-tabs group-tabs" id="group-tools" hidden><button data-nav="mcp">MCP servers</button><button data-nav="skills">Skills</button><button data-nav="plugins">Plugins</button></div>
     <!-- Playground -->
     <section class="screen on" id="screen-playground">
       <header>
@@ -121,7 +120,7 @@
 
     <!-- Sessions -->
     <section class="screen" id="screen-sessions">
-      <header><h1>Sessions</h1><span class="sub">Stored on this host, never off it · <span id="traces-sub">trace log</span></span><div class="grow"></div>
+      <header><h1>Sessions</h1><span class="sub">Stored on this computer · <span id="traces-sub">trace log</span></span><div class="grow"></div>
         <button class="ghost-btn" id="export-good" title="Turns you marked good, as chat-format JSONL with tools and reasoning">Export good turns</button>
         <button class="ghost-btn" id="export-all" title="Every turn ever recorded, as chat-format JSONL with tools and reasoning. Keys and passwords are redacted heuristically.">Export all (JSONL)</button>
         <button class="ghost-btn" id="new-chat-2"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>New chat</button>
@@ -139,7 +138,7 @@
 
     <!-- Agents -->
     <section class="screen" id="screen-recipes">
-      <header><h1>Deploy</h1><span class="sub">Serve a model with dgx-serve · <span id="recipes-sub">—</span></span></header>
+      <header><h1>Deploy</h1><span class="sub">Serve a model on any machine · <span id="recipes-sub">—</span></span></header>
       <div class="scroll agents-grid">
         <div class="agents-left" id="recipes-left"></div>
         <aside class="agents-detail" id="recipes-detail"><div class="hint">Pick a machine and a recipe. Read shows the files it runs; Serve starts it and streams the log here.</div></aside>
@@ -147,7 +146,7 @@
     </section>
 
     <section class="screen" id="screen-agents">
-      <header><h1>Agents</h1><span class="sub">A master agent that splits goals among sandboxed workers · <span id="agents-sub">—</span></span><div class="grow"></div><a class="ghost-btn" href="/agents-flow.html" target="_blank" rel="noopener" style="text-decoration:none;font-size:12px">how agents run</a></header>
+      <header><h1>Agents</h1><span class="sub">A master agent and its sandboxed workers · <span id="agents-sub">—</span></span><div class="grow"></div><a class="ghost-btn" href="/agents-flow.html" target="_blank" rel="noopener" style="text-decoration:none;font-size:12px">how agents run</a></header>
       <div class="chat-tabs sub-tabs" id="agents-tabs"><button class="on" data-atab="master">Master</button><button data-atab="settings">Settings</button></div>
       <div class="scroll agents-grid">
         <div class="agents-left">
@@ -203,13 +202,13 @@
 
     <!-- Skills -->
     <section class="screen" id="screen-skills">
-      <header><h1>Skills</h1><span class="sub">Markdown instruction packs · shared with the agent harness · <span id="skills-sub">—</span></span></header>
+      <header><h1>Skills</h1><span class="sub">Instructions the model and agents can load · <span id="skills-sub">—</span></span></header>
       <div class="scroll"><div id="skills-box" class="cards-col"></div></div>
     </section>
 
     <!-- Plugins -->
     <section class="screen" id="screen-plugins">
-      <header><h1>Plugins</h1><span class="sub">Bundles of skills and MCP servers · toggle to load · <span id="plugins-sub">—</span></span></header>
+      <header><h1>Plugins</h1><span class="sub">Bundles of skills and tools · <span id="plugins-sub">—</span></span></header>
       <div class="scroll"><div id="plugins-box" class="cards-col"></div></div>
     </section>
 
@@ -276,7 +275,7 @@
 
     <!-- Models -->
     <section class="screen" id="screen-gateways">
-      <header><h1>Gateways</h1><span class="sub">Every endpoint the console talks to · models merged, requests routed by name · <span id="gateways-sub">—</span></span></header>
+      <header><h1>Gateways</h1><span class="sub">Where models are served · <span id="gateways-sub">—</span></span></header>
       <div class="scroll agents-grid">
         <div class="agents-left" id="gateways-left"></div>
         <aside class="agents-detail" id="gateways-detail"><div class="hint">A gateway is any server that answers the OpenAI chat API: an engine dgx-serve runs, or a router in front of several. Add one by address and port, or let Find engines look on this machine, on your tailnet and, if you allow it, on your local network.</div></aside>
@@ -331,16 +330,16 @@
     <!-- Usage -->
     <!-- Scheduled jobs -->
     <section class="screen" id="screen-jobs">
-      <header><h1>Jobs</h1><span class="sub">The console wakes up on a schedule and the model does the work · <span id="jobs-sub">—</span></span></header>
+      <header><h1>Jobs</h1><span class="sub">Prompts and workflows that run on a schedule · <span id="jobs-sub">—</span></span></header>
       <div class="scroll agents-grid">
         <div class="agents-left" id="jobs-left"></div>
-        <aside class="agents-detail" id="jobs-detail"><div class="hint">Pick a job to see its runs and what the model produced. A chat job is one prompt with the console's tools and skills; an agent job hands a goal to the harness. Times are the console host's local time.</div></aside>
+        <aside class="agents-detail" id="jobs-detail"><div class="hint">Pick a job to see its runs and what the model produced. A chat job is one prompt with the app's tools and skills; an agent job hands a goal to the harness. Times are this computer's local time.</div></aside>
       </div>
     </section>
 
     <!-- Workflows -->
     <section class="screen" id="screen-workflows">
-      <header><h1>Workflows</h1><span class="sub">A prompt you run again, with blanks to fill: from here, from a job, or with bb run · <span id="workflows-sub">—</span></span></header>
+      <header><h1>Workflows</h1><span class="sub">Saved prompts with blanks to fill · <span id="workflows-sub">—</span></span></header>
       <div class="scroll agents-grid">
         <div class="agents-left" id="workflows-left"></div>
         <aside class="agents-detail" id="workflows-detail"><div class="hint">Pick a workflow to run it. Write {{name}} in a prompt and the run asks for it: bb run review -p file=app.py. A chat workflow is one turn with your tools and skills; an agents workflow is a goal for the agents.</div></aside>
@@ -349,7 +348,7 @@
 
     <!-- MCP servers -->
     <section class="screen" id="screen-mcp">
-      <header><h1>MCP</h1><span class="sub">Local tool servers the model calls through the console · <span id="mcp-sub">—</span></span></header>
+      <header><h1>MCP</h1><span class="sub">Tool servers the model can call · <span id="mcp-sub">—</span></span></header>
       <div class="scroll agents-grid">
         <div class="agents-left" id="mcp-left"></div>
         <aside class="agents-detail" id="mcp-detail"><div class="hint">Pick a server to see its tools, or add one from the catalog. "Install locally" pre-installs the package (and for Playwright the Chromium build) on this host, then adds the server; the log streams here.</div></aside>
@@ -362,7 +361,7 @@
     </section>
 
     <section class="screen" id="screen-usage">
-      <header><h1>Usage</h1><span class="sub">Last 14 days · from this console's own log</span></header>
+      <header><h1>Usage</h1><span class="sub">Last 14 days, from this app's own log</span></header>
       <div class="scroll" style="display:flex;flex-direction:column;gap:14px" id="usage-box"></div>
     </section>
   </main>
@@ -389,28 +388,24 @@
         </div>
 
         <div class="pgroup">
-          <span class="glabel">Sampling</span>
-          <div class="prow"><div class="head"><b>Temperature</b><span class="val" id="temp-val">0.70</span></div><input type="range" id="temp" min="0" max="2" step="0.05" value="0.7"></div>
-          <div class="prow"><div class="head"><b>Top-p</b><span class="val" id="topp-val">0.95</span></div><input type="range" id="topp" min="0.05" max="1" step="0.01" value="0.95"></div>
-          <div class="prow"><div class="head"><b>Top-k</b><span class="val" id="topk-val">40</span></div><input type="range" id="topk" min="0" max="200" step="1" value="40"></div>
-          <div class="prow"><div class="head"><b>Repetition penalty</b><span class="val" id="rep-val">1.05</span></div><input type="range" id="rep" min="1" max="1.5" step="0.01" value="1.05"></div>
+          <span class="glabel">Length and context</span>
           <div class="prow"><div class="head"><b>Max tokens</b><span class="val" id="max-val">8k</span></div><input type="range" id="maxtok" min="256" max="65536" step="256" value="8192"></div>
-          <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:10px">
-            <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Seed</b><span class="hint">0 = nondeterministic</span></div>
-            <input class="text-input" id="seed" value="0" style="width:88px;text-align:right">
-          </div>
-        </div>
-
-        <div class="pgroup">
-          <span class="glabel">Context</span>
           <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:12px">
-            <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Auto-compress</b><span class="hint">When the window fills, older turns are summarized by the model and the originals filed under data/archive/. Type <span class="mono">/compress</span> to do it now.</span></div>
+            <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Auto-compress</b><span class="hint">When the window fills, older turns are summarized by the model and the originals kept. Type <span class="mono">/compress</span> to do it now.</span></div>
             <button class="switch on" id="compress-switch"><span></span></button>
           </div>
         </div>
 
-        <div class="pgroup">
-          <span class="glabel">Output</span>
+        <details class="pgroup adv" id="adv-params">
+          <summary class="glabel">Advanced: sampling and output</summary>
+          <div class="prow"><div class="head"><b>Temperature</b><span class="val" id="temp-val">0.70</span></div><input type="range" id="temp" min="0" max="2" step="0.05" value="0.7"></div>
+          <div class="prow"><div class="head"><b>Top-p</b><span class="val" id="topp-val">0.95</span></div><input type="range" id="topp" min="0.05" max="1" step="0.01" value="0.95"></div>
+          <div class="prow"><div class="head"><b>Top-k</b><span class="val" id="topk-val">40</span></div><input type="range" id="topk" min="0" max="200" step="1" value="40"></div>
+          <div class="prow"><div class="head"><b>Repetition penalty</b><span class="val" id="rep-val">1.05</span></div><input type="range" id="rep" min="1" max="1.5" step="0.01" value="1.05"></div>
+          <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:10px">
+            <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">Seed</b><span class="hint">0 = nondeterministic</span></div>
+            <input class="text-input" id="seed" value="0" style="width:88px;text-align:right">
+          </div>
           <div class="prow" style="flex-direction:row;align-items:center;justify-content:space-between;gap:12px">
             <div style="display:flex;flex-direction:column;gap:2px"><b style="font-size:13px;font-weight:500">JSON mode</b><span class="hint">Constrain output to valid JSON.</span></div>
             <button class="switch" id="json-switch"><span></span></button>
@@ -419,7 +414,7 @@
             <b style="font-size:13px;font-weight:500">Stop sequences</b>
             <input class="text-input" id="stops" placeholder="comma separated">
           </div>
-        </div>
+        </details>
 
         <div class="pgroup">
           <span class="glabel">Tools · MCP</span>

@@ -6,6 +6,9 @@ const { chromium } = require("playwright-core");
   await page.waitForTimeout(1500);
   const leaks = new Set();
   for (const s of ["playground", "sessions", "agents", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage", "skills", "plugins", "mcp"]) {
+    // grouped screens (Models, Tools) are reached through their group's tab
+    const grp = { models: "models", recipes: "models", gateways: "models", mcp: "tools", skills: "tools", plugins: "tools" }[s];
+    if (grp) await page.click(`[data-group="${grp}"]`).catch(() => {});
     await page.click(`[data-nav="${s}"]`).catch(() => {});
     await page.waitForTimeout(400);
     const found = await page.evaluate(() => [...document.querySelectorAll("[hidden]")]
