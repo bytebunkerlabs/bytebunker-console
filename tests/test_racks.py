@@ -284,6 +284,40 @@ class AddARack(unittest.TestCase):
         self.assertIn("is there and is not dgx-serve", " ".join(x.get("error") or "" for x in frames))
         self.assertNotEqual(frames[-1]["exit"], 0)
 
+    def test_machines_find_then_one_click_deploy(self):
+        cfgfile = os.path.join(self.f, "ssh_config")
+        with open(cfgfile, "w") as f:
+            f.write("Host box spark-x\n  HostName 127.0.0.1\nHost github.com\n")
+        self.srv.stop()
+        self.srv = Server(os.path.join(self.f, "data"), {}, env={
+            "PATH": os.path.join(self.f, "bin") + os.pathsep + clean_path(),
+            "BYTEBUNKER_SSH_CONFIG": cfgfile, "BYTEBUNKER_TAILNET": "off", "BYTEBUNKER_LOCAL_RACK": "off"})
+        st, d = self.srv.request("POST", "/api/machines", {"action": "find"})
+        self.assertEqual(st, 200, d)
+        (m,) = d["machines"]                                           # github.com is not a computer
+        self.assertEqual((m["target"], m["aliases"], m["ok"]), ("box", ["box", "spark-x"], True), m)
+        self.assertTrue(m["rack"], m)                                  # the stand-in rack is on its PATH
+        self.assertTrue(d["here"]["ok"], d["here"])
+        st, again = self.srv.request("GET", "/api/machines")
+        self.assertEqual(again["at"], d["at"])
+        frames = self.srv.sse("/api/machines", method="POST", body={"action": "deploy", "target": "box", "recipe": "qwen3-8b"},
+                              timeout=60, until=lambda fr: json.loads(fr[-1]["data"]).get("phase") == "done")
+        frames = [json.loads(x["data"]) for x in frames]
+        lines = [x.get("line") for x in frames if x.get("line")]
+        self.assertEqual(frames[-1]["exit"], 0, frames)
+        self.assertIn("serving qwen3-8b: healthy", lines)
+        self.assertIn("this app talks to it now: gateway box, monitor box", lines)
+        self.assertEqual(next(x["deployed"] for x in frames if x.get("deployed"))["rack"], "box")
+        cfg = json.loads(text(self.srv.cfg))
+        self.assertEqual([r["name"] for r in cfg["racks"]], ["box"])
+        self.assertEqual([g["name"] for g in cfg["gateways"]], ["box"])
+        st, d = self.srv.request("GET", "/api/machines")
+        self.assertEqual(d["machines"][0]["paired_as"], "box")
+        for bad in ({"action": "deploy", "target": "-oProxyCommand=x", "recipe": "a"},
+                    {"action": "deploy", "target": "box", "recipe": "a b"}):
+            st, r = self.srv.request("POST", "/api/machines", bad)
+            self.assertEqual(st, 400, bad)
+
     def test_removing_a_rack_takes_its_key_back(self):
         got = self.found(self.pair())
         self.srv.request("POST", "/api/racks", {"action": "save", "pairing": got["pairing"]})

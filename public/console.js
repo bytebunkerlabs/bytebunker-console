@@ -3357,6 +3357,7 @@
     recipesCat = d;
     const left = $("recipes-left"); left.textContent = "";
     $("recipes-sub").textContent = "this computer, or any machine you add";
+    left.appendChild(await machinesCard());
     left.appendChild(await rackCard());
     let older = null;
     if (d.recipes.length) {
@@ -3555,6 +3556,101 @@
     logs.onclick = () => stream("logs", "");
     card.appendChild(askRecipe(d));
     return card;
+  }
+
+  // Machines: what your ssh reaches, what each one is, what would serve there; one click to deploy
+  async function machinesCard() {
+    let d = { machines: [], here: null, at: 0 };
+    try { d = await (await fetch("/api/machines")).json(); } catch (e) {}
+    const card = document.createElement("div"); card.className = "card"; card.style.gap = "10px"; card.id = "machines-card";
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = '<div class="skill-id"><b>Machines</b><span class="src mono"></span></div>';
+    head.querySelector(".src").textContent = d.at ? "looked " + new Date(d.at).toLocaleTimeString() : "your ssh hosts and tailnet";
+    const find = document.createElement("button"); find.type = "button"; find.className = "solid-btn"; find.id = "machines-find";
+    find.textContent = d.at ? "Look again" : "Find machines"; head.appendChild(find);
+    card.appendChild(head);
+    const how = document.createElement("div"); how.className = "hint";
+    how.textContent = "Asks the hosts in your ~/.ssh/config and your tailnet's machines, with your own ssh and never a password, what they are: OS, memory, GPU, disk. Nothing is installed by looking.";
+    card.appendChild(how);
+    const list = document.createElement("div"); list.style.cssText = "display:flex;flex-direction:column;gap:2px"; list.id = "machines-list";
+    card.appendChild(list);
+    find.onclick = async () => {
+      find.disabled = true; find.textContent = "Looking…";
+      try {
+        const r = await fetch("/api/machines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "find" }) });
+        if (!r.ok) throw new Error(upstreamText(await r.text()));
+      } catch (e) { how.textContent = "Could not look: " + e.message; }
+      renderRecipes();
+    };
+    const rows = (d.here && d.here.ok ? [d.here] : []).concat((d.machines || []).filter((m) => m.ok));
+    for (const m of rows) list.appendChild(machineRow(m));
+    const off = (d.machines || []).filter((m) => !m.ok);
+    if (off.length) {
+      const det = document.createElement("details");
+      const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Did not answer (" + off.length + ")";
+      det.appendChild(sm);
+      for (const m of off) {
+        const r = document.createElement("div"); r.className = "deploy-meta"; r.style.padding = "4px 0";
+        r.textContent = m.target + " — " + m.error + (m.kind === "password" ? ". Once, in a terminal: ssh-copy-id " + m.target + ", then look again." : "");
+        det.appendChild(r);
+      }
+      card.appendChild(det);
+    }
+    return card;
+  }
+  function machineRow(m) {
+    const local = m.target === "local";
+    const el = document.createElement("div"); el.className = "deploy-row"; el.dataset.machine = m.target;
+    const id = document.createElement("div"); id.className = "deploy-id";
+    const b = document.createElement("b");
+    b.textContent = local ? "This computer" : m.target + ((m.aliases || []).length > 1 ? "  (" + m.aliases.filter((a) => a !== m.target).join(", ") + ")" : "");
+    id.appendChild(b);
+    const meta = document.createElement("span"); meta.className = "deploy-meta"; meta.textContent = m.description || ""; id.appendChild(meta);
+    const tags = document.createElement("span"); tags.className = "deploy-meta";
+    tags.textContent = [m.rack ? m.rack.replace(/^rack /, "dgx-serve ").replace(/ \(.*$/, "") : "no dgx-serve yet", m.paired_as ? "paired as " + m.paired_as : "",
+      m.platform !== "unsupported" ? "about " + Math.round((m.budget_mb || 0) / 1024) + " GiB for models" : ""].filter(Boolean).join("  ·  ");
+    id.appendChild(tags);
+    el.appendChild(id);
+    if (m.platform === "unsupported") {
+      const n = document.createElement("span"); n.className = "pill"; n.textContent = m.why_not || "cannot serve"; el.appendChild(n);
+      return el;
+    }
+    const recs = m.recipes || [];
+    const sel = document.createElement("select"); sel.className = "text-input"; sel.style.maxWidth = "260px";
+    for (const r of recs) {
+      const o = document.createElement("option"); o.value = r.name;
+      o.textContent = r.name + "  ·  " + (r.weights_gb ? r.weights_gb.toFixed(1) + " GB" : "size ?") + "  ·  " + (r.fits === true ? "fits" : r.fits === false ? (r.note || "too big") : r.note || "size unknown");
+      o.disabled = r.fits === false;
+      sel.appendChild(o);
+    }
+    const best = recs.find((r) => r.fits === true);
+    if (best) sel.value = best.name;
+    const sug = document.createElement("span"); sug.className = "pill ok"; sug.textContent = best ? "suggested: " + best.name : "nothing fits";
+    if (!best) sug.className = "pill";
+    const dep = document.createElement("button"); dep.type = "button"; dep.className = "solid-btn"; dep.textContent = "Deploy"; dep.disabled = !recs.length;
+    [sug, sel, dep].forEach((x) => el.appendChild(x));
+    dep.onclick = () => deployTo(m, sel.value);
+    return el;
+  }
+  async function deployTo(m, recipe) {
+    const local = m.target === "local";
+    const where = local ? "this computer" : m.target;
+    const steps = (m.rack ? "" : "install dgx-serve there (into ~/dgx-serve), ") + (local || m.paired_as ? "" : "pair it (this app's own key, allowed to run rack and nothing else), ") + "serve " + recipe + " and add it as a gateway";
+    if (!confirm("Deploy " + recipe + " on " + where + "?\n\nByteBunker will " + steps + ". Whatever " + where + " serves now stops.")) return;
+    const pane = recipePane("Deploy " + recipe + " · " + where);
+    const out = preBlock(pane, "output", "");
+    const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
+    let rack = null;
+    try {
+      await postFrames("/api/machines", { action: "deploy", target: m.target, recipe }, (o) => {
+        if (o.line != null) append(o.line);
+        else if (o.error) append("error: " + o.error);
+        else if (o.needs_key) { append("Your ssh to " + o.needs_key.target + " wants a password. On it, run once:\n  " + o.needs_key.command + "\nthen Deploy again."); }
+        else if (o.deployed) rack = o.deployed.rack;
+        else if (o.phase === "done") append("— " + (o.exit === 0 ? "done" : "stopped (exit " + o.exit + ")") + " —");
+      });
+    } catch (e) { append("error: " + e.message); }
+    if (rack) { setRack(rack); loadModels(); setTimeout(renderRecipes, 800); }
   }
 
   // This computer, before dgx-serve is here: what serving here takes, and one button
@@ -3821,9 +3917,28 @@
       ? (d.mode === "ssh" ? "on " + d.host : "local (not isolated)")
       : "disabled";
 
+    let gws = [];
+    try { gws = ((await (await fetch("/api/gateways")).json()).gateways || []).filter((g) => g.enabled !== false); } catch (e) {}
+    const hostOf = (u) => { try { const h = new URL(u).hostname; return /^(127\.|localhost$|\[?::1)/.test(h) ? "this computer" : h; } catch (e) { return u; } };
+    const modelHosts = [...new Set(gws.map((g) => hostOf(g.url)))];
+    let warn = $("agents-one-machine");
+    if (!warn) {
+      warn = document.createElement("div"); warn.id = "agents-one-machine"; warn.className = "card agents-warn";
+      $("agents-topology").parentNode.insertBefore(warn, $("agents-topology"));
+    }
+    const one = modelHosts.length <= 1 || d.mode === "local" || (d.host && modelHosts.includes(d.host));
+    warn.hidden = !one;
+    if (one) {
+      warn.textContent = "";
+      warn.appendChild(helpDom("**One machine?** Agents send many requests at once: a master and several workers, each with long prompts. " +
+        "On a single machine they share its GPU with everything else, and every answer, yours included, slows down dramatically. " +
+        "With one machine, use the [Playground](#playground), a [Project](#projects) or `bb` in a terminal instead. " +
+        "Agents pay off with a second machine for the workers' model, or a separate worker. → [Agents](help:agents)"));
+    }
+
     const topo = $("agents-topology");
     const planes = [
-      ["Model plane", "the Sparks", "serve the LLM only — no agent code runs here"],
+      ["Model plane", gws.map((g) => g.name).join(", ") || "no gateway yet", "serve the LLM only — no agent code runs here"],
       ["Control plane", "this console", "launches goals and watches; runs no agent code"],
       ["Agent plane", d.host || "unset", d.isolated
         ? "a separate host; one rootless podman container per agent, no network unless granted" : "NOT a separate host — no isolation"],

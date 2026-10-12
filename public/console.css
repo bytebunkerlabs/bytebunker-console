@@ -542,3 +542,5 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 @media (max-width:760px){.rk-summary .v{font-size:17px}.rk-body{grid-template-columns:1fr}.rk-meter{border-right:0;border-bottom:1px solid var(--soft)}.rk-meter:last-child{border-bottom:0}.rk-vents{display:none}.rk-face{flex-wrap:wrap}.rk-meta{align-items:flex-start;text-align:left}.rk-add{grid-template-columns:1fr}.rk-tr{grid-template-columns:10px 1fr 70px 70px}.rk-tr .im,.rk-tr .st{display:none}}
 .rk-mons .hint{font-size:12px;color:var(--muted);line-height:1.65}
 .rk-mons code{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11.5px;background:var(--code);border:1px solid var(--soft);border-radius:5px;padding:1px 5px}
+.agents-warn{border-color:var(--warn)}
+.agents-warn[hidden]{display:none}

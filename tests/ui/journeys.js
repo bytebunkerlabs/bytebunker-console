@@ -31,6 +31,9 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   // ---- Agents: a goal started elsewhere is followed; Stop cancels it on the server
   await page.click('[data-nav="agents"]');
   await page.waitForTimeout(1200);
+  const oneMachine = await page.locator("#agents-one-machine").innerText().catch(() => "");
+  check("agents: with one machine, says to use the Playground, a Project or bb", oneMachine.includes("One machine?") && oneMachine.includes("Playground") && oneMachine.includes("bb"),
+        oneMachine.slice(0, 120));
   // start a slow goal from "another client" and walk away from it
   const ctl = new AbortController();
   fetch(BASE + "/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal: "slow" }), signal: ctl.signal })
@@ -129,6 +132,7 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   check("deploy: this computer first, with the install", here.startsWith("This computer") && await page.locator("#install-here-btn").isVisible().catch(() => false),
         here.slice(0, 160).replace(/\n/g, " | "));
   check("deploy: ask for a recipe", await page.locator("#ask-recipe").isVisible().catch(() => false));
+  check("deploy: machines, found on a button press", await page.locator("#machines-find").isVisible().catch(() => false));
   await page.click("#add-rack");
   await page.fill("#rack-target", "you@box");
   await page.click("#rack-pair");
@@ -139,7 +143,7 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   check("racks: what did not answer cannot be ticked", await page.locator("#rack-add-gateway").isDisabled().catch(() => false));
   await page.click("#rack-save").catch(() => {});
   await page.waitForTimeout(2000);
-  const rackHead = await page.locator("#recipes-left .card").first().innerText().catch(() => "");
+  const rackHead = await page.locator("#deploy-card").innerText().catch(() => "");
   check("racks: saved, the card drives it", rackHead.startsWith("box") && rackHead.includes("Recipes for box") && rackHead.includes("qwen3-8b"),
         rackHead.slice(0, 200).replace(/\n/g, " | "));
 

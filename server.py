@@ -57,6 +57,7 @@ import jobs as jobmod
 import gateways as gwmod
 import monitors as monmod
 import racks as racksmod
+import machines as machinesmod
 import instance as instancemod
 import events as eventsmod
 import runs as runsmod
@@ -464,6 +465,104 @@ def rack_serving(status):
     m = re.search(r"^serving\s*\n\s+([A-Za-z0-9][A-Za-z0-9._-]*) \(", status, re.M) \
         or re.search(r"serving:\s*(\S+)", status)
     return m.group(1) if m else ""
+
+
+_machines = {"at": 0, "list": [], "here": None}
+
+
+def annotate_machines(found):
+    """Mark the machines this app already drives (a rack, by any of its names)."""
+    rs = racks()
+    for m in found:
+        names = set(m.get("aliases") or []) | {m.get("target"), m.get("hostname")}
+        r = next((r for r in rs if racksmod.host_of(r["ssh"]) in names or r["ssh"] in names), None)
+        m["rack"] = m.get("rack") or ""
+        m["paired_as"] = r["name"] if r else ""
+    return found
+
+
+def deploy_chain(run, emit, target, recipe):
+    """One click on a machine: dgx-serve there if missing, paired, the recipe
+    served, its engine added as a gateway. The steps say what they do."""
+    import subprocess
+    say = lambda t: emit({"line": t})
+    local = target == racksmod.LOCAL
+
+    def stream(argv, timeout):
+        def on_line(text):
+            text = _ANSI.sub("", text)
+            if text.startswith("BB_ERR "):
+                emit({"error": text[7:]})
+            elif text != "BB_INSTALLED":
+                say(text)
+        return agentmod.run_streaming(argv, ROOT, on_line, run.cancel_event, timeout_s=timeout)
+
+    def fail(msg, code=1):
+        emit({"error": msg})
+        emit({"phase": "done", "exit": code, "killed": False})
+        TRACE.log("machine", action="deploy", target=target, recipe=recipe, ok=False, error=msg[:300], run=run.id)
+        return {"ok": False, "error": msg}
+
+    rack = racksmod.local_entry() if local else next(
+        (r for r in racks() if r["paired"] and (r["ssh"] == target or racksmod.host_of(r["ssh"]) == target)), None)
+    if local and not rack["installed"] or not local and rack is None:
+        if local or not machinesmod.probe(KEYS, target).get("rack"):
+            say("== dgx-serve on %s" % ("this computer" if local else target))
+            code, killed = stream(racksmod.install_argv(KEYS, target), 1800)
+            if code != 0:
+                return fail("the install did not finish (exit %s)" % code, code or 1)
+        if not local:
+            say("== pairing with %s" % target)
+            try:
+                kind, got = racksmod.ask(KEYS, target, say)
+            except racksmod.PairError as e:
+                return fail(str(e))
+            if kind == "needs_key":
+                emit({"needs_key": got})
+                emit({"phase": "done", "exit": 2, "killed": False})
+                return {"ok": False, "error": "needs the app's key on %s first" % target}
+            engine_url, monitor_url, _ = racksmod.find(target, got)
+            rack = racksmod.apply(CFG, {"target": target, "info": got, "engine_url": engine_url,
+                                        "monitor_url": monitor_url, "app": KEYS.app_name()}, gw_normalize=gwmod.normalize)
+            save_config()
+            GW.refresh(force=True)
+            MON.invalidate()
+            rack = rack_named(rack["name"])
+            say("paired: %s" % rack["name"])
+        else:
+            rack = racksmod.local_entry()
+    say("== serving %s on %s" % (recipe, "this computer" if local else rack["name"]))
+    _rack_cache.pop(rack["name"], None)
+    code, killed = stream(rack_cmd(["up", recipe], rack), 3600)
+    if code != 0:
+        return fail("rack up %s exited %s: the log above says why" % (recipe, code), code or 1)
+    if local:
+        added = connect_local(emit)
+    else:
+        added = {}
+        try:
+            out = subprocess.run(rack_cmd(["pair", "--json"], rack), capture_output=True, text=True, timeout=30)
+            info = racksmod.parse(out.stdout)
+            engine_url, monitor_url, _ = racksmod.find(rack["ssh"], info)
+            racksmod.apply(CFG, {"target": rack["ssh"], "info": info, "engine_url": engine_url,
+                                 "monitor_url": monitor_url, "app": rack.get("app") or KEYS.app_name()},
+                           gw_normalize=gwmod.normalize)
+            save_config()
+            GW.refresh(force=True)
+            MON.invalidate()
+            r2 = rack_named(rack["name"]) or {}
+            added = {k: r2.get(k) for k in ("gateway", "monitor") if r2.get(k)}
+            if not engine_url:
+                say("its engine does not answer from here yet: Gateways adds it when it does")
+        except (racksmod.PairError, OSError, subprocess.SubprocessError) as e:
+            say("could not read its engine to add it: %s" % e)
+    if added:
+        say("this app talks to it now: " + ", ".join("%s %s" % kv for kv in sorted(added.items())))
+    BUS.publish("config", "racks", {"racks": [x["name"] for x in racks()]})
+    emit({"deployed": {"target": target, "rack": rack["name"], "recipe": recipe}})
+    emit({"phase": "done", "exit": 0, "killed": False})
+    TRACE.log("machine", action="deploy", target=target, recipe=recipe, ok=True, run=run.id)
+    return {"ok": True}
 
 
 def connect_local(emit=None):
@@ -2595,6 +2694,8 @@ class Handler(BaseHTTPRequestHandler):
                                     for n in sorted(found)], "warnings": warnings})
         elif path == "/api/rack":
             self._json(rack_overview((urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("rack") or [None])[0]))
+        elif path == "/api/machines":
+            self._json({"at": _machines["at"], "machines": annotate_machines(_machines["list"]), "here": _machines["here"]})
         elif path == "/api/racks":
             self._json({"racks": racks(), "local": racksmod.local_entry(),
                         "app": {"key": os.path.exists(KEYS.key), "known_hosts": KEYS.known_hosts}})
@@ -2742,7 +2843,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
+                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
                         "/api/update/apply", "/api/projects", "/api/terminal"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
@@ -2844,6 +2945,8 @@ class Handler(BaseHTTPRequestHandler):
             self._rack(body)
         elif path == "/api/racks":
             self._racks_admin(body)
+        elif path == "/api/machines":
+            self._machines_admin(body)
         elif path == "/api/agents":
             self._agents_run(body)
         elif path == "/api/agents/slave":
@@ -3125,6 +3228,36 @@ class Handler(BaseHTTPRequestHandler):
         self._run_streamed("rack", "rack " + " ".join(args) + " on " + r["name"], work,
                            meta={"action": action, "recipe": recipe, "rack": r["name"], "host": r["ssh"]},
                            key=None if viewing else "rack:" + r["ssh"], detach=not viewing)
+
+    def _machines_admin(self, body):
+        """find: ask every ssh host and tailnet machine what it is (read-only,
+        your own ssh, never a password); deploy {target, recipe}: one click."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action")
+        if action == "find":
+            cat = machinesmod.load_catalog()
+            _machines.update(at=int(time.time() * 1000), list=machinesmod.find(KEYS, cat), here=machinesmod.here(cat))
+            TRACE.log("machine", action="find", answered=sum(1 for m in _machines["list"] if m.get("ok")),
+                      asked=len(_machines["list"]))
+            self._json({"at": _machines["at"], "machines": annotate_machines(_machines["list"]), "here": _machines["here"]})
+            return
+        if action == "deploy":
+            target = str(body.get("target") or "").strip()
+            recipe = str(body.get("recipe") or "").strip()
+            if target != racksmod.LOCAL and not racksmod.TARGET.match(target):
+                self._json({"error": "an ssh destination: user@host, or a host from ~/.ssh/config"}, 400)
+                return
+            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", recipe):
+                self._json({"error": "which recipe?"}, 400)
+                return
+            where = "this computer" if target == racksmod.LOCAL else target
+            self._run_streamed("deploy", "serve %s on %s" % (recipe, where),
+                               lambda run, emit: deploy_chain(run, emit, target, recipe),
+                               meta={"target": target, "recipe": recipe}, key="deploy:" + target, detach=True)
+            return
+        self._json({"error": "unknown action"}, 400)
 
     def _racks_admin(self, body):
         """pair {target}: ask the machine over ssh (a streamed run: what it
