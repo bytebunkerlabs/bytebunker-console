@@ -50,8 +50,7 @@ input[type=range]::-moz-range-thumb{width:11px;height:11px;border:0;border-radiu
 /* ---------- sidebar ---------- */
 .side{width:238px;flex:0 0 238px;display:flex;flex-direction:column;background:var(--side);border-right:1px solid var(--border)}
 .brand{display:flex;align-items:center;gap:9px;padding:18px 16px 16px 18px}
-.brand-mark{width:19px;height:19px;border-radius:5px;background:var(--fg);display:flex;align-items:center;justify-content:center;flex:0 0 19px}
-.brand-mark span{width:7px;height:7px;border-radius:2px;background:var(--side)}
+.brand-mark{width:22px;height:22px;flex:0 0 22px;display:block}
 .brand-name{display:flex;flex-direction:column;line-height:1.15}
 .brand-name b{font-size:14.5px;font-weight:600;letter-spacing:-.015em}
 .brand-name small{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}

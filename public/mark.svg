@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="92 92 840 840" role="img" aria-label="ByteBunker">
+  <!-- the ByteBunker app icon (bytebunker-console desktop/make_icons.py): a dark rack, three green-lit units.
+       Presentation attributes only: the CSP forbids a <style> in here. -->
+  <rect x="92" y="92" width="840" height="840" rx="190" fill="#131211"/>
+  <rect x="101" y="101" width="822" height="822" rx="181" fill="none" stroke="#34312C" stroke-width="6"/>
+  <rect x="250" y="286" width="524" height="118" rx="30" fill="#232120"/>
+  <rect x="276" y="326" width="260" height="38" rx="19" fill="#5FBE83"/>
+  <circle cx="716" cy="345" r="15" fill="#5FBE83"/>
+  <circle cx="664" cy="345" r="15" fill="#36684A"/>
+  <circle cx="612" cy="345" r="15" fill="#5FBE83"/>
+  <rect x="250" y="458" width="524" height="118" rx="30" fill="#232120"/>
+  <rect x="276" y="498" width="260" height="38" rx="19" fill="#36684A"/>
+  <circle cx="716" cy="517" r="15" fill="#36684A"/>
+  <circle cx="664" cy="517" r="15" fill="#5FBE83"/>
+  <circle cx="612" cy="517" r="15" fill="#36684A"/>
+  <rect x="250" y="630" width="524" height="118" rx="30" fill="#232120"/>
+  <rect x="276" y="670" width="260" height="38" rx="19" fill="#5FBE83"/>
+  <circle cx="716" cy="689" r="15" fill="#5FBE83"/>
+  <circle cx="664" cy="689" r="15" fill="#36684A"/>
+  <circle cx="612" cy="689" r="15" fill="#5FBE83"/>
+</svg>
