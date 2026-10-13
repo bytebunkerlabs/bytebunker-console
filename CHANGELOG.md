@@ -3,6 +3,43 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.6.0 — 2026-10-12
+
+### New
+- **Agents that read your data, and keep it home.** On Agents → Settings →
+  the court, **Access** takes folders on the worker and the MCP servers you
+  share with agents. Each role ticks what it reads: folders, read-only, at
+  `/data/<name>`; MCP tools through a broker on the worker that allows only
+  what you granted, read-only tools unless you allow changes, answers
+  repeated calls once per run, and logs every call. The servers' keys never
+  enter a sandbox.
+- **A role holding data never has network.** The app refuses a court that
+  gives one role both, and so does the harness.
+- **The khazin**, keeper of the treasury: a role for data work, listed once
+  it has access. Big jobs go in chunks to several at once; a khazin can
+  script many tool calls in one step and keeps a progress file another can
+  continue from.
+- **A lighter sandbox.** On Linux and WSL2, each agent runs in bubblewrap:
+  no image to build, ready in about a tenth of a second, with memory, CPU and
+  process limits. **Work here** picks it where it works, podman or docker
+  elsewhere.
+- **Max tokens: Auto**, the new default, lets the model use what its window
+  has left; or pin a number up to 1M, cut to what fits each time.
+  Auto-compress follows the model's real window.
+- **Install and restart.** The sidebar shows your version; click it to
+  check. When a newer one is out it lights up, and one click downloads,
+  checks, installs and restarts ByteBunker.
+- **Rename a chat** on Sessions: the pencil, or double-click its name.
+- `bb ask --max-tokens N|auto`.
+
+### Changed
+- The Playground's side panel stays open in any app window and remembers
+  whether you closed it.
+- Token counts read 8k, 128k, 1M.
+
+Agents' data access and the bubblewrap sandbox need the newer agents
+harness on the worker: **Work here** on the Agent plane brings it.
+
 ## 0.5.0 — 2026-10-12
 
 ### New
