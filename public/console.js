@@ -5650,6 +5650,9 @@
   $("jump-btn").onclick = openPalette;
   $("jump-btn").querySelector("kbd").textContent = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "\u2318K" : "Ctrl K";
 
+  // how agents run: on bytebunkerlabs.ai, in the real browser
+  $("agents-how").onclick = () => openOut("https://blog.bytebunkerlabs.ai/posts/keeper-of-the-treasury/");
+
   /* ---------------- panel links into screens ---------------- */
   $("mcp-manage").onclick = () => go("mcp");
   $("models-to-recipes").onclick = () => go("recipes");

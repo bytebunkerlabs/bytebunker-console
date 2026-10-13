@@ -67,5 +67,19 @@ class HelpTest(unittest.TestCase):
                 self.assertTrue(ok, "%s points away from ByteBunker: %s" % (info["file"], url))
 
 
+    def test_the_screens_link_only_to_bytebunkerlabs(self):
+        """A link on a screen goes to bytebunkerlabs.ai (or ByteBunker's GitHub), never to a page
+        served by the app itself, which opens at 127.0.0.1."""
+        from urllib.parse import urlparse
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public")
+        html = open(os.path.join(root, "index.html"), encoding="utf-8").read()
+        for href in re.findall(r'<a[^>]*\shref="([^"]+)"', html):
+            host = urlparse(href).hostname or ""
+            self.assertTrue(host == "bytebunkerlabs.ai" or host.endswith(".bytebunkerlabs.ai")
+                            or href.startswith("https://github.com/bytebunkerlabs/"),
+                            "index.html links to %s" % href)
+        self.assertEqual([f for f in os.listdir(root) if f.endswith(".html")], ["index.html"])
+
+
 if __name__ == "__main__":
     unittest.main()
