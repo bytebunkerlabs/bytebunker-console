@@ -3,6 +3,23 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.7.1 — 2026-10-13
+
+### Fixed
+- **A goal does not start with a model nobody serves.** Each role's model (the
+  master, the thinking roles, the minions, the minion engines) is checked
+  first; a missing one stops the goal at once and says which and where to fix
+  it, instead of every minion failing with "HTTP 404". Agents > Settings marks
+  such a model "not served anywhere".
+- **A model nobody serves is never sent to the first engine** by default.
+- **The master stops spawning when its workers cannot reach their model**: two
+  in a row and it is told it is the setup, not the task.
+
+### New
+- **The agents know today's date**, so "latest" means latest.
+- **Minions with network can search the web** (no key needed), instead of
+  guessing addresses.
+
 ## 0.7.0 — 2026-10-13
 
 ### New

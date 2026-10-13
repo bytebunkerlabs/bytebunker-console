@@ -50,6 +50,11 @@ class LoopbackModels(unittest.TestCase):
         import server
 
         class GW:
+            models, model_map = [{"id": "qwen"}], {"qwen": "this computer"}
+
+            def refresh(self, force=False):
+                pass
+
             def resolve(self, model):
                 return model, {"url": "http://127.0.0.1:8888/v1", "key": "k"}
         saved = server.CFG, server.GW
@@ -74,6 +79,12 @@ class MinionPool(unittest.TestCase):
         import server
 
         class GW:
+            models = [{"id": m} for m in gateways]
+            model_map = {m: g["name"] for m, g in gateways.items()}
+
+            def refresh(self, force=False):
+                pass
+
             def resolve(self, model):
                 mid, _, gw = model.partition("@")
                 g = gateways.get(gw or mid)
@@ -102,6 +113,31 @@ class MinionPool(unittest.TestCase):
             fast = self.spec(agents, self.GWS)
             self.assertNotIn("pool", fast)
             self.assertEqual(fast["model"], "qwen-mac")
+
+    def test_a_model_served_nowhere_is_never_sent_to_the_first_gateway(self):
+        fast = self.spec({"slave_model": "qwen3.8-27b", "harness": {"pool": True},
+                          "minion_pool": [{"model": "qwen-box"}]}, self.GWS)
+        self.assertEqual(fast, {"model": "qwen3.8-27b"})          # no base_url: no guessed engine
+
+    def test_a_goal_does_not_start_with_an_unserved_model(self):
+        import server
+        saved = server.CFG, server.GW
+
+        class GW:
+            models, model_map = [{"id": "qwen-mac"}], {"qwen-mac": "this computer"}
+
+            def refresh(self, force=False):
+                pass
+        server.CFG = {"agents": {"enabled": True, "dir": tempfile.mkdtemp(), "master_model": "glm",
+                                 "slave_model": "qwen3.8-27b", "thinking_model": "qwen-mac"}}
+        server.GW = GW()
+        try:
+            self.assertEqual(server.unserved_roles(), [("the master", "glm"), ("the minions", "qwen3.8-27b")])
+            with self.assertRaises(agents.AgentConfigError) as e:
+                server.agents_ready("a goal")
+            self.assertIn("the minions' model qwen3.8-27b is not served anywhere right now", str(e.exception))
+        finally:
+            server.CFG, server.GW = saved
 
     def test_a_remote_worker_skips_this_machines_loopback(self):
         fast = self.spec({"ssh": "me@worker", "slave_model": "qwen-mac", "harness": {"pool": True},

@@ -4598,6 +4598,11 @@
       const seen = new Set([""]);
       for (const m of (state.models || []).filter((x) => !modelInfo(x).pinned).concat(d[key] ? [d[key]] : [])) { if (seen.has(m)) continue; seen.add(m); const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o); }
       sel.value = d[key] || "";
+      // a model no gateway serves: a goal will not start with it
+      let warn = sel.parentElement.querySelector(".not-served");
+      const missing = (d.unserved || {})[key];
+      if (missing && !warn) { warn = document.createElement("span"); warn.className = "not-served"; sel.parentElement.appendChild(warn); }
+      if (warn) { warn.hidden = !missing; warn.textContent = missing ? "not served anywhere" : ""; warn.title = missing ? missing + " is not served by any gateway right now: pick another, or serve it on Deploy" : ""; }
     }
     renderMinionPool(d);
 

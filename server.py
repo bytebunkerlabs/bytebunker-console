@@ -1148,7 +1148,7 @@ def agents_spec():
         if not model:
             continue
         try:
-            mid, gw = GW.resolve(model)
+            mid, gw = GW.resolve(model) if model_served(model) else (model, None)
         except Exception:   # noqa: BLE001
             mid, gw = model, None
         r = {"model": mid}
@@ -1178,6 +1178,46 @@ def agents_spec():
     return spec if len(spec) > 1 else None
 
 
+ROLE_LABELS = {"master_model": "the master", "thinking_model": "the thinking roles",
+               "slave_model": "the minions"}
+
+
+def model_served(model):
+    """Whether a gateway serves this model right now ("id", or "id@gateway" for one
+    gateway's copy). A model nobody serves must never fall to the first gateway."""
+    if not model:
+        return True
+    GW.refresh()
+    ids = {m["id"] for m in GW.models}
+    if model in ids or model in GW.model_map:
+        return True
+    GW.refresh(force=True)
+    return model in {m["id"] for m in GW.models} or model in GW.model_map
+
+
+def unserved_roles(a=None):
+    """[(who, model)] for each role whose chosen model no gateway serves (a blank
+    choice is the worker's own default, not checked here)."""
+    a = a if a is not None else (CFG.get("agents") or {})
+    out = [(ROLE_LABELS[k], a[k]) for k in ("master_model", "thinking_model", "slave_model")
+           if (a.get(k) or "").strip() and not model_served(a[k].strip())]
+    out += [("a minion engine", e["model"]) for e in (a.get("minion_pool") or [])
+            if isinstance(e, dict) and e.get("model") and not model_served(e["model"])]
+    return out
+
+
+def agents_ready(goal):
+    """AgentConfigError unless a goal can start: agents set up, and every chosen
+    model served somewhere now (a goal that starts anyway spends its workers on one
+    error; measured: six on an HTTP 404)."""
+    agentmod.build_command(CFG, goal)
+    missing = unserved_roles()
+    if missing:
+        raise agentmod.AgentConfigError(
+            "not started: " + "; ".join("%s' model %s is not served anywhere right now" % (w, m) for w, m in missing)
+            + ". Pick served models in Agents > Settings > Models, or serve them on the Deploy screen.")
+
+
 def minion_pool(a, first, remote):
     """The engines the minions spread over: the minion model's own, then each one
     added in Agents > Settings (agents.minion_pool: [{model, slots}], a model as
@@ -1187,6 +1227,8 @@ def minion_pool(a, first, remote):
         [e for e in (a.get("minion_pool") or []) if isinstance(e, dict) and e.get("model")]
     out, seen = [], set()
     for e in entries:
+        if not model_served(e["model"]):
+            continue                    # served nowhere: never the first gateway by default
         try:
             mid, gw = GW.resolve(e["model"])
         except Exception:   # noqa: BLE001
@@ -1215,7 +1257,7 @@ def minion_pool(a, first, remote):
 def agent_goal(run, emit, goal, via="app"):
     """One goal on the agents worker, its lines streamed through emit. Shared
     by the Agents screen and agent-kind jobs. Returns (result, lines)."""
-    agentmod.build_command(CFG, goal)                    # AgentConfigError when not set up
+    agents_ready(goal)                                   # AgentConfigError when not set up
     known = bool((CFG.get("agents") or {}).get("harness"))
     caps = agentmod.harness_caps(CFG)
     if caps and not known:
@@ -2317,7 +2359,7 @@ def start_turn(sid, body, source):
 
 def start_goal(goal, source, title=None, meta=None):
     """An agents goal as a server-owned run (one at a time)."""
-    agentmod.build_command(CFG, goal)              # AgentConfigError: not set up
+    agents_ready(goal)                             # AgentConfigError: not set up, or a model not served
     return RUNS.start("agents", source, lambda run: agent_goal(run, lambda obj: RUNS.emit(run, "out", obj), goal)[0],
                       title=title or goal.strip()[:120], key="agents", meta=meta or {})
 
@@ -3217,6 +3259,8 @@ class Handler(BaseHTTPRequestHandler):
             st["thinking_model"] = a.get("thinking_model") or ""
             st["slave_model"] = a.get("slave_model") or ""
             st["minion_pool"] = a.get("minion_pool") or []
+            st["unserved"] = {k: a[k] for k in ("master_model", "thinking_model", "slave_model")
+                              if (a.get(k) or "").strip() and not model_served(a[k].strip())}
             st["minion_slots"] = a.get("minion_slots") or 4
             # the engines a run's minions would spread over now, as the run spec would name them
             st["pool_engines"] = [{k: e[k] for k in ("name", "model", "slots")}
@@ -3871,7 +3915,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         goal = body.get("goal") or ""
         try:
-            agentmod.build_command(CFG, goal)        # a setup problem is a 400, not a failed run
+            agents_ready(goal)                       # a setup problem is a 400, not a failed run
         except agentmod.AgentConfigError as e:
             self._json({"error": str(e)}, 400)
             return
