@@ -3206,6 +3206,16 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
                 return
+            if body.get("action") == "rename":
+                sid = str(body.get("id") or "")
+                if not sessmod._ID.match(sid) or SESSIONS.get(sid) is None:
+                    self._json({"error": "no such session"}, 404)
+                    return
+                name = " ".join(str(body.get("name") or "").split())[:120]    # empty: back to its first message
+                summary = SESSIONS.append(sid, "meta", name=name or None)
+                BUS.publish("sessions", "updated", summary)
+                self._json({"ok": True, "session": summary})
+                return
             if body.get("action") == "set_project":
                 sid, pid = str(body.get("id") or ""), body.get("project") or None
                 if not sessmod._ID.match(sid) or SESSIONS.get(sid) is None:

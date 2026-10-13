@@ -122,6 +122,16 @@ class Sessions(unittest.TestCase):
         with self.assertRaises(ValueError):
             st.put({"id": "../escape"})
 
+    def test_a_name_given_outlives_later_saves(self):
+        st = self.store()
+        st.put({"id": "s1", "title": "what is 2+2", "messages": [], "updated": 100})
+        st.append("s1", "meta", name="Arithmetic")
+        self.assertEqual((st.list()[0]["title"], st.list()[0]["named"]), ("Arithmetic", True))
+        st.put({"id": "s1", "title": "what is 2+2", "messages": [{"role": "user", "content": "what is 2+2"}]})
+        self.assertEqual(st.list()[0]["title"], "Arithmetic")         # a client's save keeps the name
+        st.append("s1", "meta", name=None)
+        self.assertEqual((st.list()[0]["title"], st.list()[0]["named"]), ("what is 2+2", False))
+
     def test_a_snapshot_supersedes_and_a_torn_line_is_ignored(self):
         st = self.store()
         st.append("s", "msg", message={"role": "user", "content": "a"})

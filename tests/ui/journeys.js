@@ -92,7 +92,18 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   await page.waitForTimeout(1200);
   const row = page.locator("#sessions-box .trow", { hasText: "saved by another client" });
   check("sessions: appears live", await row.count() === 1);
-  await row.click();
+  // rename it in place; a later save from a client keeps the name
+  await row.hover(); await row.locator(".ren").click();
+  await page.locator("#sessions-box .ren-input").fill("Arithmetic with the fake");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(600);
+  await post("/api/sessions", { id: "s-ui-check", title: "saved by another client", model: "fake-model", turns: 2, chars: 20, updated: Date.now(),
+    messages: [{ role: "user", content: "what is 2+2" }, { role: "assistant", content: "four" }] });
+  await page.waitForTimeout(1200);
+  const renamed = page.locator("#sessions-box .trow", { hasText: "Arithmetic with the fake" });
+  check("sessions: renamed in place, and the name outlives a later save", await renamed.count() === 1 &&
+        await page.locator("#sessions-box .trow", { hasText: "saved by another client" }).count() === 0);
+  await renamed.locator(".tname").click();
   await page.waitForTimeout(1000);
   const msgs = await page.locator("#msgs").innerText().catch(() => "");
   check("sessions: opening loads the messages", msgs.includes("what is 2+2") && msgs.includes("four"), msgs.slice(0, 100).replace(/\n/g, " | "));

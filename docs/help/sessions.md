@@ -7,6 +7,10 @@ summary: Every conversation, from the app and from bb, and the record behind it
 ---
 Every chat is saved as a session on this machine. Sessions from a terminal are marked **terminal**, with the folder bb ran in. Click one to continue it in the Playground. A chat in a [project](help:projects) shows the project's name, and the list can show one project's chats, or those in none.
 
+## Names
+
+A chat is named after its first message. To give it your own name, hover its row on [Sessions](#sessions) and press the pencil (or double-click the name), type, and press Enter. Esc cancels; an empty name goes back to the first message. Your name stays when the chat goes on, here or in bb.
+
 ## The trace log
 
 Every request to a model, every tool call and every rating is also written to the trace log (one file a day, compressed after the day ends). It is the full record: what was sent, what came back, how long it took. **Export** writes it as JSONL for fine-tuning; **rated up only** keeps the turns you marked good.

@@ -1693,8 +1693,9 @@
       const r = document.createElement("div");
       r.className = "trow" + (s.id === state.session ? " active" : "");
       r.innerHTML = '<span class="t"></span><span class="m mono"></span><span class="m mono"></span><span class="m mono"></span>' +
-                    '<span class="w"><span class="when"></span><button class="del" title="Delete">\u2715</button></span>';
-      r.children[0].textContent = s.title || "untitled";
+                    '<span class="w"><span class="when"></span><button class="ren" title="Rename"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.8 2.6l2.6 2.6L5.6 13H3v-2.6z"/><path d="M9.4 4l2.6 2.6"/></svg></button><button class="del" title="Delete">\u2715</button></span>';
+      const tname = document.createElement("span"); tname.className = "tname"; tname.textContent = s.title || "untitled";
+      r.children[0].appendChild(tname);
       if (s.project && projectById(s.project)) {
         const pc = document.createElement("span"); pc.className = "src-chip"; pc.textContent = projectById(s.project).name;
         r.children[0].appendChild(pc);
@@ -1709,6 +1710,32 @@
       r.children[2].textContent = s.turns || 0;
       r.children[3].textContent = (s.chars || 0).toLocaleString();
       r.querySelector(".when").textContent = relTime(s.updated || 0);
+      // rename in place: Enter or leaving the box saves, Esc cancels, an empty name goes back to the first message
+      const rename = (ev) => {
+        if (ev) ev.stopPropagation();
+        if (r.querySelector(".ren-input")) return;
+        const inp = document.createElement("input"); inp.className = "text-input ren-input"; inp.value = s.named ? s.title : "";
+        inp.placeholder = s.title || "a name for this chat"; inp.maxLength = 120;
+        tname.replaceWith(inp); inp.focus(); inp.select();
+        let done = false;
+        const finish = async (save) => {
+          if (done) return; done = true;
+          const v = inp.value.trim();
+          if (save && v !== (s.named ? s.title : "")) {
+            try {
+              const res = await (await fetch("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "rename", id: s.id, name: v }) })).json();
+              if (res.session) { s.title = res.session.title; s.named = res.session.named; }
+            } catch (e) {}
+          }
+          tname.textContent = s.title || "untitled"; inp.replaceWith(tname);
+        };
+        inp.onclick = (e) => e.stopPropagation();
+        inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); finish(true); } else if (e.key === "Escape") { e.preventDefault(); finish(false); } };
+        inp.onblur = () => finish(true);
+      };
+      r.querySelector(".ren").onclick = rename;
+      tname.ondblclick = rename;
       r.querySelector(".del").onclick = async (ev) => {
         ev.stopPropagation();
         if (!confirm("Delete this session?")) return;

@@ -597,3 +597,9 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
 .update-actions{display:flex;gap:10px;justify-content:flex-end;align-items:center}
 .update-actions .linky{margin-right:auto;align-self:center}
 .update-chip:not(.newer) .dot{animation:none}
+/* Sessions: rename in place */
+.trow .ren{width:20px;height:20px;flex:0 0 20px;border-radius:5px;border:1px solid transparent;color:var(--faint);display:flex;align-items:center;justify-content:center;opacity:0}
+.trow:hover .ren,.trow .ren:focus-visible{opacity:1}
+.trow .ren:hover{color:var(--fg);border-color:var(--border)}
+.trow .ren-input{height:26px;padding:2px 8px;font-size:13px;width:min(320px,100%)}
+@media (hover:none){.trow .ren,.trow .del{opacity:1}}
