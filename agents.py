@@ -298,11 +298,13 @@ def harness_caps(CFG, refresh=False):
     """The worker's harness abilities, asked once and remembered in config
     (agents.harness); Test asks again. An older harness gets the old flags."""
     a = agent_cfg(CFG)
-    if a.get("harness") and not refresh:
-        return a["harness"]
     script = (a.get("script") or "scripts/run_master.py").strip()
     directory = (a.get("dir") or "").strip()
     ssh = (a.get("ssh") or "").strip()
+    # a worker over ssh is asked once (Test asks again); a harness on this computer
+    # is read every time, a few file reads, so updating it is seen at once
+    if a.get("harness") and not refresh and ssh:
+        return a["harness"]
     text = ""
     try:
         if ssh:

@@ -27,6 +27,19 @@ class LocalRun(unittest.TestCase):
         self.assertIn("master=m1", out)               # this run's own settings still arrive
 
 
+class Caps(unittest.TestCase):
+    def test_a_harness_on_this_computer_is_read_fresh(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "scripts"))
+        os.makedirs(os.path.join(d, "src", "bytebunker_agents", "harness"))
+        with open(os.path.join(d, "scripts", "run_master.py"), "w") as f:
+            f.write("--goal-id --spec --proto --timeout-s --court")
+        cfg = {"agents": {"enabled": True, "dir": d, "harness": {"spec": True, "pool": False}}}
+        self.assertFalse(agents.harness_caps(cfg).get("pool"))
+        open(os.path.join(d, "src", "bytebunker_agents", "harness", "engine_pool.py"), "w").close()
+        self.assertTrue(agents.harness_caps(cfg).get("pool"))        # updated: seen without a Test
+
+
 class LoopbackModels(unittest.TestCase):
     """A model on this machine's 127.0.0.1: agents here can reach it, a worker over ssh cannot."""
 
