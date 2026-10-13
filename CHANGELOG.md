@@ -3,6 +3,43 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.6.1 — 2026-10-13
+
+### New
+- **Every terminal command a chat runs is sandboxed.** Next to Terminal in
+  the Playground: 🟢 **Local** (every new chat: the project's folder, your
+  installed tools, never your keys or the rest of your home folder, no
+  network), 🟡 **Web** (the same, with network) or 🔴 **Full access** (no
+  sandbox, this chat only, with a red bar). Change it any time; the next
+  command uses it. A command that needs more asks: **Allow once**, **Allow
+  every time in this chat** or **Don't allow**. bb takes `--web` and
+  `--full-access`.
+- **Sessions show a dot** for the most each chat ever had: green, amber, red.
+- **Agents on a Mac with nothing to install**: Seatbelt, macOS's own
+  sandbox. **Work here** installs what a machine is missing, and a line that
+  needs your password opens in a terminal.
+- **Wrap up**: the master answers now with what it has (Stop gives no
+  answer). While it works, a progress line: round, minutes, workers done.
+- **A quicker Sultan**: it plans first and spawns only the workers the plan
+  needs, sees its time budget and wraps up by itself at 70%, and waits for
+  workers without spending model rounds. Goals get an hour by default.
+- **Windows**: Settings → Command sandbox → **Enable WSL2**, a restart, then
+  **Finish setup**, and commands run sandboxed in WSL2. Until then each one
+  asks.
+- **Six Mac recipes**: gpt-oss-120b (128 GB), and for 48–64 GB Macs
+  qwen3.6-35b-a3b, nemotron-3.5-lightning, glm-4.7-flash, gemma-4-31b and
+  gemma-4-26b-a4b.
+
+### Fixed
+- Work here's result stays on screen; it used to vanish with its error.
+- The master's badge said "deciding" forever; it now says so only while a
+  goal runs.
+- "Agents are off" takes you to where you set them up.
+- How agents run opens bytebunkerlabs.ai instead of a page inside the app.
+
+The sandbox for agents, Wrap up and the quicker Sultan need the newer agents
+harness: **Update** on your worker under Agents → Settings.
+
 ## 0.6.0 — 2026-10-12
 
 ### New
