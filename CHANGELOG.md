@@ -3,7 +3,7 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
-## 0.6.1 — 2026-10-13
+## 0.6.2 — 2026-10-13
 
 ### New
 - **Every terminal command a chat runs is sandboxed.** Next to Terminal in
@@ -31,6 +31,12 @@ app opens on the new version's section, and Settings → What's new shows them a
   gemma-4-26b-a4b.
 
 ### Fixed
+- **Check for updates works again.** The app looked for trusted certificates
+  where the build machine keeps them, so it could not reach GitHub (0.6.0
+  included: download this version once by hand, and updates work from here on).
+- **A machine you deploy on shows on Cluster.** Deploying (and `rack up` itself)
+  starts the machine's monitor and adds it: GPU, memory and what its engine
+  served. Usage says it counts what went through ByteBunker.
 - Work here's result stays on screen; it used to vanish with its error.
 - The master's badge said "deciding" forever; it now says so only while a
   goal runs.
@@ -38,7 +44,8 @@ app opens on the new version's section, and Settings → What's new shows them a
 - How agents run opens bytebunkerlabs.ai instead of a page inside the app.
 
 The sandbox for agents, Wrap up and the quicker Sultan need the newer agents
-harness: **Update** on your worker under Agents → Settings.
+harness: **Update** on your worker under Agents → Settings. Deploying starts
+the monitor with dgx-serve from 2026-10-13.
 
 ## 0.6.0 — 2026-10-12
 
