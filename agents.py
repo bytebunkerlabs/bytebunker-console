@@ -430,8 +430,11 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None,
                   ) % (qdir, launch, launch)
         return ssh_base() + ["-o", "ConnectTimeout=15", ssh, remote]
 
-    # local: no shell, goal is a discrete argv element; env via a leading `env`
-    env_argv = ["env"] + ["%s=%s" % (k, v) for k, v in envs.items()] if envs else []
+    # local: no shell, goal is a discrete argv element; env via a leading `env`.
+    # The app's own BYTEBUNKER_CONFIG names its config.json; the harness reads the
+    # same variable first, so a run on this computer would load the app's file
+    # (no llm.base_url, exit 2). Unset, the harness finds its config/config.yaml.
+    env_argv = ["env", "-u", "BYTEBUNKER_CONFIG"] + ["%s=%s" % (k, v) for k, v in envs.items()]
     return env_argv + shlex.split(launcher) + [script, "--goal", goal] + extra
 
 

@@ -1052,9 +1052,11 @@ def agents_spec():
     """This run's models for the harness (--spec): master, thinking and fast,
     from the Agents screen's choices, else the app's roles (big, thinking,
     fast); each with its gateway's address and key. An engine on this
-    machine's loopback is left to the worker's own config (the worker cannot
-    reach it); a gateway can name the address agents use (agents_url)."""
+    machine's loopback is left to a remote worker's own config (it cannot
+    reach it) but given to agents on this computer, which can; a gateway can
+    name the address agents use (agents_url)."""
     a = CFG.get("agents") or {}
+    remote = bool((a.get("ssh") or "").strip())
     roles = CFG.get("roles") or {}
     pick = {"master": a.get("master_model") or roles.get("big"),
             "thinking": a.get("thinking_model") or roles.get("thinking"),
@@ -1070,7 +1072,7 @@ def agents_spec():
         r = {"model": mid}
         if gw:
             url = gw.get("agents_url") or gw["url"]
-            if (urllib.parse.urlparse(url).hostname or "") not in ("127.0.0.1", "localhost", "::1"):
+            if not remote or (urllib.parse.urlparse(url).hostname or "") not in ("127.0.0.1", "localhost", "::1"):
                 r["base_url"] = url
                 if gw.get("key"):
                     r["api_key"] = gw["key"]

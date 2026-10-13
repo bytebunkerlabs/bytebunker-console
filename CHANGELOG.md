@@ -3,6 +3,17 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.6.3 — 2026-10-13
+
+### Fixed
+- **Agents on this computer start.** A goal run on the Mac the app runs on
+  stopped at once with "missing required key 'llm.base_url'": the agents
+  read the app's own settings file in place of theirs.
+- **Agents on this computer reach the models it serves.** A model served on
+  this machine (127.0.0.1) was left out of a run's models, as it must be for
+  a separate worker, so every helper's call was refused.
+- The Agents help page no longer says a Mac needs podman: it uses Seatbelt.
+
 ## 0.6.2 — 2026-10-13
 
 ### New
