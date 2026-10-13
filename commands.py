@@ -51,6 +51,8 @@ COMMANDS = [
      "help": "every node and engine the monitors see"},
     {"cli": "usage", "slash": "/usage", "args": "", "route": "GET /api/usage",
      "help": "tokens and throughput, 14 days"},
+    {"cli": "audit", "slash": None, "args": "[ls|verify] [-c CATEGORY] [-q TEXT] [-n N]", "route": "GET /api/audit",
+     "help": "who changed what, and when; verify checks nothing was altered"},
     {"cli": "skills", "slash": None, "args": "", "route": "GET /api/skills", "help": "skills"},
     {"cli": "mcp", "slash": None, "args": "", "route": "GET /api/tools", "help": "MCP servers and their tools"},
     # workflows: a named prompt with {{params}}, run from the app, bb or a job

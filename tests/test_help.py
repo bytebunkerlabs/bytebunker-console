@@ -40,7 +40,7 @@ class HelpTest(unittest.TestCase):
         g = guides()
         with_guides = {i["meta"].get("screen") for i in g.values()}
         for screen in ("playground", "sessions", "projects", "gateways", "models", "workflows", "jobs", "agents",
-                       "mcp", "skills", "plugins", "cluster", "usage", "settings", "recipes"):
+                       "mcp", "skills", "plugins", "cluster", "usage", "audit", "settings", "recipes"):
             self.assertIn(screen, with_guides, "no guide for the %s screen" % screen)
 
     def test_only_our_products_and_no_private_addresses(self):

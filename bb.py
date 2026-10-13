@@ -843,6 +843,31 @@ def cmd_sessions(a, out):
     return EXIT_OK
 
 
+def cmd_audit(a, out):
+    srv = connect(out=out)
+    if a.action == "verify":
+        v = srv.get("/api/audit/verify")
+        if v.get("ok"):
+            out.say(out.good("intact: %d entries, as written, in order" % v.get("entries", 0)))
+            return EXIT_OK
+        out.say(out.bad("changed: " + (v.get("why") or "")))
+        return EXIT_FAILED
+    q = {"limit": str(a.n)}
+    if a.category:
+        q["category"] = a.category
+    if a.q:
+        q["q"] = a.q
+    d = srv.get("/api/audit?" + urllib.parse.urlencode(q))
+    rows = []
+    for e in d.get("entries") or []:
+        det = e.get("detail") or {}
+        what = det.get("command") if e.get("action") == "command.outside_sandbox" else e.get("target") or ""
+        rows.append([time.strftime("%m-%d %H:%M", time.localtime(e["ts"])), e.get("actor"),
+                     {True: "ok", False: "FAIL"}.get(e.get("ok"), ""), e.get("action"), str(what)[:60]])
+    out.say(table(rows, ["when", "who", "", "change", "on"]) if rows else "nothing in the audit log yet")
+    return EXIT_OK
+
+
 def cmd_list(a, out):
     srv = connect(out=out)
     what = a.cmd
@@ -1282,6 +1307,11 @@ def parser():
     s.add_argument("-n", type=int, default=20)
     for name in ("models", "gateways", "monitors", "cluster", "usage", "skills", "mcp"):
         sub.add_parser(name)
+    au = sub.add_parser("audit", help="who changed what, and when")
+    au.add_argument("action", choices=("ls", "verify"), nargs="?", default="ls")
+    au.add_argument("-c", "--category", choices=("access", "settings", "tools", "serving", "agents", "runs", "data"))
+    au.add_argument("-q", help="only entries containing this text")
+    au.add_argument("-n", type=int, default=40)
     r = sub.add_parser("runs")
     r.add_argument("action", choices=("ls", "watch", "stop"), nargs="?", default="ls")
     r.add_argument("id", nargs="?")
@@ -1323,7 +1353,7 @@ def parser():
 HANDLERS = {"ask": cmd_ask, "chat": cmd_chat, "sessions": cmd_sessions, "runs": cmd_runs, "agents": cmd_agents,
             "jobs": cmd_jobs, "doctor": cmd_doctor, "serve": cmd_serve, "help": cmd_help, "run": cmd_run,
             "workflows": cmd_workflows, "profiles": cmd_profiles, "projects": cmd_projects,
-            "racks": cmd_racks, "pair": cmd_pair, "deploy": cmd_deploy,
+            "racks": cmd_racks, "pair": cmd_pair, "deploy": cmd_deploy, "audit": cmd_audit,
             "models": cmd_list, "gateways": cmd_list, "monitors": cmd_list, "cluster": cmd_list,
             "usage": cmd_list, "skills": cmd_list, "mcp": cmd_list}
 

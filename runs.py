@@ -20,6 +20,8 @@ import threading
 import time
 import uuid
 
+import audit
+
 FINAL = ("done", "error", "cancelled", "interrupted")
 
 
@@ -141,6 +143,7 @@ class RunRegistry:
                     break
 
         def body():
+            audit.set_actor(source)          # what this run changes is the doing of whoever started it
             run.state = "running"
             self._write_index(run.summary())
             self.bus.publish("runs", "started", run.summary(), run=run.id)

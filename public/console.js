@@ -75,7 +75,7 @@
     applyTheme(document.documentElement.getAttribute("data-theme") !== "dark");
 
   /* ---------------- nav ---------------- */
-  const screens = ["playground", "sessions", "projects", "video", "skills", "plugins", "mcp", "agents", "workflows", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage"];
+  const screens = ["playground", "sessions", "projects", "video", "skills", "plugins", "mcp", "agents", "workflows", "jobs", "gateways", "models", "recipes", "cluster", "settings", "usage", "audit"];
   const GROUPS = { models: ["models", "recipes", "gateways"], tools: ["mcp", "skills", "plugins"] };
   function go(s) {
     // a screen whose nav entry is hidden (not set up here) is not reachable by link
@@ -113,6 +113,7 @@
     if (s === "recipes") renderRecipes();
     if (s === "cluster") pollCluster(true);
     if (s === "usage") renderUsage();
+    if (s === "audit") renderAudit();
     if (s === "video") vidRefresh();
   }
   document.querySelectorAll("[data-nav]").forEach((b) => (b.onclick = () => go(b.dataset.nav)));
@@ -1769,7 +1770,7 @@
   function onLive(topic, fn) { (live.handlers[topic] = live.handlers[topic] || []).push(fn); }
   function startLive() {
     if (live.es || typeof EventSource === "undefined") return;
-    const topics = ["jobs", "sessions", "runs", "usage", "config", "models", "approvals"];
+    const topics = ["jobs", "sessions", "runs", "usage", "config", "models", "approvals", "audit"];
     const es = new EventSource("/api/events?topics=" + topics.join(","));
     live.es = es;
     const fire = (topic, evt) => { for (const fn of live.handlers[topic] || []) { try { fn(evt); } catch (e) { console.error(e); } } };
@@ -1797,6 +1798,7 @@
     renderMessages();
   }
   onLive("usage", () => { if (state.screen === "usage") renderUsage(); });
+  onLive("audit", () => { if (state.screen === "audit") renderAudit(true); });
   onLive("models", () => loadModels());          // an engine started or stopped somewhere
   onLive("approvals", () => renderApprovals());
   onLive("config", (e) => {
@@ -1874,10 +1876,53 @@
       c.querySelector("b").textContent = id;
       const gw = state.modelGateway[id]; const st = (state.gatewayStatus || {})[gw] || {};
       c.querySelector("small").textContent = "via " + (gw || "?") + (st.kind ? " \u00b7 " + st.kind : "") + ((state.caps[id] || {}).vision ? " \u00b7 vision" : "");
+      c.dataset.gateway = gw || "";
       lm.appendChild(c);
     }
     if (!state.models.length) {
       lm.innerHTML = '<div class="empty-state"><b>No model server answers</b><span>Deploy a model, or add a gateway, then reload.</span></div>';
+    }
+    stopButtons(lm);
+  }
+
+  // Stop serving, beside each model a machine of yours serves (dgx-serve's rack down there)
+  async function stopButtons(lm) {
+    let racks = [], local = null, gws = [];
+    try {
+      const [r, g] = await Promise.all([fetch("/api/racks").then((x) => x.json()), fetch("/api/gateways").then((x) => x.json())]);
+      racks = r.racks || []; local = r.local; gws = g.gateways || [];
+    } catch (e) { return; }
+    const loopback = (u) => { try { return ["127.0.0.1", "localhost", "[::1]"].includes(new URL(u).hostname); } catch (e) { return false; } };
+    const rackOf = (gwName) => {
+      const r = racks.find((x) => x.gateway && x.gateway === gwName);
+      if (r) return r;
+      const g = gws.find((x) => x.name === gwName);
+      return g && loopback(g.url) && local && local.installed ? local : null;
+    };
+    for (const c of lm.querySelectorAll(".row-card")) {
+      if (c.querySelector(".stop-serving")) continue;
+      const r = rackOf(c.dataset.gateway);
+      if (!r) continue;
+      const id = c.querySelector("b").textContent;
+      const where = r.local ? "this computer" : r.name;
+      const b = document.createElement("button"); b.type = "button"; b.className = "ghost-btn danger stop-serving"; b.textContent = "Stop serving";
+      b.title = "Stop the model dgx-serve runs on " + where;
+      const out = document.createElement("small"); out.className = "mono stop-note"; out.style.cssText = "flex-basis:100%;color:var(--faint)"; out.hidden = true;
+      b.onclick = async () => {
+        if (!confirm("Stop serving " + id + " on " + where + "?" + (r.local ? "" : " On a cluster this stops it on every node.") + " Chats using it stop answering until you serve a model again from Deploy.")) return;
+        b.disabled = true; b.textContent = "Stopping\u2026"; out.hidden = false; out.textContent = "";
+        let exit = null;
+        try {
+          await postFrames("/api/rack", { action: "down", recipe: "", rack: r.name }, (o) => {
+            if (o.phase === "done") exit = o.exit;
+            else if (o.error) out.textContent = "error: " + o.error;
+            else if (o.line != null && o.line.trim()) out.textContent = o.line;
+          });
+        } catch (e) { out.textContent = "error: " + e.message; }
+        if (exit === 0) { out.textContent = "stopped on " + where; setTimeout(loadModels, 1500); }
+        else { b.disabled = false; b.textContent = "Stop serving"; if (exit != null) out.textContent = "did not stop (exit " + exit + "): " + out.textContent; }
+      };
+      c.appendChild(b); c.appendChild(out);
     }
   }
 
@@ -5561,6 +5606,123 @@
   }
 
   /* ---------------- usage ---------------- */
+  /* ---------------- audit log ---------------- */
+  const audit = { cat: "", open: null, timer: null };
+  const AUDIT_CATS = [["", "All"], ["access", "Access"], ["settings", "Settings"], ["tools", "Tools"], ["serving", "Serving"],
+                      ["agents", "Agents"], ["runs", "Runs"], ["data", "Data"]];
+  const AUDIT_LABELS = {
+    "command.outside_sandbox": "Command outside the sandbox", "session.delete": "Deleted a chat",
+    "sessions.access": "Changed a chat's access", "sessions.rename": "Renamed a chat", "sessions.set_project": "Moved a chat to a project",
+    "approval.allow": "Allowed a tool once", "approval.always": "Always allowed a tool", "approval.deny": "Refused a tool",
+    "agents.run": "Started an agents goal", "agents.run.finished": "Agents goal ended", "agents.settings": "Changed agents settings",
+    "agents.court": "Changed the court", "agents.wrapup": "Wrapped up a goal", "agents.plane_install": "Set up agents on a machine",
+    "agents.slave.kill": "Stopped a helper", "run.cancel": "Stopped a run", "workflow.run": "Ran a workflow",
+    "update.apply": "Installed an update", "export.training_data": "Exported training data", "audit.export": "Exported the audit log",
+    "settings.enable_wsl": "Started WSL2 setup", "settings.finish_wsl": "Finished WSL2 setup", "settings.install_cli": "Installed the bb command",
+    "terminal": "Opened a terminal", "settings": "Changed settings", "profiles": "Changed profiles",
+    "gateways.add": "Added a gateway", "gateways.remove": "Removed a gateway", "gateways.discover": "Looked for engines",
+    "monitors.add": "Added a monitor", "monitors.remove": "Removed a monitor", "monitors.discover": "Looked for monitors",
+    "rack.up": "Started serving", "rack.down": "Stopped serving", "rack.up.finished": "Serving started",
+    "rack.down.finished": "Serving stopped", "racks.pair": "Paired a machine", "racks.remove": "Removed a machine",
+    "rack.pair.finished": "Pairing ended", "machine.deploy.finished": "Deploy ended", "machines.find": "Looked for machines",
+    "mcp.add": "Added an MCP server", "mcp.remove": "Removed an MCP server", "mcp.toggle": "Turned an MCP server on or off",
+    "mcp.catalog_add": "Added an MCP server from the catalog", "mcp.install.finished": "MCP server install ended",
+    "skills.create": "Created a skill", "skills.delete": "Deleted a skill", "plugins.add": "Added a plugin", "plugins.remove": "Removed a plugin",
+    "jobs.save": "Saved a job", "jobs.delete": "Deleted a job", "jobs.run_now": "Ran a job", "jobs.toggle": "Paused or resumed a job",
+    "projects.save": "Saved a project", "projects.delete": "Deleted a project",
+  };
+  function auditWhat(e) {
+    const d = e.detail || {};
+    let label = AUDIT_LABELS[e.action] || e.action;
+    if (e.action === "sessions.access" && d.access) label += " to " + d.access;
+    return { label, cmd: e.action === "command.outside_sandbox" ? (d.command || "") + " · " + (d.how || "") : "" };
+  }
+  function auditRow(e) {
+    const row = document.createElement("div"); row.className = "audit-row";
+    const t = document.createElement("span"); t.className = "t mono"; t.textContent = new Date(e.ts * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const st = document.createElement("span"); st.className = "st" + (e.ok === true ? " ok" : e.ok === false ? " bad" : "");
+    st.title = e.ok === true ? "worked" : e.ok === false ? "failed or refused" : "";
+    const who = document.createElement("span"); who.className = "who mono"; who.textContent = e.actor === "app" ? "app" : e.actor;
+    const cat = document.createElement("span"); cat.className = "cat"; cat.textContent = e.category;
+    const what = document.createElement("span"); what.className = "what";
+    const w = auditWhat(e);
+    const b = document.createElement("span"); b.textContent = w.label; what.appendChild(b);
+    if (w.cmd) { const c = document.createElement("span"); c.className = "tg mono cmd"; c.textContent = w.cmd; what.appendChild(c); }
+    else if (e.target) { const g = document.createElement("span"); g.className = "tg mono"; g.textContent = e.target; what.appendChild(g); }
+    if (e.detail && e.detail.error) { const x = document.createElement("span"); x.className = "tg"; x.style.color = "var(--err)"; x.textContent = e.detail.error; what.appendChild(x); }
+    row.append(t, st, who, cat, what);
+    row.onclick = (ev) => {
+      if (ev.target.closest(".audit-detail")) return;
+      const open = row.querySelector(".audit-detail");
+      if (open) { open.remove(); audit.open = null; return; }
+      const pre = document.createElement("div"); pre.className = "audit-detail mono";
+      pre.textContent = JSON.stringify({ seq: e.seq, when: new Date(e.ts * 1000).toString(), who: e.actor, category: e.category, action: e.action,
+        target: e.target, ok: e.ok, detail: e.detail, hash: e.hash }, null, 2);
+      row.appendChild(pre); audit.open = e.seq;
+    };
+    if (audit.open === e.seq) row.onclick({ target: row });
+    return row;
+  }
+  async function renderAudit(live, before) {
+    const cats = $("audit-cats");
+    if (!cats.childElementCount) {
+      for (const [c, label] of AUDIT_CATS) {
+        const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.dataset.cat = c;
+        b.onclick = () => { audit.cat = c; renderAudit(); };
+        cats.appendChild(b);
+      }
+      $("audit-q").oninput = () => { clearTimeout(audit.timer); audit.timer = setTimeout(() => renderAudit(), 250); };
+      $("audit-who").onchange = () => renderAudit();
+      $("audit-export").onclick = async () => {
+        const v = $("audit-verdict"); v.hidden = false; v.className = "hint audit-verdict";
+        try {
+          const r = await (await fetch("/api/audit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "export" }) })).json();
+          if (r.error) throw new Error(r.error);
+          v.classList.add("ok"); v.textContent = "Saved " + (r.entries === 1 ? "1 entry" : r.entries + " entries") + " to " + r.path;
+        } catch (e) { v.classList.add("bad"); v.textContent = "Could not export: " + e.message; }
+      };
+      $("audit-verify").onclick = async () => {
+        const v = $("audit-verdict"); v.hidden = false; v.className = "hint audit-verdict"; v.textContent = "Checking every line…";
+        try {
+          const r = await (await fetch("/api/audit/verify")).json();
+          v.classList.add(r.ok ? "ok" : "bad");
+          v.textContent = r.ok ? "✓ Intact: " + (r.entries === 1 ? "the 1 entry is" : "all " + r.entries + " entries are") + " as written, in order."
+                               : "⚠ The log was changed: " + r.why + ". Entries before it are intact.";
+        } catch (e) { v.classList.add("bad"); v.textContent = "Could not check: " + e.message; }
+      };
+    }
+    cats.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.cat === audit.cat));
+    const p = new URLSearchParams({ limit: "200" });
+    if (audit.cat) p.set("category", audit.cat);
+    const q = $("audit-q").value.trim(); if (q) p.set("q", q);
+    const who = $("audit-who").value; if (who) p.set("who", who);
+    if (before) p.set("before", before);
+    let d = { entries: [], stats: {} };
+    try { d = await (await fetch("/api/audit?" + p)).json(); } catch (e) { if (live) return; }
+    const n = (d.stats && d.stats.entries) || 0;
+    $("audit-sub").textContent = n === 1 ? "1 entry" : n + " entries";
+    const list = $("audit-list");
+    if (!before) list.textContent = "";
+    else { const m = list.querySelector(".audit-more"); if (m) m.remove(); }
+    if (!d.entries.length && !before) {
+      const h = document.createElement("div"); h.className = "hint";
+      h.textContent = q || audit.cat || who ? "Nothing matches." : "Nothing yet. Changes you make in ByteBunker (settings, access, tools, machines, agents, deletions) are written here as they happen, with who made them.";
+      list.appendChild(h); return;
+    }
+    let day = before ? list.dataset.lastDay : "";
+    for (const e of d.entries) {
+      const dd = new Date(e.ts * 1000).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+      if (dd !== day) { const h = document.createElement("div"); h.className = "audit-day"; h.textContent = dd; list.appendChild(h); day = dd; }
+      list.appendChild(auditRow(e));
+    }
+    list.dataset.lastDay = day;
+    if (d.entries.length >= 200) {
+      const more = document.createElement("button"); more.type = "button"; more.className = "ghost-btn audit-more"; more.textContent = "Older entries";
+      more.onclick = () => renderAudit(false, d.entries[d.entries.length - 1].seq);
+      list.appendChild(more);
+    }
+  }
+
   async function renderUsage() {
     let u = {};
     try { u = await (await fetch("/api/usage")).json(); } catch (e) {}
@@ -5722,7 +5884,7 @@
     ["Models", "models", "list"], ["Deploy", "recipes", "recipes serve machines install dgx-serve"], ["Gateways", "gateways", "endpoints engines"],
     ["Cluster", "cluster", "gpu monitor nodes"], ["MCP servers", "mcp", "tools"], ["Skills", "skills", "tools"], ["Plugins", "plugins", "tools"],
     ["Agents", "agents", "master sultan run goal"], ["Workflows", "workflows", "prompts"], ["Jobs", "jobs", "schedule cron"],
-    ["Usage", "usage", "tokens cost"], ["Settings", "settings", "profiles roles updates"], ["Video studio", "video", ""],
+    ["Usage", "usage", "tokens cost"], ["Audit log", "audit", "changes history who security sandbox"], ["Settings", "settings", "profiles roles updates"], ["Video studio", "video", ""],
   ];
   function paletteItems() {
     const items = JUMPS.filter(([, s]) => { const n = document.querySelector(`[data-nav="${s}"]`); return n && !n.hidden; })

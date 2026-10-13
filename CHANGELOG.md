@@ -5,6 +5,18 @@ app opens on the new version's section, and Settings → What's new shows them a
 
 ## 0.6.3 — 2026-10-13
 
+### New
+- **Audit log** (sidebar → App → Audit log, and `bb audit`): every change
+  made in ByteBunker, who made it (the app, `bb`, a job) and whether it
+  worked. Settings, a chat's access, every terminal command that ran outside
+  the sandbox (and every one you refused), tool approvals, MCP servers,
+  gateways, machines, deploys, agents goals, deletions and exports. Filter,
+  search, click a line for everything it recorded. **Verify** shows whether
+  any line was changed, removed or moved since it was written; **Export**
+  saves a copy to Downloads. Keys and passwords are never written to it.
+- **Stop serving** on the Models screen, beside each model a machine of
+  yours serves.
+
 ### Fixed
 - **Agents on this computer start.** A goal run on the Mac the app runs on
   stopped at once with "missing required key 'llm.base_url'": the agents

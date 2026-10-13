@@ -34,6 +34,7 @@ class TraceLog:
         self._lock = threading.Lock()
         self._day = None
         self._fh = None
+        self.on_log = None          # called with each event after it is written (the audit log listens)
         threading.Thread(target=self.compress_old, daemon=True).start()
 
     # ---- writing ----
@@ -57,6 +58,11 @@ class TraceLog:
             self._fh.flush()
         if rolled:
             threading.Thread(target=self.compress_old, daemon=True).start()
+        if self.on_log:
+            try:
+                self.on_log(evt)
+            except Exception:   # noqa: BLE001 - a listener never breaks the trace log
+                pass
         return evt
 
     def compress_old(self):

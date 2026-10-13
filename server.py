@@ -41,6 +41,7 @@ import platform
 import sys
 import os
 import re
+import shutil
 import threading
 import time
 import urllib.error
@@ -67,6 +68,7 @@ import upstream as upstreammod
 import runner as runnermod
 import model_facts as factsmod
 import approvals as approvalsmod
+import audit as auditmod
 import changelog
 import updater as updatemod
 from version import VERSION
@@ -85,6 +87,9 @@ TRACE = TraceLog(DATA)
 # One ordered stream of everything that happens (GET /api/events), the runs
 # that outlive the request that started them, and one file per session.
 BUS = eventsmod.EventBus(runs_dir=os.path.join(DATA, "runs"))
+# Who changed what, when: settings, access, tools, machines, agents, deletions.
+# data/audit/audit.jsonl, hash-chained, never pruned (audit.py; the Audit screen).
+AUDIT = auditmod.AuditLog(DATA, BUS)
 RUNS = runsmod.RunRegistry(BUS, os.path.join(DATA, "runs", "index.jsonl"))
 SESSIONS = sessmod.SessionStore(os.path.join(DATA, "sessions"), legacy_path=os.path.join(DATA, "sessions.json"))
 
@@ -1048,6 +1053,83 @@ def last_used_model():
 AGENT_SLOT = threading.Lock()   # one goal at a time: the harness keys a goal's state by its directory
 
 
+AUDIT_SKIP = ("/api/chat", "/api/tool-call", "/api/usage-event", "/api/rate", "/api/upload", "/api/video",
+              "/api/update/check", "/api/netcheck")
+AUDIT_CATEGORY = {"settings": "settings", "profiles": "settings", "update": "settings", "config": "settings",
+                  "mcp": "tools", "plugins": "tools", "skills": "tools", "tools": "tools",
+                  "gateways": "serving", "monitors": "serving", "racks": "serving", "rack": "serving",
+                  "recipes": "serving", "machines": "serving", "engine": "serving",
+                  "agents": "agents", "jobs": "runs", "workflows": "runs", "runs": "runs",
+                  "approvals": "access", "terminal": "access",
+                  "sessions": "data", "projects": "data", "archive": "data", "export": "data"}
+
+
+def audit_action(method, path, body, query):
+    """What an API request changed, as (category, action, target, detail); None when it changed
+    nothing worth an audit line (chat traffic, tool calls, a session's own autosave)."""
+    body = body if isinstance(body, dict) else {}
+    act = str(body.get("action") or "")[:40]
+    q1 = lambda k: (query.get(k) or [None])[0]
+    if method == "DELETE":
+        return ("data", "session.delete", q1("id"), {}) if path == "/api/sessions" else None
+    if path in AUDIT_SKIP or path.endswith(("/turns", "/compress", "/tool-results")):
+        return None
+    if path == "/api/sessions" and act not in ("access", "rename", "set_project"):
+        return None                                  # the chat saving itself
+    if path == "/api/settings" and act == "update_seen":
+        return None
+    if path == "/api/rack" and act in ("show", "status", "logs", "recipes", "list", "ls"):
+        return None                                  # reading what a machine serves changes nothing
+    if path in ("/api/gateways", "/api/monitors") and act == "refresh":
+        return None
+    parts = [p for p in path.split("/")[2:] if p]
+    if not parts:
+        return None
+    cat = AUDIT_CATEGORY.get(parts[0], "settings")
+    if path.startswith("/api/runs/") and path.endswith("/cancel"):
+        return "runs", "run.cancel", parts[1] if len(parts) > 1 else None, {}
+    if path.startswith("/api/workflows/") and path.endswith("/run"):
+        return "runs", "workflow.run", parts[1] if len(parts) > 1 else None, {"params": body.get("params")}
+    if path == "/api/sessions" and act == "access":
+        cat = "access"
+    if path == "/api/audit":
+        return "data", "audit.export", None, {}
+    if path == "/api/approvals":
+        return "access", "approval." + str(body.get("decision") or "answer")[:20], body.get("id"), {}
+    if path == "/api/agents" and not act:
+        act = "run" if body.get("goal") else "settings"
+    if path in ("/api/gateways", "/api/monitors") and not act:
+        act = "add"
+    action = ".".join(parts).replace("-", "_") + ("." + act if act else "")
+    target = next((str(body[k]) for k in ("id", "name", "target", "rack", "ssh", "session") if body.get(k)), None) or q1("id")
+    detail = {k: v for k, v in body.items() if k not in ("action", "messages", "data", "content")}
+    return cat, action, target, detail
+
+
+AUDIT_OUTCOMES = {"rack": "serving", "machine": "serving", "recipe": "serving", "agents": "agents",
+                  "mcp": "tools", "update": "settings"}
+
+
+def audit_from_trace(evt):
+    """How the long jobs a request started ended (a deploy, a pairing, an install, a goal), and the
+    training-data export, which is a GET: from the trace log into the audit log."""
+    kind = evt.get("kind")
+    if kind == "export":
+        AUDIT.record("data", "export.training_data", None, True, examples=evt.get("examples"), query=evt.get("query"))
+    elif kind == "agent_run":
+        AUDIT.record("agents", "agents.run.finished", evt.get("id"), evt.get("exit") == 0 and not evt.get("killed"),
+                     goal=(evt.get("goal") or "")[:300], host=evt.get("host"), mode=evt.get("mode"),
+                     exit=evt.get("exit"), stopped=evt.get("killed") or None, via=evt.get("via"), ms=evt.get("ms"))
+    elif kind in AUDIT_OUTCOMES and evt.get("run") and ("ok" in evt or "exit" in evt):
+        f = {k: v for k, v in evt.items() if k not in ("ts", "kind", "action", "ok", "out", "output")}
+        ok = evt["ok"] if "ok" in evt else evt.get("exit") == 0
+        target = next((str(evt[k]) for k in ("target", "rack", "name", "id") if evt.get(k)), None)
+        AUDIT.record(AUDIT_OUTCOMES[kind], "%s.%s.finished" % (kind, evt.get("action") or "run"), target, ok, **f)
+
+
+TRACE.on_log = audit_from_trace
+
+
 def agents_spec():
     """This run's models for the harness (--spec): master, thinking and fast,
     from the Agents screen's choices, else the app's roles (big, thinking,
@@ -1855,23 +1937,29 @@ def terminal_call(args, sid, access, ask):
     sess = SESSIONS.get(sid) if sid and sessmod._ID.match(str(sid)) else None
     mode = access if access in cmdbox.MODES else ((sess or {}).get("access") or "local")
     wants_out = bool(args.pop("outside_sandbox", False))
-    ok_out = False
+    ok_out, how = False, "full access" if mode == "full" else None
     if mode != "full" and (wants_out or cmdbox.kind() is None):
         if (sess or {}).get("outside_always"):
-            ok_out = True
+            ok_out, how = True, "allowed every time in this chat"
         else:
             decision = ask({"command": args.get("command"), "mode": mode,
                             "why": "asks to run outside the sandbox" if wants_out else
                                    "this computer has no sandbox for commands"}, "outside")
             if decision == "always":
-                ok_out = True
+                ok_out, how = True, "allowed every time in this chat (from now on)"
                 if sess is not None:
                     SESSIONS.append(sid, "meta", outside_always=True)
             elif decision == "allow":
-                ok_out = True
+                ok_out, how = True, "allowed once"
             else:
                 note_access(sid, current=mode)
+                AUDIT.record("access", "command.outside_sandbox", sid, False,
+                             command=str(args.get("command") or "")[:1000], mode=mode, how="not allowed")
                 return ("you did not allow this command outside the sandbox", True), None
+    if how:
+        # every command that runs without the sandbox, and why it could
+        AUDIT.record("access", "command.outside_sandbox", sid, True,
+                     command=str(args.get("command") or "")[:1000], mode=mode, how=how)
     args["__bb_mode"], args["__bb_outside_ok"] = mode, ok_out
     note_access(sid, used="full" if ok_out or mode == "full" else mode, current=mode)
     return None, args
@@ -2227,13 +2315,17 @@ class Handler(BaseHTTPRequestHandler):
     # connection, which a client can only report as "the server stopped".
     def send_response(self, code, message=None):
         self._responded = True
+        self._code = code
         super().send_response(code, message)
 
     def _safe(self, handler):
         self._responded = False
+        self._code, self._audit_body, self._audit_reply = None, None, None
         IDLE["last"] = time.time()
+        auditmod.set_actor(self._client())
         try:
             handler()
+            self._audit_request()
         except (BrokenPipeError, ConnectionResetError):
             pass                                   # the client left
         except Exception as e:   # noqa: BLE001
@@ -2289,6 +2381,24 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         return True
 
+    def _audit_request(self):
+        """Every change made through the API, one audit line: what was asked, by whom, and whether it
+        worked. Chat traffic, tool calls and the app's own bookkeeping are not changes and stay out."""
+        if self.command not in ("POST", "DELETE") or self._code is None:
+            return
+        u = urllib.parse.urlparse(self.path)
+        what = audit_action(self.command, u.path, self._audit_body, urllib.parse.parse_qs(u.query))
+        if not what:
+            return
+        cat, action, target, detail = what
+        ok = self._code < 400
+        if not ok and self._audit_reply:
+            detail["error"] = str(self._audit_reply.get("error") or "")[:300]
+        try:
+            AUDIT.record(cat, action, target, ok, **detail)
+        except OSError as e:
+            print("audit log: %s" % e, file=sys.stderr)
+
     def _drain(self):
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -2302,6 +2412,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- helpers ----
     def _json(self, obj, code=200, close=False):
+        if code >= 400 and isinstance(obj, dict):
+            self._audit_reply = obj
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -2822,7 +2934,8 @@ class Handler(BaseHTTPRequestHandler):
         """Read and parse the JSON body; None (plus a 400 already sent) on garbage."""
         try:
             n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n) or b"{}")
+            self._audit_body = json.loads(self.rfile.read(n) or b"{}")
+            return self._audit_body
         except (ValueError, json.JSONDecodeError):
             self._json({"error": "invalid JSON body"}, 400, close=True)
             return None
@@ -3173,6 +3286,32 @@ class Handler(BaseHTTPRequestHandler):
             self._export(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         elif path == "/api/usage":
             self._json(usage_summary())
+        elif path == "/api/audit":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            g = lambda k: (q.get(k) or [None])[0]
+            try:
+                items = AUDIT.entries(category=g("category") or None, q=g("q"), before=g("before"),
+                                      limit=int(g("limit") or 200), who=g("who") or None)
+            except ValueError:
+                self._json({"error": "bad limit or before"}, 400)
+                return
+            self._json({"entries": items, "stats": AUDIT.stats(), "categories": list(auditmod.CATEGORIES)})
+        elif path == "/api/audit/verify":
+            self._json(AUDIT.verify())
+        elif path == "/api/audit/export":
+            # the whole file, as written, for someone else's records
+            try:
+                with open(AUDIT.path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                data = b""
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Disposition", 'attachment; filename="bytebunker-audit-%s.jsonl"' % time.strftime("%Y%m%d"))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            AUDIT.record("data", "audit.export", None, True, entries=AUDIT.stats()["entries"])
         elif path == "/api/video" or path.startswith("/api/video/"):
             self._video_get(path)
         else:
@@ -3267,7 +3406,7 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
                         "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
-                        "/api/update/apply", "/api/projects", "/api/terminal"):
+                        "/api/update/apply", "/api/projects", "/api/terminal", "/api/audit"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -3377,6 +3516,22 @@ class Handler(BaseHTTPRequestHandler):
             self._rack(body)
         elif path == "/api/racks":
             self._racks_admin(body)
+        elif path == "/api/audit":
+            if body.get("action") != "export":
+                self._json({"error": "expected {action: export}"}, 400)
+                return
+            # a copy in Downloads: a download link does nothing inside the desktop window
+            folder = os.path.expanduser("~/Downloads")
+            folder = folder if os.path.isdir(folder) else os.path.expanduser("~")
+            dest = os.path.join(folder, "bytebunker-audit-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
+            try:
+                shutil.copyfile(AUDIT.path, dest)
+            except FileNotFoundError:
+                open(dest, "w").close()
+            except OSError as e:
+                self._json({"error": str(e)[:200]}, 500)
+                return
+            self._json({"ok": True, "path": dest, "entries": AUDIT.stats()["entries"]})
         elif path == "/api/machines":
             self._machines_admin(body)
         elif path == "/api/agents":
