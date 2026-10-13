@@ -24,3 +24,19 @@ Connecting a worker by hand (an SSH address and **Test**) is still there, folded
 Type the goal and press **Run**. It runs on the server: closing or reloading this tab does not stop it, and opening Agents again follows it. **Stop** ends it on the worker. From a terminal: `bb agents "goal"`, `bb agents stop`.
 
 One goal runs at a time; a second one is refused with the one that is running.
+
+A goal that ends without an answer says how it ended and why (it timed out, it was stopped, the master failed). A goal on this computer stops cleanly when you quit or restart the app, instead of running on with no one to report to.
+
+## Spread the minions over several machines
+
+Minions are most of a goal's work, and each one spends its time waiting on its model. One machine serving their model runs a few at once; every machine that serves a minion model adds room.
+
+On [Agents](#agents) → Settings, under **Models**:
+
+1. **doers (minions)** is the main minion model; **at once** is how many it runs together (its engine's parallel slots: 4 for the recipes rack ships).
+2. **More engines for the minions** lists every other model your gateways serve. Tick the ones to add, with how many each runs at once. The same model on another machine shows with that machine's name.
+3. The line under it says where the minions will spread, and how many can run at once.
+
+During a goal each new minion goes to the engine with the most free room, and stays there (its prompt cache stays warm, its model the same). If its engine stops answering (refused, gone quiet mid-answer, overloaded), its calls move to another engine within about 20 seconds and it carries on. The master is told how many minions the engines can run, and plans to that. Each minion shows the engine it ran on.
+
+The master and the thinking roles keep their own models. A remote worker leaves out engines on this computer's loopback, which it cannot reach. Spreading needs the worker's harness from 0.7 (**Update** under Agent plane).

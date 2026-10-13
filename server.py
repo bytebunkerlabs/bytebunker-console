@@ -3222,7 +3222,10 @@ class Handler(BaseHTTPRequestHandler):
             st["pool_engines"] = [{k: e[k] for k in ("name", "model", "slots")}
                                   for e in minion_pool(a, a.get("slave_model") or (CFG.get("roles") or {}).get("fast"),
                                                        bool((a.get("ssh") or "").strip()))]
-            st["pool_supported"] = bool((a.get("harness") or {}).get("pool"))
+            # known once probed (a run, or Test); a harness on this computer is read on the spot
+            caps = a.get("harness") or ({} if (a.get("ssh") or "").strip() or not a.get("dir")
+                                        else agentmod.harness_caps(CFG))
+            st["pool_supported"] = bool(caps.get("pool"))
             runs = []
             for e in TRACE.events(time.strftime("%Y-%m-%d",
                                   time.localtime(time.time() - 14 * 86400))):

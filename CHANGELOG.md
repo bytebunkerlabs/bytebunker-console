@@ -3,6 +3,25 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.7.0 — 2026-10-13
+
+### New
+- **Minions spread over several machines.** Agents → Settings → More engines
+  for the minions: tick every model on your other machines (or the same model
+  on a second one) and how many each runs at once. Each minion goes to the
+  engine with the most free room and stays there; when an engine stops
+  answering, its minions' calls move to another within about 20 seconds and
+  they carry on. The master is told how many minions can run at once. Each
+  minion shows the engine it ran on.
+
+### Fixed
+- **A goal never ends silently.** If the master fails, the goal ends with the
+  reason; its answer is always kept; a goal without an answer says why.
+- **A goal on this computer stops with the app** (quitting or an update's
+  restart), instead of running on and losing its answer.
+- **Minions keep time for their answer to be checked**: on a slow model a
+  retry no longer comes back unchecked.
+
 ## 0.6.3 — 2026-10-13
 
 ### New
