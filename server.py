@@ -561,6 +561,7 @@ def deploy_chain(run, emit, target, recipe):
     code, killed = stream(rack_cmd(["up", recipe], rack), 3600)
     if code != 0:
         return fail("rack up %s exited %s: the log above says why" % (recipe, code), code or 1)
+    ensure_monitor(rack, say)
     if local:
         added = connect_local(emit)
     else:
@@ -825,6 +826,47 @@ def agent_plane_setup(run, emit, target):
     BUS.publish("config", "agents", {"plane": target})
     say("agents work on %s now" % ("this computer" if local else target))
     return done(True)
+
+
+def relink_rack(rack):
+    """Re-read a paired rack's engine and monitor (rack pair --json) and keep them: after serving, so a
+    monitor started then reaches Cluster without pairing again. Returns what the app uses now."""
+    import subprocess
+    try:
+        out = subprocess.run(rack_cmd(["pair", "--json"], rack), capture_output=True, text=True, timeout=30)
+        info = racksmod.parse(out.stdout)
+        engine_url, monitor_url, _ = racksmod.find(rack["ssh"], info)
+        racksmod.apply(CFG, {"target": rack["ssh"], "info": info, "engine_url": engine_url,
+                             "monitor_url": monitor_url, "app": rack.get("app") or KEYS.app_name()},
+                       gw_normalize=gwmod.normalize)
+    except (racksmod.PairError, OSError, subprocess.SubprocessError, KeyError):
+        return {}
+    save_config()
+    GW.refresh(force=True)
+    MON.invalidate()
+    r2 = rack_named(rack["name"]) or {}
+    return {k: r2.get(k) for k in ("gateway", "monitor") if r2.get(k)}
+
+
+def ensure_monitor(rack, say=lambda t: None):
+    """The machine's rack monitor, started when it is not running: what puts it on Cluster (GPU, memory,
+    the engine's served tokens). Not fatal: serving works without it."""
+    import subprocess
+    try:
+        st = subprocess.run(rack_cmd(["monitor", "status"], rack), capture_output=True, text=True, timeout=60)
+        if "not running" not in (st.stdout + st.stderr) and st.returncode == 0:
+            return True
+        say("== the rack monitor (Cluster's GPU, memory and served tokens)")
+        up = subprocess.run(rack_cmd(["monitor", "up"], rack), capture_output=True, text=True, timeout=600)
+        for ln in (up.stdout or "").splitlines()[-6:]:
+            say(_ANSI.sub("", ln))
+        if up.returncode != 0:
+            say("the monitor did not start (rack monitor up there): %s" % racksmod._last(up.stderr or up.stdout))
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError) as e:
+        say("the monitor did not start: %s" % e)
+        return False
 
 
 def connect_local(emit=None):
@@ -1752,6 +1794,17 @@ FACTS = factsmod.ModelFacts(os.path.join(DATA, "model_facts.json"))
 APPROVALS = approvalsmod.Approvals(BUS)
 CLIENT_RESULTS = runnermod.ClientResults()
 _RUNNER = []
+
+
+def tls_info():
+    """Where HTTPS gets its trusted certificates, and how many: what broke the update check (CI checks it)."""
+    import ssl
+    paths = ssl.get_default_verify_paths()
+    try:
+        n = ssl.create_default_context().cert_store_stats().get("x509_ca", 0)
+    except Exception:   # noqa: BLE001
+        n = 0
+    return {"cafile": os.environ.get("SSL_CERT_FILE") or paths.cafile or paths.openssl_cafile, "ca_certs": n}
 
 
 # ------------------------------------------------- a chat's command sandbox --
@@ -2894,6 +2947,7 @@ class Handler(BaseHTTPRequestHandler):
                         "keep_running": bool(CFG.get("keep_running")), "roles": CFG.get("roles") or {},
                         "update_check_at_start": bool(CFG.get("update_check_at_start")),
                         "updated": UPDATE_STATE.get("updated"), "update_failed": UPDATE_STATE.get("update_failed"),
+                        "tls": tls_info(),
                         "sandbox": {"kind": cmdbox.kind(), "wsl": cmdbox.wsl_status(),
                                     "wsl_restart_pending": bool(CFG.get("wsl_restart_pending"))}})
         elif path == "/api/gateways":
@@ -3672,6 +3726,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:   # noqa: BLE001
                 emit({"error": str(e)})
                 code, killed = -1, "error"
+            if code == 0 and action == "up":
+                ensure_monitor(r, lambda t: emit({"line": t}))
+                if not r.get("local"):
+                    # its engine and monitor as the rack says now: a monitor started just now joins Cluster
+                    got = relink_rack(r)
+                    if got:
+                        emit({"line": "this app talks to it now: " + ", ".join("%s %s" % kv for kv in sorted(got.items()))})
             if code == 0 and action == "up" and r.get("local"):
                 added = connect_local(emit)
                 if added:

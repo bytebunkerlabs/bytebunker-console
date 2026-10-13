@@ -169,7 +169,11 @@ class AddARack(unittest.TestCase):
         app = r["rack"]["app"]
         self.assertEqual(text(os.path.join(self.f, "remote.log")).splitlines(),
                          ["%s rack %s" % (app, c) for c in ("recipes --json", "status", "platform --json", "version --json",
-                                                             "recipes show qwen3-8b", "up qwen3-8b")])
+                                                             "recipes show qwen3-8b", "up qwen3-8b",
+                                                             # after serving, its monitor (for Cluster), started when it is not running
+                                                             "monitor status", "monitor up",
+                                                             # and what it says now, so that monitor joins Cluster
+                                                             "pair --json")])
         # after pairing, ssh only ever went as the app, with nothing else offered
         calls = [l for l in text(os.path.join(self.f, "ssh.log")).splitlines() if not l.startswith("-G")]
         self.assertTrue(all("IdentitiesOnly=yes" in c and "IdentityAgent=none" in c and "ControlPath=none" in c

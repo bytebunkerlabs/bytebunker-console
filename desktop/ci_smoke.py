@@ -97,6 +97,14 @@ class FakeMonitor(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+# HTTPS: the packaged OpenSSL must use the system's certificates, not the build machine's Python's
+# (this machine has that Python, so an HTTPS call here would pass either way: check where they come from)
+tls = json.loads(get("/api/settings")[1]).get("tls") or {}
+caf = str(tls.get("cafile") or "")
+checks.append(("tls: system certificates", (tls.get("ca_certs") or 0) > 0 and "Python.framework" not in caf
+               and "hostedtoolcache" not in caf.lower()))
+print("tls:", json.dumps(tls))
+
 mon = ThreadingHTTPServer(("127.0.0.1", 0), FakeMonitor)
 threading.Thread(target=mon.serve_forever, daemon=True).start()
 mport = mon.server_address[1]

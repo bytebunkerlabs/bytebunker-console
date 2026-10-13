@@ -43,6 +43,23 @@ def code_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def use_system_certs():
+    """A packaged app's OpenSSL looks for trusted certificates where the build
+    machine's Python keeps them (/Library/Frameworks/Python.framework/... on a
+    Mac), which a user's computer does not have: every HTTPS call failed with
+    CERTIFICATE_VERIFY_FAILED, the update check first. Use the system's own
+    (Windows' store already works)."""
+    if not getattr(sys, "frozen", False) or os.environ.get("SSL_CERT_FILE"):
+        return
+    for p in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+              "/etc/ssl/ca-bundle.pem"):
+        if os.path.isfile(p):
+            os.environ["SSL_CERT_FILE"] = p          # children (--mcp, bb) inherit it
+            return
+
+
+use_system_certs()
+
 if code_root() not in sys.path:
     sys.path.insert(0, code_root())
 from version import VERSION  # noqa: E402  (the one place the version lives)
