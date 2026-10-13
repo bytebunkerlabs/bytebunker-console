@@ -4263,18 +4263,63 @@
     card.textContent = "";
     const head = document.createElement("div"); head.className = "skill-head";
     head.innerHTML = '<div class="skill-id"><b>Agent plane</b><span class="src mono">where agents work</span></div>';
-    const find = document.createElement("button"); find.type = "button"; find.className = "ghost-btn"; find.textContent = d.at ? "Look again" : "Find machines";
+    const onlyHere = !(d.planes || []).some((p) => p.target !== "local");
+    const find = document.createElement("button"); find.type = "button"; find.className = onlyHere ? "solid-btn" : "ghost-btn";
+    find.textContent = d.at ? "Look again" : "Find machines";
     head.appendChild(find); card.appendChild(head);
     const how = document.createElement("div"); how.className = "hint";
-    how.textContent = "Every machine your ssh reaches shows here. Pick one: ByteBunker checks it, brings the harness, sets up the lightest sandbox that works there (bubblewrap on Linux and WSL2, no image; podman elsewhere), tests it, and switches agents to it. Machines that serve models stay for models.";
+    how.textContent = "Every machine your ssh reaches shows here. Pick one: ByteBunker checks it, installs what is missing, brings the harness, sets up its sandbox (Seatbelt on a Mac, bubblewrap on Linux and WSL2: no image, nothing to build), tests it, and switches agents to it. Machines that serve models stay for models.";
     card.appendChild(how);
     find.onclick = async () => {
       find.disabled = true; find.textContent = "Looking…";
       try { await fetch("/api/machines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "find" }) }); } catch (e) {}
       planeCard().then(() => agentsTab(state.agentsTab));
     };
-    const log = document.createElement("pre"); log.className = "skill-body"; log.style.whiteSpace = "pre-wrap"; log.hidden = true; log.id = "agents-plane-log";
-    for (const p of d.planes || []) {
+    // the last Work here's output stays on screen (a redraw used to wipe it, error and all)
+    const log = document.createElement("div"); log.className = "plane-log"; log.id = "agents-plane-log";
+    const drawLog = () => {
+      const L = state.planeLog;
+      log.textContent = ""; log.hidden = !L;
+      if (!L) return;
+      const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap";
+      for (const ln of L.lines) { const sp = document.createElement("span"); sp.textContent = ln.t + "\n"; if (ln.err) sp.className = "plane-err"; pre.appendChild(sp); }
+      log.appendChild(pre);
+      for (const n of L.needs) {
+        const row = document.createElement("div"); row.className = "plane-need";
+        const t = document.createElement("span"); t.textContent = "Needs " + n.why + ". One line, with your password:"; row.appendChild(t);
+        const c = document.createElement("code"); c.textContent = n.command; row.appendChild(c);
+        const ib = document.createElement("button"); ib.type = "button"; ib.className = "solid-btn"; ib.textContent = "Install in a terminal";
+        ib.onclick = async () => {
+          const r = await (await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "plane_install", target: L.target, what: n.need }) })).json();
+          ib.textContent = r.opened ? "Opened: run it, then Try again" : "Run it there: " + (r.command || "");
+        };
+        row.appendChild(ib); log.appendChild(row);
+      }
+      if (L.done && !L.ok) {
+        const again = document.createElement("button"); again.type = "button"; again.className = "ghost-btn"; again.textContent = "Try again";
+        again.onclick = () => { const pl = (d.planes || []).find((x) => x.target === L.target); if (pl) runPlane(pl, true); };
+        log.appendChild(again);
+      }
+    };
+    state.planeDraw = drawLog;                 // the card on screen now: a run started before a redraw writes here
+    const runPlane = async (p, quiet) => {
+      if (!quiet && !confirm("Agents on " + p.name + "?\n\nByteBunker checks it, installs what is missing, brings the harness there, sets up its sandbox and switches agents to it." + (p.target === "local" ? "\n\nThis computer is the exception to running agents on a separate machine: each task runs in its own sandbox." : ""))) return;
+      const L = state.planeLog = { target: p.target, name: p.name, lines: [], needs: [], done: false, ok: false };
+      const redraw = () => { state.planeDraw(); const pre = document.querySelector("#agents-plane-log pre"); if (pre) pre.scrollTop = pre.scrollHeight; };
+      const say = (t, err) => { L.lines.push({ t, err }); redraw(); };
+      for (const b of card.querySelectorAll(".deploy-row button")) b.disabled = true;
+      try {
+        await postFrames("/api/agents", { action: "plane", target: p.target }, (o) => {
+          if (o.need) { L.needs.push(o); redraw(); }
+          else if (o.line != null) say(o.line);
+          else if (o.error) say("\u2717 " + o.error, true);
+          else if (o.phase === "done") { L.done = true; L.ok = o.exit === 0; say(L.ok ? "\u2713 agents work on " + p.name + " now" : "\u2014 stopped \u2014", !L.ok); }
+        });
+      } catch (e) { L.done = true; say("\u2717 " + e.message, true); }
+      renderAgents();
+    };
+    const planes = (d.planes || []).slice().sort((a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0));
+    for (const p of planes) {
       const el = document.createElement("div"); el.className = "deploy-row"; el.dataset.plane = p.target;
       const id = document.createElement("div"); id.className = "deploy-id";
       const b = document.createElement("b"); b.textContent = p.name; id.appendChild(b);
@@ -4282,31 +4327,20 @@
       el.appendChild(id);
       const pill = document.createElement("span"); pill.className = "pill" + (p.current ? " ok" : "");
       pill.textContent = p.current ? "agents work here" : p.kind; el.appendChild(pill);
-      if (p.selectable && !p.current) {
-        const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn"; go.textContent = "Work here";
-        go.onclick = async () => {
-          if (!confirm("Agents on " + p.name + "?\n\nByteBunker checks it, brings the harness there, sets up its sandbox (with podman, an image: a few minutes the first time) and switches agents to it." + (p.target === "local" ? "\n\nThis computer is the exception to running agents on a separate machine: each task runs in its own sandbox." : ""))) return;
-          log.hidden = false; log.textContent = "";
-          const say = (t) => { log.textContent += t + "\n"; log.scrollTop = log.scrollHeight; };
-          go.disabled = true;
-          try {
-            await postFrames("/api/agents", { action: "plane", target: p.target }, (o) => {
-              if (o.line != null) say(o.line);
-              else if (o.error) say("error: " + o.error);
-              else if (o.phase === "done") say(o.exit === 0 ? "— ready —" : "— stopped —");
-            });
-          } catch (e) { say("error: " + e.message); }
-          go.disabled = false;
-          renderAgents();
-        };
+      if (p.current) el.classList.add("plane-current");
+      if (p.selectable && (!p.current || p.outdated)) {
+        const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn";
+        go.textContent = p.current ? "Update" : "Work here";
+        if (p.current) go.title = "Its agents harness is older than this app's: bring the new one (the sandbox, data access, fixes)";
+        go.onclick = () => runPlane(p, p.current);
         el.appendChild(go);
       }
       card.appendChild(el);
     }
-    if (!(d.planes || []).some((p) => p.target !== "local")) {
+    if (onlyHere) {
       const n = document.createElement("div"); n.className = "hint"; n.textContent = "Only this computer so far: Find machines lists the rest."; card.appendChild(n);
     }
-    card.appendChild(log);
+    card.appendChild(log); drawLog();
   }
 
   function workerSetupForm(d) {
@@ -4348,6 +4382,12 @@
     }
   }
   for (const b of document.querySelectorAll("#agents-tabs button")) b.onclick = () => agentsTab(b.dataset.atab);
+  // Agents > Settings, scrolled to the Agent plane card, which flashes once
+  function showPlane() {
+    agentsTab("settings");
+    const c = $("agents-plane");
+    if (c) { c.scrollIntoView({ behavior: "smooth", block: "start" }); c.classList.remove("flash"); void c.offsetWidth; c.classList.add("flash"); }
+  }
   function agentsSummary(d) {
     const el = $("agents-summary"); el.textContent = "";
     const line = document.createElement("div"); line.className = "sum-line";
@@ -4357,7 +4397,7 @@
       (d.master_model ? "  ·  master " + d.master_model : "") + (d.slave_model ? "  ·  doers " + d.slave_model : "");
     line.appendChild(where);
     const set = document.createElement("button"); set.type = "button"; set.className = "linky"; set.textContent = d.enabled ? "Settings" : "Set up agents";
-    set.onclick = () => agentsTab("settings"); line.appendChild(set);
+    set.onclick = d.enabled ? () => agentsTab("settings") : showPlane; line.appendChild(set);
     el.appendChild(line);
   }
   async function renderAgents() {
@@ -4387,24 +4427,15 @@
         "Agents pay off with a second machine for the workers' model, or a separate worker. → [Agents](help:agents)"));
     }
 
+    // where everything runs, in one line: models, this app, agents
     const topo = $("agents-topology");
-    const planes = [
-      ["Model plane", gws.map((g) => g.name).join(", ") || "no gateway yet", "serve the LLM only — no agent code runs here"],
-      ["Control plane", "this app", "launches goals and watches; runs no agent code"],
-      ["Agent plane", !d.enabled ? "none yet" : d.mode === "ssh" ? d.host : "this computer", !d.enabled ? "pick one under Agent plane"
-        : d.isolated ? "a separate host; one rootless podman container per agent, no network unless granted"
-        : "this computer, the exception: each task in its own container"],
-    ];
-    topo.innerHTML = "<div class='glabel'>Topology</div>";
-    for (const [name, host, note] of planes) {
-      const row = document.createElement("div");
-      row.className = "plane-row";
-      row.innerHTML = "<b></b><span class='mono'></span><span class='note'></span>";
-      row.children[0].textContent = name;
-      row.children[1].textContent = host;
-      row.children[2].textContent = note;
-      topo.appendChild(row);
-    }
+    topo.textContent = "";
+    const tl = document.createElement("div"); tl.className = "topo-line";
+    const part = (k, v) => { const sp = document.createElement("span"); const b = document.createElement("b"); b.textContent = k + " "; sp.appendChild(b); sp.appendChild(document.createTextNode(v)); tl.appendChild(sp); };
+    part("Models", gws.filter((g) => g.name !== "this computer").map((g) => g.name).join(", ") || (gws.length ? "this computer" : "none yet"));
+    part("Control", "this app");
+    part("Agents", !d.enabled ? "off: pick a machine below" : d.mode === "ssh" ? d.host : "this computer");
+    topo.appendChild(tl);
     if (d.enabled) {
       const off = document.createElement("button"); off.type = "button"; off.className = "linky"; off.style.marginTop = "6px";
       off.textContent = "disconnect this worker";
@@ -4418,7 +4449,7 @@
     if (!d.enabled) {
       const warn = document.createElement("div");
       warn.className = "msg-note";
-      warn.textContent = "Agents are off. Pick where they work under Agent plane, or connect a worker by hand below.";
+      warn.textContent = "Agents are off. Pick where they work under Agent plane below, or connect a worker by hand.";
       topo.appendChild(warn);
       const byHand = document.createElement("details");
       const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Connect a worker by hand"; byHand.appendChild(sm);
@@ -4427,7 +4458,7 @@
     } else if (!d.isolated) {
       const warn = document.createElement("div");
       warn.className = "msg-note";
-      warn.textContent = "Agents work on this computer, beside the app: the exception to a separate worker. Each task runs in its own container; " +
+      warn.textContent = "Agents work on this computer, beside the app: the exception to a separate worker. Each task runs in its own sandbox; " +
         "the master runs here.";
       topo.appendChild(warn);
     }
@@ -4451,7 +4482,11 @@
 
     $("agent-run").disabled = !d.enabled || state.streaming;
     state.agentsOn = !!d.enabled;
-    $("agent-launch-note").textContent = d.enabled ? "" : "Agents are off: set them up in Settings";
+    const note = $("agent-launch-note"); note.textContent = "";
+    if (!d.enabled) {
+      const go = document.createElement("button"); go.type = "button"; go.className = "linky"; go.textContent = "Agents are off: set them up \u2192";
+      go.onclick = showPlane; note.appendChild(go);
+    }
     if (d.enabled && !state.streaming) attachAgentRun();
 
     renderAgentSlaves();
@@ -4580,8 +4615,14 @@
       const mc = document.createElement("div");
       mc.className = "card live-card"; mc.style.gap = "6px";
       const mh = document.createElement("div"); mh.className = "skill-head";
-      mh.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono live-dot'>\u25c6 deciding</span>";
+      mh.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono master-state'></span>";
       mh.querySelector("b").textContent = (d.master_name || "Master") + " \u00b7 master";
+      // working only while a goal runs; afterwards, how its last goal ended
+      const last = d.master[d.master.length - 1] || {};
+      const ended = last.name === "final_answer" || last.kind === "final_answer";
+      const st = mh.querySelector(".master-state");
+      if (d.running) { st.textContent = "\u25c6 deciding"; st.classList.add("live-dot"); }
+      else { st.textContent = ended ? "\u2713 answered" + (last.ts ? " \u00b7 " + relTime(last.ts * 1000) : "") : "idle"; mc.classList.remove("live-card"); }
       mh.querySelector(".src").textContent = d.master.length + " recent decisions";
       mc.appendChild(mh);
       const ev = document.createElement("div");

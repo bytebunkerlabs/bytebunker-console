@@ -358,11 +358,18 @@ class AddARack(unittest.TestCase):
         frames = [json.loads(x["data"]) for x in frames]
         lines = [x.get("line") for x in frames if x.get("line")]
         self.assertEqual(frames[-1]["exit"], 0, frames)
-        self.assertIn("sandbox: podman version 5.0.0", lines)
-        self.assertIn("config/config.yaml made from the example (runner: podman)", lines)
+        # the stand-in ssh runs here: a Mac picks Seatbelt (nothing to install, no image); elsewhere,
+        # without bubblewrap, the stand-in podman
+        # (a Linux CI runner may have, or install, bubblewrap: then it is that, with no image either)
+        mac = sys.platform == "darwin"
+        light = mac or any(l.startswith("sandbox: bubblewrap") for l in lines)
+        self.assertIn("sandbox: Seatbelt, macOS's own: nothing to install" if mac else
+                      next((l for l in lines if l.startswith("sandbox: bubblewrap")), "sandbox: podman version 5.0.0"), lines)
+        runner = "auto" if light else "podman"
+        self.assertIn("config/config.yaml made from the example (runner: %s)" % runner, lines)
         self.assertIn("agents work on worker1 now", lines)
         with open(os.path.join(self.f, "home", "bytebunker-harness", "config", "config.yaml")) as f:
-            self.assertIn("runner: podman", f.read())
+            self.assertIn("runner: " + runner, f.read())
         cfg = json.loads(text(self.srv.cfg))
         self.assertEqual((cfg["agents"]["enabled"], cfg["agents"]["ssh"]), (True, "worker1"))
         st, d = self.srv.request("GET", "/api/agents/planes")

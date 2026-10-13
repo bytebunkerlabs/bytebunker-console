@@ -598,39 +598,50 @@ PLANE_CHECK = r'''
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 echo "system: $(uname -sm)"
 RT=""
-# Linux and WSL2: bubblewrap when it can make a sandbox and systemd can limit it (no image, no daemon)
-if [ "$(uname -s)" = Linux ] && command -v bwrap >/dev/null 2>&1 \
-   && systemctl --user is-system-running 2>/dev/null | grep -qE '^(running|degraded)'; then
+bwrap_ok() {
+  command -v bwrap >/dev/null 2>&1 && systemctl --user is-system-running 2>/dev/null | grep -qE '^(running|degraded)' || return 1
   B="--ro-bind /usr /usr"
   for d in /bin /sbin /lib /lib32 /lib64; do
     if [ -L "$d" ]; then B="$B --symlink $(readlink "$d") $d"; elif [ -d "$d" ]; then B="$B --ro-bind $d $d"; fi
   done
-  if bwrap --unshare-all --die-with-parent $B --proc /proc --dev /dev true 2>/dev/null; then RT=bwrap; fi
-fi
+  bwrap --unshare-all --die-with-parent $B --proc /proc --dev /dev true 2>/dev/null
+}
+case "$(uname -s)" in
+  Darwin)
+    # a Mac: Seatbelt, macOS's own sandbox (no VM, no image, nothing to install)
+    if command -v sandbox-exec >/dev/null 2>&1; then RT=seatbelt; fi ;;
+  Linux)
+    if bwrap_ok; then RT=bwrap
+    elif ! command -v bwrap >/dev/null 2>&1; then
+      # bubblewrap is one package: installed now when sudo needs no password, else you run one line
+      if command -v apt-get >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        echo "installing bubblewrap"
+        sudo -n apt-get install -y bubblewrap >/dev/null 2>&1 && bwrap_ok && RT=bwrap
+      fi
+      [ -n "$RT" ] || echo "BB_NEED bubblewrap"
+    fi ;;
+esac
 if [ -z "$RT" ]; then
   if command -v podman >/dev/null 2>&1; then RT=podman; elif command -v docker >/dev/null 2>&1; then RT=docker; fi
+  [ -n "$RT" ] && echo "note: using $RT until bubblewrap is there"
 fi
 if [ -z "$RT" ]; then
-  case "$(uname -s)" in
-    Darwin) echo "BB_ERR no container runtime here: brew install podman && podman machine init && podman machine start, then pick it again" ;;
-    *) echo "BB_ERR no sandbox here: sudo apt install -y bubblewrap (the lightest), then pick it again" ;;
-  esac
+  echo "BB_ERR no sandbox here yet: install bubblewrap (one line, needs your password), then press Work here again"
   exit 4
 fi
-if [ "$RT" = podman ] && [ "$(uname -s)" = Darwin ] && ! podman info >/dev/null 2>&1; then
-  podman machine inspect >/dev/null 2>&1 || { echo "BB_ERR podman has no Linux VM yet: podman machine init && podman machine start, then pick it again"; exit 4; }
-  echo "starting podman's Linux VM"
-  podman machine start >/dev/null 2>&1 || { echo "BB_ERR podman's VM did not start: podman machine start"; exit 4; }
-fi
-if [ "$RT" = bwrap ]; then echo "sandbox: bubblewrap $(bwrap --version 2>/dev/null | awk '{print $2}'), limits by systemd: no image to build"
-else echo "sandbox: $($RT --version 2>/dev/null | head -1)"; fi
+case "$RT" in
+  seatbelt) echo "sandbox: Seatbelt, macOS's own: nothing to install" ;;
+  bwrap) echo "sandbox: bubblewrap $(bwrap --version 2>/dev/null | awk '{print $2}'), limits by systemd: no image to build" ;;
+  *) echo "sandbox: $($RT --version 2>/dev/null | head -1)" ;;
+esac
 if ! command -v uv >/dev/null 2>&1; then
   echo "installing uv (runs the harness's Python) into ~/.local/bin"
   curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || { echo "BB_ERR could not install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 4; }
 fi
 echo "uv: $(uv --version 2>/dev/null)"
 if [ "$(uname -s)" = Linux ] && command -v loginctl >/dev/null 2>&1 && [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != yes ]; then
-  echo "note: linger is off, so agents stop when you log out there (once: sudo loginctl enable-linger $USER)"
+  if sudo -n true 2>/dev/null; then sudo -n loginctl enable-linger "$USER" && echo "linger on: agents keep working after you log out"
+  else echo "BB_NEED linger"; fi
 fi
 echo "BB_RUNTIME=$RT"
 '''
@@ -638,7 +649,7 @@ echo "BB_RUNTIME=$RT"
 PLANE_BUILD = r'''
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$BB_DIR" || exit 4
-RUNNER=$BB_RT; [ "$BB_RT" = bwrap ] && RUNNER=auto
+RUNNER=$BB_RT; case "$BB_RT" in bwrap|seatbelt) RUNNER=auto ;; esac
 if [ ! -f config/config.yaml ] && [ -f config/config.example.yaml ]; then
   sed "s/^\(  *runner:\).*/\1 $RUNNER/" config/config.example.yaml > config/config.yaml
   echo "config/config.yaml made from the example (runner: $RUNNER)"
@@ -646,11 +657,43 @@ elif [ -f config/config.yaml ] && ! grep -qE "^ +runner: *$RUNNER( |$)" config/c
   sed "s/^\(  *runner:\).*/\1 $RUNNER/" config/config.yaml > config/config.yaml.new && mv config/config.yaml.new config/config.yaml
   echo "config/config.yaml: sandbox runner set to $RUNNER"
 fi
-if [ "$BB_RT" = bwrap ]; then echo "bubblewrap runs the agents' code directly: no image"; exit 0; fi
+case "$BB_RT" in bwrap|seatbelt) echo "the sandbox runs the agents' code directly: no image"; exit 0 ;; esac
 echo "building the sandbox image (the first time takes a few minutes)"
 "$BB_RT" build -q -f docker/Dockerfile.slave -t bytebunker-slave:latest . || exit 5
 echo "sandbox image: bytebunker-slave:latest"
 '''
+
+
+# What a worker may need that only you can install (it asks for your password): the exact line,
+# opened in a terminal by "Install in a terminal". Nothing else is ever run this way.
+PLANE_NEEDS = {
+    "bubblewrap": {"command": "sudo apt-get install -y bubblewrap",
+                   "why": "bubblewrap, the sandbox agents run in on Linux"},
+    "linger": {"command": "sudo loginctl enable-linger \"$USER\"",
+               "why": "linger, so agents keep working after you log out there"},
+}
+
+
+def open_install_terminal(target, what):
+    """A terminal on this computer that runs one of PLANE_NEEDS there (over ssh with a terminal, so
+    sudo can ask for the password) and waits for Enter."""
+    import shlex
+    import subprocess
+    need = PLANE_NEEDS[what]
+    remote = target != racksmod.LOCAL
+    line = ("ssh -t %s %s" % (shlex.quote(target), shlex.quote(need["command"]))) if remote else need["command"]
+    if not os.environ.get("BYTEBUNKER_DESKTOP") or sys.platform != "darwin":
+        return {"opened": False, "command": line}
+    d = os.path.join(os.path.dirname(CONFIG_PATH), "terminal")
+    os.makedirs(d, exist_ok=True)
+    script = os.path.join(d, "install-%s.command" % what)
+    with open(script, "w", encoding="utf-8") as f:
+        f.write("#!/bin/bash\n# opened from ByteBunker: %s\necho 'ByteBunker installs %s%s.'\necho\n%s\n"
+                "echo\nread -r -p 'Done. Press Enter, then Work here again in ByteBunker. ' _\n" % (
+                    need["why"], need["why"], (" on " + target) if remote else "", line))
+    os.chmod(script, 0o700)
+    subprocess.Popen(["open", script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"opened": True, "command": line}
 
 
 def harness_source():
@@ -672,12 +715,14 @@ def agent_planes():
             pass
     a = CFG.get("agents") or {}
     current = (a.get("ssh") or racksmod.LOCAL) if a.get("enabled") else ""
+    # the worker's harness predates data access and the light sandboxes: Work here again updates it
+    outdated = bool(current) and not (a.get("harness") or {}).get("access")
     out = []
     here = _machines.get("here") or {}
     out.append({"target": racksmod.LOCAL, "name": "This computer", "description": here.get("description") or "",
                 "kind": "this computer", "selectable": True, "current": current == racksmod.LOCAL,
-                "note": "the exception: agents beside this app, each task in its own sandbox"
-                        + (" (a container in podman's Linux VM)" if sys.platform == "darwin" else "")})
+                "note": ("ready: Seatbelt, macOS's own sandbox, nothing to install; the exception: agents beside this app"
+                         if sys.platform == "darwin" else "the exception: agents beside this app, each task in its own sandbox")})
     for m in annotate_machines(_machines.get("list") or []):
         if not m.get("ok"):
             continue
@@ -688,13 +733,15 @@ def agent_planes():
                     "current": current in names,
                     "has": m.get("has") or [],
                     "note": "serves models: agents there would slow them down" if serves else
-                            ("bubblewrap is there" if "bwrap" in (m.get("has") or []) else
-                             "podman is there" if "podman" in (m.get("has") or []) else
-                             "docker is there" if "docker" in (m.get("has") or []) else
-                             "needs a sandbox: bubblewrap on Linux, podman on a Mac")})
+                            ("ready: Seatbelt, nothing to install" if m.get("platform") == "mac" else
+                             "bubblewrap is there" if "bwrap" in (m.get("has") or []) else
+                             "bubblewrap gets installed (your password, once)")})
     if current and current != racksmod.LOCAL and not any(p["current"] for p in out):
         out.append({"target": current, "name": current, "description": "", "kind": "machine", "selectable": True,
                     "current": True, "note": "the worker set before; Find machines to see it here"})
+    for p in out:
+        if p.get("current"):
+            p["outdated"] = outdated
     return out
 
 
@@ -720,6 +767,10 @@ def agent_plane_setup(run, emit, target):
                 emit({"error": text[7:]})
             elif text.startswith("BB_RUNTIME="):
                 rt["name"] = text.split("=", 1)[1].strip()
+            elif text.startswith("BB_NEED "):
+                what = text[8:].strip()
+                if what in PLANE_NEEDS:
+                    emit({"need": what, "command": PLANE_NEEDS[what]["command"], "why": PLANE_NEEDS[what]["why"]})
             else:
                 say(text)
         return agentmod.run_streaming(argv, ROOT, on_line, run.cancel_event, timeout_s=timeout)
@@ -2897,7 +2948,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/agents/slaves":
             # the goal on screen is the running one, when the harness named it (BB_RUN)
             going = RUNS.active("agents")
-            self._json(agentmod.recent_slaves(CFG, goal_id=going[0].meta.get("goal_id") if going else None))
+            out = agentmod.recent_slaves(CFG, goal_id=going[0].meta.get("goal_id") if going else None)
+            out["running"] = bool(going)             # whether the master is working now, not just its last events
+            self._json(out)
         elif path == "/api/agents/stats":
             self._json(agentmod.stats(CFG))
         elif path == "/api/agents/slave":
@@ -3329,6 +3382,14 @@ class Handler(BaseHTTPRequestHandler):
             save_config()
             TRACE.log("agents", action="court", roles=sorted(court["roles"]))
             self._json({"ok": True, "court": court})
+            return
+        if body.get("action") == "plane_install":
+            target, what = str(body.get("target") or "").strip(), str(body.get("what") or "")
+            if what not in PLANE_NEEDS or (target != racksmod.LOCAL and not racksmod.TARGET.match(target)):
+                self._json({"error": "nothing to install by that name"}, 400)
+                return
+            TRACE.log("agents", action="plane_install", target=target, what=what)
+            self._json(open_install_terminal(target, what))
             return
         if body.get("action") == "plane":
             target = str(body.get("target") or "").strip()

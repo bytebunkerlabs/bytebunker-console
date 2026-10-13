@@ -603,3 +603,14 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
 .trow .ren:hover{color:var(--fg);border-color:var(--border)}
 .trow .ren-input{height:26px;padding:2px 8px;font-size:13px;width:min(320px,100%)}
 @media (hover:none){.trow .ren,.trow .del{opacity:1}}
+/* Agents > Settings: the plane card */
+.plane-log{display:flex;flex-direction:column;gap:8px}
+.plane-log .plane-err{color:var(--err);font-weight:600}
+.plane-need{display:flex;flex-direction:column;gap:6px;border:1px solid var(--warn);border-radius:9px;padding:10px 12px;font-size:12.5px}
+.plane-need code{font-size:12px;user-select:all}
+.plane-need .solid-btn{align-self:flex-start}
+.deploy-row.plane-current{border-left:3px solid var(--ok);padding-left:10px}
+.topo-line{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+.topo-line b{color:var(--fg);font-weight:600}
+@keyframes bbflash{0%{box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 55%,transparent)}100%{box-shadow:0 0 0 3px transparent}}
+.card.flash{animation:bbflash 1.6s ease-out}
