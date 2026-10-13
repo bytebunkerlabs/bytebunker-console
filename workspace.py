@@ -58,6 +58,7 @@ class Workspace:
     def __init__(self, root):
         self.root = os.path.realpath(root)
         mcp_terminal.STATE["cwd"] = self.root
+        mcp_terminal.STATE["root"] = self.root          # bb's commands may write here, and only here
 
     def defs(self):
         """Definitions for the model (without the annotations, which stay here)."""

@@ -614,3 +614,15 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
 .topo-line b{color:var(--fg);font-weight:600}
 @keyframes bbflash{0%{box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 55%,transparent)}100%{box-shadow:0 0 0 3px transparent}}
 .card.flash{animation:bbflash 1.6s ease-out}
+/* a chat's command mode: the chip, the full-access bar, the Sessions dot, the outside-the-sandbox card */
+.access-select{height:30px;padding:2px 8px;font-size:12.5px;max-width:150px}
+.access-select[data-mode="web"]{border-color:var(--warn)}
+.access-select[data-mode="full"]{border-color:var(--err);color:var(--err);font-weight:600}
+.full-access-bar{margin:0 24px;padding:7px 12px;border-radius:8px;background:color-mix(in srgb,var(--err) 12%,transparent);border:1px solid var(--err);color:var(--err);font-size:12.5px;font-weight:500}
+.access-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:middle;flex:0 0 auto}
+.access-dot.local{background:var(--ok)}
+.access-dot.web{background:var(--warn)}
+.access-dot.full{background:var(--err)}
+.approval.outside{border-color:var(--err)}
+.wsl-steps{margin:0;padding-left:20px;font-size:12.5px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
+.wsl-steps li.done{color:var(--ok)}

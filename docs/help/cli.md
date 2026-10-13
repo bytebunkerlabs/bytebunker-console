@@ -40,6 +40,7 @@ git diff | bb "review this"         piped input is attached
 bb ask -p Fast -e off "…"           a profile, an effort level
 bb ask --json "…"                   for scripts
 bb ask --max-tokens 4096 "…"        a cap on the answer; auto (the default) uses what the window has left
+bb --web  /  bb --full-access      this folder's commands may use the network / run with no sandbox (default: sandboxed, no network)
 bb run review -p file=app.py        a workflow
 bb sessions ls                      recent sessions, the app's and bb's
 bb projects                         projects; * marks the one this folder is in

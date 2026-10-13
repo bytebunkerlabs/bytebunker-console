@@ -460,11 +460,45 @@ class TurnView:
             if ans.startswith("a"):
                 self.allowed.add(name)
             pol = "allow" if ans[:1] in ("y", "a") else "deny"
+        if pol == "allow" and name.endswith("__run"):
+            pol = self._outside(name, args)
         if pol == "allow":
             text, is_err = self.ws.call(name, args)
         else:
             text, is_err = "the user did not allow this call", True
         self.srv.post("/api/runs/%s/tool-results" % self.rid, {"call_id": cid, "content": text, "is_error": is_err})
+
+    def _outside(self, name, args):
+        """A command that asks to run outside the sandbox (or there is none here): you decide, here."""
+        import cmdbox
+        import mcp_terminal
+        for k in [k for k in args if str(k).startswith("__bb_")]:
+            args.pop(k)                                  # never from the model
+        wants = bool(args.pop("outside_sandbox", False))
+        if mcp_terminal.STATE.get("mode") == "full" or not (wants or cmdbox.kind() is None):
+            return "allow"
+        if getattr(self.ws, "outside_always", False):
+            args["__bb_outside_ok"] = True
+            return "allow"
+        o = self.out
+        if not can_prompt():
+            o.err(o.bad("a command asks to run outside the sandbox, and there is nobody to ask "
+                        "(bb --full-access runs every command outside it)"))
+            return "deny"
+        why = "asks to run outside the sandbox" if wants else "this computer has no sandbox for commands"
+        ans = (ask_user(o, o.warn("%s: %s\n  run it as you, outside the sandbox? [o]nce, [a]lways in this chat, [n]o: "
+                                  % (why, str(args.get("command") or "")[:200]))) or "").lower()
+        if ans[:1] not in ("o", "a", "y"):
+            return "deny"
+        if ans.startswith("a"):
+            self.ws.outside_always = True              # the rest of this chat, here in this terminal
+        args["__bb_outside_ok"] = True
+        try:
+            self.srv.post("/api/sessions", {"action": "access", "id": self.sid, "access": mcp_terminal.STATE.get("mode") or "local",
+                                            "used": "full"})
+        except Exception:   # noqa: BLE001 - the dot in Sessions is a nicety
+            pass
+        return "allow"
 
     def _approval(self, d):
         """A server tool asks before it runs: answer from here (the app can too; the first answer wins)."""
@@ -548,6 +582,7 @@ def run_turn(srv, out, sid, req, json_out=False, quiet=False, show_thinking=True
         raise
     view = TurnView(out, show_thinking=show_thinking and not json_out, quiet=quiet or json_out,
                     srv=srv, rid=r["run"], ws=ws, yes=yes)
+    view.sid = sid
     if json_out:
         saved = sys.stdout
         sys.stdout = open(os.devnull, "w")
@@ -587,14 +622,17 @@ def cmd_ask(a, out):
         req["tools"] = False
     if a.max_tokens:
         req["params"] = {"max_tokens": "auto" if a.max_tokens == "auto" else int(a.max_tokens)}
-    ws = None if a.no_tools or a.no_workspace else workspace_here()
+    req["access"] = a.access or "local"
+    ws = None if a.no_tools or a.no_workspace else workspace_here(a.access)
     code, _ = run_turn(srv, out, sid, req, json_out=a.json, quiet=a.quiet, show_thinking=not a.no_thinking,
                        ws=ws, yes=a.yes)
     return code
 
 
-def workspace_here():
+def workspace_here(access=None):
     import workspace
+    import mcp_terminal
+    mcp_terminal.STATE["mode"] = access or "local"     # this folder's commands: sandboxed unless you said otherwise
     return workspace.Workspace(os.getcwd())
 
 
@@ -619,7 +657,7 @@ def cmd_chat(a, out):
     srv = connect(out=out)
     st = {"sid": a.session or None, "model": a.model, "effort": a.effort, "profile": a.profile, "tools": True,
           "skills": [], "atts": [], "project": a.project}
-    ws = None if a.no_workspace else workspace_here()
+    ws = None if a.no_workspace else workspace_here(a.access)
     sess = None
     if st["sid"]:
         sess = srv.get("/api/sessions?id=" + urllib.parse.quote(st["sid"]))
@@ -668,7 +706,8 @@ def cmd_chat(a, out):
             line = line[1:]
         if not st["sid"]:
             st["sid"] = new_session_id()
-        req = {"text": line, "attachments": st["atts"], "cwd": os.getcwd(), "skills": st["skills"]}
+        req = {"text": line, "attachments": st["atts"], "cwd": os.getcwd(), "skills": st["skills"],
+               "access": a.access or "local"}
         for k in ("model", "effort", "profile", "project"):
             if st[k]:
                 req[k] = st[k]
@@ -1214,6 +1253,11 @@ def parser():
         sp.add_argument("-s", "--session", help="continue this session")
         sp.add_argument("--system", help="system prompt for this turn")
         sp.add_argument("-P", "--project", help="a project by name (default: the one this folder is in)")
+        acc = sp.add_mutually_exclusive_group()
+        acc.add_argument("--web", dest="access", action="store_const", const="web",
+                         help="this folder's commands may use the network (still sandboxed)")
+        acc.add_argument("--full-access", dest="access", action="store_const", const="full",
+                         help="no sandbox for this chat's commands: they run as you, with everything")
     a = sub.add_parser("ask", help="one question")
     a.add_argument("text", nargs="*")
     turn_opts(a)

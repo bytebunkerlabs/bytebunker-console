@@ -84,6 +84,22 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   if (await page.locator("#agent-stop").isVisible()) await page.click("#agent-stop");
   await page.waitForTimeout(3000);
 
+  // ---- A chat's command mode: local by default; full access asks, and shows a red bar
+  await page.click('[data-nav="playground"]');
+  await page.waitForTimeout(400);
+  check("access: a chat starts local", await page.locator("#access-select").inputValue() === "local" &&
+        !(await page.locator("#full-access-bar").isVisible()));
+  page.once("dialog", (d) => d.accept());
+  await page.selectOption("#access-select", "full");
+  await page.waitForTimeout(300);
+  check("access: full access shows the red bar", await page.locator("#full-access-bar").isVisible());
+  page.once("dialog", (d) => d.dismiss());
+  await page.selectOption("#access-select", "web");
+  await page.waitForTimeout(200);
+  check("access: back to web, the bar goes", await page.locator("#access-select").inputValue() === "web" &&
+        !(await page.locator("#full-access-bar").isVisible()));
+  await page.selectOption("#access-select", "local");
+
   // ---- Sessions: a session saved elsewhere appears live; opening it loads its messages
   await page.click('[data-nav="sessions"]');
   await page.waitForTimeout(1000);
@@ -101,6 +117,7 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
     messages: [{ role: "user", content: "what is 2+2" }, { role: "assistant", content: "four" }] });
   await page.waitForTimeout(1200);
   const renamed = page.locator("#sessions-box .trow", { hasText: "Arithmetic with the fake" });
+  check("sessions: each row has its access dot", await page.locator("#sessions-box .trow .access-dot.local").count() >= 1);
   check("sessions: renamed in place, and the name outlives a later save", await renamed.count() === 1 &&
         await page.locator("#sessions-box .trow", { hasText: "saved by another client" }).count() === 0);
   await renamed.locator(".tname").click();

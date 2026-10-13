@@ -20,6 +20,22 @@ The panel stays open unless you close it with the panel button at the top right;
 | Advanced | temperature, top-p, top-k, repetition penalty, seed, JSON mode and stop sequences, folded; it says "changed" when any differs from the default |
 | System prompt | standing instructions for this chat |
 
+## What a chat's commands can reach
+
+When the model runs terminal commands, the chip next to **Terminal** says what they can reach. You can change it at any point in a chat; the next command uses the new setting.
+
+| | Files | Network |
+|---|---|---|
+| 🟢 **Local** (every new chat) | the project's folder, writable; your installed tools, readable; never your keys or the rest of your home folder | off |
+| 🟡 **Web** | the same | on |
+| 🔴 **Full access** | everything, as you: no sandbox | on |
+
+Full access is for this chat only, asks once when you choose it, and shows a red bar. A new chat always starts Local.
+
+When a command really needs more (a `git push` with your keys, a system-wide install), the model asks to run that one command outside the sandbox, and you choose **Allow once**, **Allow every time in this chat** or **Don't allow**. On [Sessions](#sessions), a dot shows the most each chat ever had: green, amber or red.
+
+The sandbox is macOS's Seatbelt or Linux's bubblewrap. On Windows, it is WSL2: until it is set up (Settings → **Command sandbox** → **Enable WSL2**, a restart, then **Finish setup**), every command asks first.
+
 ## Tools and skills
 
 With tools on, the model can call the [MCP servers](help:mcp) you added. When chats run on the server (below), a tool that may change something asks first: a card appears with **Allow**, **Always allow** and **Deny**. Attach skills from the [Skills](#skills) screen; their instructions go ahead of your system prompt.

@@ -14,11 +14,13 @@ The optional argument is the starting directory. The working directory then
 follows the model's own `cd`s from call to call, like a real terminal. The
 shell is zsh or bash on macOS and Linux, PowerShell on Windows.
 
-Trust model, plainly: this is a shell running as the console's user, with
-that user's files, keys and network. There is no sandbox here — the timeout
-and the output cap are about keeping the model loop alive, not about safety.
-Enable it because you want the model to have a terminal; disable it (one
-click in the panel) when you don't.
+Trust model: each command runs in the chat's mode (cmdbox.py). "local", the
+default, is a sandbox: the starting folder writable, your tools readable, the
+rest of your home folder and your keys invisible, no network. "web" adds the
+network. "full" is your user with everything, chosen per chat. A command the
+model asks to run outside the sandbox (outside_sandbox) runs only after you
+said yes in the app or in bb. The app passes the mode with each call
+(__bb_mode, __bb_outside_ok); a call without one is "local".
 """
 import base64
 import json
@@ -27,6 +29,8 @@ import platform
 import shutil
 import subprocess
 import sys
+
+import cmdbox
 
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 600
@@ -40,6 +44,7 @@ except OSError:
     pass
 if not os.path.isdir(STATE["cwd"]):
     STATE["cwd"] = os.path.expanduser("~")
+STATE["root"] = os.path.realpath(STATE["cwd"])     # the folder a sandboxed command may write
 
 WINDOWS = os.name == "nt"
 if WINDOWS:
@@ -56,7 +61,11 @@ TOOLS = [{
         "and stderr. The working directory persists between calls, so `cd` works. "
         "Non-interactive: nothing can answer a prompt, so pass -y / --no-input style "
         "flags. Default timeout 60 s (timeout_s up to 600). Output beyond %d characters "
-        "is elided in the middle." % (SHELL_NAME, OS_NAME, OUTPUT_CAP)
+        "is elided in the middle. Commands run in a sandbox unless the user chose full access: "
+        "the working folder is writable, installed tools work, the rest of the home folder and "
+        "any keys are not there, and the network is off unless the user turned it on. If a "
+        "command truly needs more (your ssh keys for a git push, a system-wide install), call "
+        "again with outside_sandbox=true and the user is asked." % (SHELL_NAME, OS_NAME, OUTPUT_CAP)
     ),
     "inputSchema": {
         "type": "object",
@@ -64,6 +73,8 @@ TOOLS = [{
             "command": {"type": "string", "description": "The command line, as you would type it."},
             "timeout_s": {"type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT,
                           "description": "Seconds to wait before the command is killed."},
+            "outside_sandbox": {"type": "boolean",
+                                "description": "Ask the user to run this one command outside the sandbox."},
         },
         "required": ["command"],
     },
@@ -77,10 +88,26 @@ def elide(s, cap=OUTPUT_CAP):
     return s[:half] + "\n\n[... %d characters elided ...]\n\n" % (len(s) - cap) + s[-half:]
 
 
+def _from_wsl(p):
+    m = __import__("re").match(r"^/mnt/([a-z])/(.*)$", p)
+    return "%s:\\%s" % (m.group(1).upper(), m.group(2).replace("/", "\\")) if m else p
+
+
 def run(args):
     cmd = str(args.get("command") or "").strip()
     if not cmd:
         return "run: command is required", True
+    mode = args.get("__bb_mode") or STATE.get("mode") or "local"
+    if mode not in cmdbox.MODES:
+        mode = "local"
+    if args.get("__bb_outside_ok"):
+        mode = "full"                       # you said yes to this one command, outside the sandbox
+    root = os.path.realpath(args.get("__bb_root") or STATE["root"])
+    box = None if mode == "full" else cmdbox.kind()
+    if mode != "full" and box is None:
+        return ("this computer has no sandbox for commands%s. Run it outside the sandbox (outside_sandbox=true: "
+                "the user is asked), or the user turns on full access for this chat." % (
+                    " (enable WSL2 in the app's Settings to get one)" if WINDOWS else "")), True
     try:
         timeout = int(args.get("timeout_s") or DEFAULT_TIMEOUT)
     except (TypeError, ValueError):
@@ -88,7 +115,7 @@ def run(args):
     timeout = max(1, min(MAX_TIMEOUT, timeout))
     # The wrapper runs the command, then prints the shell's final directory
     # after a marker, so a `cd` in this call is where the next one starts.
-    if WINDOWS:
+    if WINDOWS and box != "wsl":
         # -EncodedCommand: no quoting rules to get wrong on the way in
         script = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n%s\n$__ok = $?\n"
                   "$__rc = if ($__ok) { 0 } elseif ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { $LASTEXITCODE } else { 1 }\n"
@@ -100,10 +127,25 @@ def run(args):
         script = "%s\n__rc=$?\nprintf '\\n<<__BB_CWD__>>%%s' \"$PWD\"\nexit $__rc" % cmd
         argv = [SHELL, "-c", script]
         extra = {"start_new_session": True}
+    env = None
+    cwd = STATE["cwd"]
+    if box:
+        if box == "wsl":
+            script = "cd %s 2>/dev/null; %s" % (cmdbox._q(cmdbox.wsl_path(cwd)), script)
+            argv, extra = ["bash", "-c", script], {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                                                   "encoding": "utf-8"}
+        elif box == "bwrap":
+            argv = [argv[0], "-c", "cd %s 2>/dev/null; %s" % (cmdbox._q(cwd), script)]
+        wrapped = cmdbox.wrap(argv, root, mode)
+        if wrapped is None:
+            return "no sandbox here for this command", True
+        argv, env = wrapped
+        if box == "wsl":
+            cwd = None
     try:
         p = subprocess.run(
-            argv, cwd=STATE["cwd"], capture_output=True, text=True, errors="replace",
-            timeout=timeout, stdin=subprocess.DEVNULL, **extra
+            argv, cwd=cwd, capture_output=True, text=True, errors="replace",
+            timeout=timeout, stdin=subprocess.DEVNULL, env=env, **extra
         )
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or b"")
@@ -125,9 +167,12 @@ def run(args):
     if i >= 0:
         new_cwd = stdout[i + len(CWD_MARK):].strip()
         stdout = stdout[:i]
+        if box == "wsl":
+            new_cwd = _from_wsl(new_cwd)
         if new_cwd and os.path.isdir(new_cwd):
             STATE["cwd"] = new_cwd
-    text = "exit %d  (cwd: %s)\n" % (p.returncode, STATE["cwd"])
+    text = "exit %d  (cwd: %s%s)\n" % (p.returncode, STATE["cwd"], "" if mode == "full" else
+                                        ", sandboxed%s" % (", web" if mode == "web" else ", no network"))
     if stdout.strip():
         text += "--- stdout ---\n" + elide(stdout)
     if (p.stderr or "").strip():

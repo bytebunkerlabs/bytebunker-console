@@ -15,6 +15,7 @@ class TerminalTest(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         os.makedirs(os.path.join(self.dir, "sub"))
         term.STATE["cwd"] = self.dir
+        term.STATE["root"] = os.path.realpath(self.dir)     # the sandbox's writable folder
 
     def test_output_and_exit_codes(self):
         text, err = term.run({"command": "echo hello-bb"})

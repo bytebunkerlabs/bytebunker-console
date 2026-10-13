@@ -62,6 +62,7 @@ import instance as instancemod
 import events as eventsmod
 import runs as runsmod
 import sessions as sessmod
+import cmdbox
 import upstream as upstreammod
 import runner as runnermod
 import model_facts as factsmod
@@ -1753,6 +1754,74 @@ CLIENT_RESULTS = runnermod.ClientResults()
 _RUNNER = []
 
 
+# ------------------------------------------------- a chat's command sandbox --
+ACCESS_RANK = {"local": 0, "web": 1, "full": 2}
+
+
+def terminal_tools():
+    """The flat names of the built-in terminal's run tool (one per terminal server)."""
+    out = set()
+    for n, sv in (CFG.get("mcp_servers") or {}).items():
+        args = sv.get("args") or []
+        if args and os.path.basename(str(args[0])) == "mcp_terminal.py":
+            out.add(n + "__run")
+    return out
+
+
+class _CallRun:
+    """A Playground tool call has no server run; an approval still needs one to wait on."""
+    def __init__(self):
+        self.id = "call-" + uuid.uuid4().hex[:10]
+        self.cancelled = False
+
+
+def note_access(sid, used=None, current=None):
+    """Remember a chat's mode, and the most it ever had (the Sessions dot)."""
+    if not sid or not sessmod._ID.match(str(sid)) or SESSIONS.get(sid) is None:
+        return
+    sess = SESSIONS.get(sid) or {}
+    fields = {}
+    if current in cmdbox.MODES and sess.get("access") != current:
+        fields["access"] = current
+    top = sess.get("max_access") or "local"
+    for m in (used, current):
+        if m in ACCESS_RANK and ACCESS_RANK[m] > ACCESS_RANK.get(top, 0):
+            top = m
+    if top != (sess.get("max_access") or "local"):
+        fields["max_access"] = top
+    if fields:
+        BUS.publish("sessions", "updated", SESSIONS.append(sid, "meta", **fields))
+
+
+def terminal_call(args, sid, access, ask):
+    """A terminal command in the chat's mode: ((error_text, True), None) when you said no,
+    else (None, args for the terminal). ask(args_shown, kind) -> allow | always | deny."""
+    args = {k: v for k, v in dict(args or {}).items() if not str(k).startswith("__bb_")}   # never from the model
+    sess = SESSIONS.get(sid) if sid and sessmod._ID.match(str(sid)) else None
+    mode = access if access in cmdbox.MODES else ((sess or {}).get("access") or "local")
+    wants_out = bool(args.pop("outside_sandbox", False))
+    ok_out = False
+    if mode != "full" and (wants_out or cmdbox.kind() is None):
+        if (sess or {}).get("outside_always"):
+            ok_out = True
+        else:
+            decision = ask({"command": args.get("command"), "mode": mode,
+                            "why": "asks to run outside the sandbox" if wants_out else
+                                   "this computer has no sandbox for commands"}, "outside")
+            if decision == "always":
+                ok_out = True
+                if sess is not None:
+                    SESSIONS.append(sid, "meta", outside_always=True)
+            elif decision == "allow":
+                ok_out = True
+            else:
+                note_access(sid, current=mode)
+                return ("you did not allow this command outside the sandbox", True), None
+    args["__bb_mode"], args["__bb_outside_ok"] = mode, ok_out
+    note_access(sid, used="full" if ok_out or mode == "full" else mode, current=mode)
+    return None, args
+
+
 def always_allow(name):
     """"Always allow": the tool runs without asking from now on (config tool_policy)."""
     config_fresh()
@@ -2074,7 +2143,8 @@ def runner():
             skill_bodies=lambda names: skill_catalog().bodies(names),
             write_archive=write_archive, uploads_root=uploads_root, engine_stats=engine_stats,
             default_model=default_model, approvals=APPROVALS, client_results=CLIENT_RESULTS,
-            tool_policy=lambda: CFG.get("tool_policy") or {}, always_allow=always_allow)))
+            tool_policy=lambda: CFG.get("tool_policy") or {}, always_allow=always_allow,
+            terminal_tools=terminal_tools, terminal_call=terminal_call)))
     return _RUNNER[0]
 
 
@@ -2823,7 +2893,9 @@ class Handler(BaseHTTPRequestHandler):
                         "python": sys.version.split()[0], "frozen": bool(getattr(sys, "frozen", False)),
                         "keep_running": bool(CFG.get("keep_running")), "roles": CFG.get("roles") or {},
                         "update_check_at_start": bool(CFG.get("update_check_at_start")),
-                        "updated": UPDATE_STATE.get("updated"), "update_failed": UPDATE_STATE.get("update_failed")})
+                        "updated": UPDATE_STATE.get("updated"), "update_failed": UPDATE_STATE.get("update_failed"),
+                        "sandbox": {"kind": cmdbox.kind(), "wsl": cmdbox.wsl_status(),
+                                    "wsl_restart_pending": bool(CFG.get("wsl_restart_pending"))}})
         elif path == "/api/gateways":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             GW.refresh(force=bool(q.get("refresh")))
@@ -3153,7 +3225,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "expected object"}, 400)
                 return
             t0 = time.time()
-            text, is_err = mcp_host().call(body.get("name") or "", body.get("arguments") or {})
+            name, args = body.get("name") or "", body.get("arguments") or {}
+            if name in terminal_tools():
+                sid = self.headers.get("X-BB-Session")
+                denied, args = terminal_call(args, sid, self.headers.get("X-BB-Access"),
+                                             lambda shown, kind: APPROVALS.ask(_CallRun(), name, shown, session=sid,
+                                                                               kind=kind))
+                if denied:
+                    self._json({"content": denied[0], "isError": True})
+                    return
+            text, is_err = mcp_host().call(name, args)
             TRACE.log("tool", session=self.headers.get("X-BB-Session"),
                       turn=self.headers.get("X-BB-Turn"), name=body.get("name") or "",
                       arguments=body.get("arguments") or {}, result=str(text)[:200000],
@@ -3275,6 +3356,15 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
                 return
+            if body.get("action") == "access":
+                sid, mode = str(body.get("id") or ""), body.get("access")
+                if not sessmod._ID.match(sid) or SESSIONS.get(sid) is None or mode not in cmdbox.MODES:
+                    self._json({"error": "a session and local, web or full"}, 400)
+                    return
+                note_access(sid, used=body.get("used") if body.get("used") in cmdbox.MODES else None, current=mode)
+                TRACE.log("session", action="access", id=sid, access=mode, used=body.get("used"))
+                self._json({"ok": True})
+                return
             if body.get("action") == "rename":
                 sid = str(body.get("id") or "")
                 if not sessmod._ID.match(sid) or SESSIONS.get(sid) is None:
@@ -3340,6 +3430,28 @@ class Handler(BaseHTTPRequestHandler):
                 save_config()
                 BUS.publish("config", "roles", roles)
                 self._json({"ok": True, "roles": roles})
+                return
+            if body.get("action") == "enable_wsl":
+                if sys.platform != "win32":
+                    self._json({"error": "WSL2 is Windows'"}, 400)
+                    return
+                cmdbox.wsl_enable()
+                CFG["wsl_restart_pending"] = True
+                save_config()
+                TRACE.log("settings", action="enable_wsl")
+                self._json({"ok": True})
+                return
+            if body.get("action") == "finish_wsl":
+                if sys.platform != "win32":
+                    self._json({"error": "WSL2 is Windows'"}, 400)
+                    return
+                lines = []
+                ok = cmdbox.wsl_finish(lines.append)
+                if ok:
+                    CFG.pop("wsl_restart_pending", None)
+                    save_config()
+                TRACE.log("settings", action="finish_wsl", ok=ok)
+                self._json({"ok": ok, "lines": lines})
                 return
             if body.get("action") == "update_seen":
                 clear_update_state()

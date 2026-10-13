@@ -968,6 +968,7 @@
   function traceHeaders(bot) {
     const h = { "Content-Type": "application/json" };
     if (state.session) h["X-BB-Session"] = state.session;
+    h["X-BB-Access"] = state.access || "local";
     if (bot && bot.turn) h["X-BB-Turn"] = bot.turn;
     if (bot && bot.kind === "compress") h["X-BB-Purpose"] = "compress";
     return h;
@@ -1205,6 +1206,7 @@
       attachments: atts.map((a) => { const o = Object.assign({}, a); delete o.dataURL; delete o.status; return o; }),
       system: P.sys, skills: state.activeSkills.slice(), tools: state.toolsOn, max_hops: Math.max(1, P.maxHops | 0),
       auto_compress: P.autoCompress, interactive: true, project: state.project || undefined,
+      access: state.access || "local",
     };
   }
   async function sendViaServer(text, atts) {
@@ -1591,6 +1593,7 @@
     if (state.streaming) stopTurn();
     state.messages = [];
     state.session = null;
+    setAccess("local");                       // a new chat starts sandboxed, always
     state.ctxUsed = null;
     state.calib = null;
     state.attachments = []; renderAttachChips();
@@ -1619,6 +1622,7 @@
         chars: toks,
         activeSkills: state.activeSkills,
         project: state.project || null,
+        access: state.access || "local",
         updated: Date.now(),
         messages: state.messages.map(serializeMsg),
       }),
@@ -1694,6 +1698,12 @@
       r.className = "trow" + (s.id === state.session ? " active" : "");
       r.innerHTML = '<span class="t"></span><span class="m mono"></span><span class="m mono"></span><span class="m mono"></span>' +
                     '<span class="w"><span class="when"></span><button class="ren" title="Rename"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.8 2.6l2.6 2.6L5.6 13H3v-2.6z"/><path d="M9.4 4l2.6 2.6"/></svg></button><button class="del" title="Delete">\u2715</button></span>';
+      const top = s.max_access || "local";
+      const dot = document.createElement("span"); dot.className = "access-dot " + top;
+      dot.title = { local: "local: its commands ran sandboxed, with no network",
+                    web: "web: its commands reached the network (still sandboxed)",
+                    full: "full access: commands ran outside the sandbox, as you" }[top] || "";
+      r.children[0].appendChild(dot);
       const tname = document.createElement("span"); tname.className = "tname"; tname.textContent = s.title || "untitled";
       r.children[0].appendChild(tname);
       if (s.project && projectById(s.project)) {
@@ -2199,6 +2209,39 @@
     const card = (title, sub) => { const c = document.createElement("div"); c.className = "card"; c.style.gap = "10px"; const h = document.createElement("div"); h.className = "skill-head"; h.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>'; h.querySelector("b").textContent = title; h.querySelector(".src").textContent = sub || ""; c.appendChild(h); box.appendChild(c); return c; };
     const line = (c, k, v) => { const r = document.createElement("div"); r.className = "mono"; r.style.cssText = "font-size:12px;color:var(--muted);word-break:break-all"; r.textContent = k + "  " + v; c.appendChild(r); return r; };
     const api = window.pywebview && window.pywebview.api;
+    // the command sandbox: what a chat's terminal commands run in
+    const sb = d.sandbox || {};
+    const sbc = card("Command sandbox", "where a chat's terminal commands run, unless the chat has full access");
+    const sbt = document.createElement("div"); sbt.className = "hint";
+    sbt.textContent = sb.kind === "seatbelt" ? "Seatbelt, macOS's own sandbox: each command sees the project's folder and your tools, never your keys or the rest of your home folder; the network only in Web chats."
+      : sb.kind === "bwrap" ? "bubblewrap: each command sees the project's folder and your tools, never your keys or the rest of your home folder; the network only in Web chats."
+      : sb.kind === "wsl" ? "WSL2 with bubblewrap: commands run in Linux, sandboxed; the project's folder is shared with them."
+      : "None on this computer: every command asks before it runs.";
+    sbc.appendChild(sbt);
+    if (d.platform === "win32" && sb.kind !== "wsl") {
+      const w = sb.wsl || {};
+      const steps = document.createElement("ol"); steps.className = "wsl-steps";
+      const step = (t, done) => { const li = document.createElement("li"); li.textContent = (done ? "\u2713 " : "") + t; if (done) li.className = "done"; steps.appendChild(li); };
+      step("Turn on WSL2 and install Ubuntu (Windows asks for permission)", w.wsl && w.distro);
+      step("Restart Windows", !sb.wsl_restart_pending && w.wsl && w.distro);
+      step("Finish: bubblewrap in Ubuntu (ByteBunker does this)", w.bwrap);
+      sbc.appendChild(steps);
+      const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
+      const note = document.createElement("span"); note.className = "hint";
+      const btn = document.createElement("button"); btn.type = "button"; btn.className = "solid-btn";
+      const finishing = sb.wsl_restart_pending || (w.wsl && w.distro);
+      btn.textContent = finishing ? "Finish setup" : "Enable WSL2";
+      btn.onclick = async () => {
+        btn.disabled = true; note.textContent = finishing ? "installing bubblewrap in Ubuntu\u2026 (a few minutes)" : "Windows will ask for permission\u2026";
+        try {
+          const r = await (await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: finishing ? "finish_wsl" : "enable_wsl" }) })).json();
+          note.textContent = finishing ? (r.ok ? "Done: commands are sandboxed now." : (r.lines || []).join(" \u00b7 ") || r.error || "it did not finish")
+            : (r.ok ? "When the installer is done, restart Windows, then come back here and press Finish setup." : r.error || "could not start it");
+        } catch (e) { note.textContent = e.message; }
+        btn.disabled = false; if (finishing) renderSettings();
+      };
+      row.appendChild(btn); row.appendChild(note); sbc.appendChild(row);
+    }
     // where things live
     const where = card("Your data", "everything you own lives here; the app itself holds none of it");
     line(where, "folder", d.home_dir || ""); line(where, "config", d.config_path || ""); line(where, "traces, usage, sessions", d.data_dir || ""); line(where, "attachments", d.uploads_dir || "");
@@ -3055,11 +3098,17 @@
     box.hidden = !d.pending.length;
     for (const a of d.pending) {
       const c = document.createElement("div"); c.className = "approval";
-      const h = document.createElement("div"); h.innerHTML = "<b></b> asks before it runs<span class='hint'></span>";
-      h.querySelector("b").textContent = a.tool; h.querySelector(".hint").textContent = a.session ? " · session " + a.session : "";
-      const pre = document.createElement("pre"); pre.textContent = prettyJson(JSON.stringify(a.args || {}));
+      const outside = a.kind === "outside";
+      if (outside) c.classList.add("outside");
+      const h = document.createElement("div"); h.innerHTML = outside ? "<b>Run outside the sandbox?</b> <span class='hint'></span>" : "<b></b> asks before it runs<span class='hint'></span>";
+      if (!outside) h.querySelector("b").textContent = a.tool;
+      h.querySelector(".hint").textContent = outside ? ((a.args || {}).why || "") + " \u00b7 as you, with your files, keys and network" : (a.session ? " · session " + a.session : "");
+      const pre = document.createElement("pre"); pre.textContent = outside ? String((a.args || {}).command || "") : prettyJson(JSON.stringify(a.args || {}));
       const acts = document.createElement("div"); acts.className = "acts";
-      for (const [label, decision, cls] of [["Allow", "allow", "solid-btn"], ["Always allow", "always", "ghost-btn"], ["Deny", "deny", "rate-btn bad"]]) {
+      const choices = outside
+        ? [["Allow once", "allow", "solid-btn"], ["Allow every time in this chat", "always", "ghost-btn"], ["Don't allow", "deny", "ghost-btn danger"]]
+        : [["Allow", "allow", "solid-btn"], ["Always allow", "always", "ghost-btn"], ["Deny", "deny", "rate-btn bad"]];
+      for (const [label, decision, cls] of choices) {
         const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label;
         b.onclick = async () => {
           acts.querySelectorAll("button").forEach((x) => x.disabled = true);
@@ -3129,11 +3178,37 @@
     setActiveSkills(full.activeSkills || []);
     if (full.model && state.models.includes(full.model)) { state.model = full.model; $("model-select").value = full.model; servingLine(); }
     setProject(full.project && projectById(full.project) ? full.project : "");
+    setAccess(full.access || "local");
     go("playground");
     renderMessages();
     attachRunningTurn();
     return true;
   }
+
+  /* ---------------- what a chat's commands may reach ---------------- */
+  // local (sandboxed, no network), web (sandboxed, network), full (no sandbox, this chat only).
+  // It can change mid-chat: the next command runs in the new mode.
+  state.access = "local";
+  // a Windows PC with no sandbox yet: the chip says commands ask, and where to fix it
+  fetch("/api/settings").then((r) => r.json()).then((d) => {
+    if (d.sandbox && !d.sandbox.kind) $("access-select").title = "No sandbox on this computer yet: every command asks before it runs. Settings \u2192 Command sandbox sets one up.";
+  }).catch(() => {});
+  function setAccess(mode) {
+    state.access = ["local", "web", "full"].includes(mode) ? mode : "local";
+    $("access-select").value = state.access;
+    $("access-select").dataset.mode = state.access;
+    $("full-access-bar").hidden = state.access !== "full";
+  }
+  $("access-select").onchange = async () => {
+    const want = $("access-select").value;
+    if (want === "full" && !confirm("Full access for this chat?\n\nIts terminal commands run as you, with no sandbox: every file, your keys, the network. Only this chat; a new chat starts sandboxed again.")) {
+      $("access-select").value = state.access; return;
+    }
+    setAccess(want);
+    if (state.session) {
+      try { await fetch("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "access", id: state.session, access: want }) }); } catch (e) {}
+    }
+  };
   async function renderProjects() {
     await loadProjects();
     if (!state.profiles || !Object.keys(state.profiles).length) {

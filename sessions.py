@@ -80,6 +80,7 @@ class SessionStore:
         msgs = sess.get("messages") or []
         return {"id": sess.get("id"), "title": sess.get("name") or sess.get("title") or "",
                 "named": bool(sess.get("name")),
+                "access": sess.get("access") or "local", "max_access": sess.get("max_access") or "local",
                 "model": sess.get("model") or "", "source": sess.get("source") or "app",
                 "cwd": sess.get("cwd"), "project": sess.get("project"),
                 "created": sess.get("created") or sess.get("updated") or _now(),
@@ -210,10 +211,17 @@ class SessionStore:
         with self._slock(str(sess["id"])):
             # a client saves what it shows; a name given elsewhere (renamed on the Sessions screen, or
             # by bb) is not in its copy, so it carries over
-            if "name" not in sess:
-                old = self._read(str(sess["id"])) or {}
-                if old.get("name"):
-                    sess = dict(sess, name=old["name"])
+            old = self._read(str(sess["id"])) or {}
+            if "name" not in sess and old.get("name"):
+                sess = dict(sess, name=old["name"])
+            # what a chat could reach is the server's record: a client's copy never lowers it
+            for k in ("access", "outside_always"):
+                if k not in sess and old.get(k) is not None:
+                    sess = dict(sess, **{k: old[k]})
+            rank = {"local": 0, "web": 1, "full": 2}
+            tops = [m for m in (old.get("max_access"), sess.get("max_access"), sess.get("access")) if m in rank]
+            if tops:
+                sess = dict(sess, max_access=max(tops, key=rank.get))
             return self._write_snapshot(sess)
 
     def append(self, sid, type_, **fields):

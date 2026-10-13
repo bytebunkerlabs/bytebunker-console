@@ -45,11 +45,13 @@ class Approvals:
         self.pending = {}
         self.lock = threading.Lock()
 
-    def ask(self, run, tool, args, session=None, wait_s=WAIT_S):
+    def ask(self, run, tool, args, session=None, wait_s=WAIT_S, kind="tool"):
         """Block until someone answers (allow, always, deny), the run is
-        cancelled, or wait_s passes. Returns the decision."""
+        cancelled, or wait_s passes. Returns the decision. kind "outside": a
+        command asks to run outside the chat's sandbox ("always" then means
+        every time in this chat)."""
         aid = "ap-" + uuid.uuid4().hex[:10]
-        rec = {"id": aid, "run": run.id, "session": session, "tool": tool, "args": args,
+        rec = {"id": aid, "run": run.id, "session": session, "tool": tool, "args": args, "kind": kind,
                "created": round(time.time(), 3), "decision": None, "by": None, "event": threading.Event()}
         with self.lock:
             self.pending[aid] = rec

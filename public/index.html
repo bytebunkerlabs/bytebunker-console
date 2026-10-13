@@ -77,10 +77,14 @@
       <header>
         <h1>Playground</h1><span class="sub">Nothing leaves the rack.</span><div class="grow"></div>
         <select class="text-input" id="project-select" title="The project this chat belongs to: its instructions, its folder" hidden style="max-width:190px;height:30px;padding:2px 8px;font-size:12.5px"></select>
+        <select class="text-input access-select" id="access-select" title="What this chat's terminal commands may reach: you can change it any time">
+          <option value="local">&#x1F7E2; Local</option><option value="web">&#x1F7E1; Web</option><option value="full">&#x1F534; Full access</option>
+        </select>
         <button class="ghost-btn" id="terminal-btn" title="Continue this chat in a terminal, with bb, in the project's folder"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7l2 1.5L5 10M8.5 10.5H11"/></svg>Terminal</button>
         <button class="ghost-btn" id="code-btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 5.5 3.2 8 6 10.5M10 5.5 12.8 8 10 10.5"/></svg>View code</button>
         <button class="icon-btn" id="panel-btn" title="Toggle panel" style="width:30px;height:30px;border-radius:8px"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M10.4 3v10"/></svg></button>
       </header>
+      <div class="full-access-bar" id="full-access-bar" hidden>Full access: this chat's commands run as you, with no sandbox (your files, keys and the network). Switch back to Local or Web at the top.</div>
       <div class="chat-tabs" id="chat-tabs" hidden>
         <button class="on" data-view="chat">Chat</button>
         <button data-view="activity">Activity <span class="n" id="tab-activity-n"></span></button>

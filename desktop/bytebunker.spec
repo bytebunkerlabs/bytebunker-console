@@ -28,7 +28,7 @@ datas = [
 # servers by --mcp: name them so the analysis bundles them and their imports
 hidden = ["server", "version", "instance", "paths", "commands", "bb", "approvals", "workspace", "events", "runs", "sessions", "upstream", "runner", "model_facts",
           "gateways", "monitors", "racks", "machines", "jobs", "agents", "recipes", "skills", "traces",
-          "mcp", "mcp_catalog", "mcp_jobs", "mcp_terminal", "updater", "changelog"]
+          "mcp", "mcp_catalog", "mcp_jobs", "mcp_terminal", "cmdbox", "updater", "changelog"]
 
 a = Analysis(
     [os.path.join(HERE, "app.py")],

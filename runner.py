@@ -843,6 +843,20 @@ class Runner:
         if where == "client":
             text, is_err = self.client_call(run, emit, call, args)
         else:
+            terminal = getattr(self.d, "terminal_tools", None)
+            if terminal and name in terminal():
+                # the chat's sandbox mode; running outside it asks (a script or a job cannot be asked)
+                def ask(shown, kind):
+                    if req.get("unattended"):
+                        return "deny"
+                    if not req.get("interactive", True):
+                        raise ApprovalNeeded(name)
+                    return self.d.approvals.ask(run, name, shown, session=sid, kind=kind)
+                denied, args = self.d.terminal_call(args, sid, req.get("access"), ask)
+                if denied:
+                    self.d.trace.log("tool", session=sid, turn=bot.get("turn"), name=name, arguments=args,
+                                     where=where, result=denied[0], is_error=True, ms=int((time.time() - t0) * 1000))
+                    return denied
             pol = approvals.policy_for(name, self._annotations(name),
                                        [self.d.tool_policy(), req.get("tool_policy") or {}])
             if pol == "ask" and req.get("yes"):
