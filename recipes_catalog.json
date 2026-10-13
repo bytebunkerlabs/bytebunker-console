@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "dgx_serve": "741bf1f",
+ "dgx_serve": "bc102a2",
  "fit": {
   "reserve_gb": {
    "dgx": 9.0,
@@ -91,6 +91,93 @@
    }
   },
   {
+   "name": "gemma-4-26b-a4b",
+   "model": "google/gemma-4-26B-A4B-it",
+   "roles": [
+    "chat",
+    "tools",
+    "reasoning",
+    "vision"
+   ],
+   "platforms": [
+    "mac"
+   ],
+   "variants": {
+    "mac": {
+     "engine": "llamacpp",
+     "weights_gb": 27.7,
+     "nodes": 1,
+     "tensor_parallel": 1,
+     "context": 65536
+    }
+   }
+  },
+  {
+   "name": "gemma-4-31b",
+   "model": "google/gemma-4-31B-it",
+   "roles": [
+    "chat",
+    "tools",
+    "reasoning",
+    "vision"
+   ],
+   "platforms": [
+    "mac"
+   ],
+   "variants": {
+    "mac": {
+     "engine": "llamacpp",
+     "weights_gb": 33.4,
+     "nodes": 1,
+     "tensor_parallel": 1,
+     "context": 65536
+    }
+   }
+  },
+  {
+   "name": "glm-4.7-flash",
+   "model": "zai-org/GLM-4.7-Flash",
+   "roles": [
+    "chat",
+    "tools",
+    "reasoning",
+    "code"
+   ],
+   "platforms": [
+    "mac"
+   ],
+   "variants": {
+    "mac": {
+     "engine": "llamacpp",
+     "weights_gb": 31.8,
+     "nodes": 1,
+     "tensor_parallel": 1,
+     "context": 131072
+    }
+   }
+  },
+  {
+   "name": "gpt-oss-120b",
+   "model": "openai/gpt-oss-120b",
+   "roles": [
+    "chat",
+    "tools",
+    "reasoning"
+   ],
+   "platforms": [
+    "mac"
+   ],
+   "variants": {
+    "mac": {
+     "engine": "llamacpp",
+     "weights_gb": 63.4,
+     "nodes": 1,
+     "tensor_parallel": 1,
+     "context": 131072
+    }
+   }
+  },
+  {
    "name": "gpt-oss-20b",
    "model": "openai/gpt-oss-20b",
    "roles": [
@@ -157,6 +244,28 @@
      "nodes": 1,
      "tensor_parallel": 2,
      "context": 262144
+    }
+   }
+  },
+  {
+   "name": "nemotron-3.5-lightning",
+   "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+   "roles": [
+    "chat",
+    "tools",
+    "reasoning",
+    "code"
+   ],
+   "platforms": [
+    "mac"
+   ],
+   "variants": {
+    "mac": {
+     "engine": "llamacpp",
+     "weights_gb": 33.6,
+     "nodes": 1,
+     "tensor_parallel": 1,
+     "context": 131072
     }
    }
   },
@@ -271,6 +380,29 @@
      "nodes": 1,
      "tensor_parallel": 1,
      "context": 16384
+    }
+   }
+  },
+  {
+   "name": "qwen3.6-35b-a3b",
+   "model": "Qwen/Qwen3.6-35B-A3B",
+   "roles": [
+    "chat",
+    "tools",
+    "reasoning",
+    "vision",
+    "code"
+   ],
+   "platforms": [
+    "mac"
+   ],
+   "variants": {
+    "mac": {
+     "engine": "llamacpp",
+     "weights_gb": 37.5,
+     "nodes": 1,
+     "tensor_parallel": 1,
+     "context": 131072
     }
    }
   },
