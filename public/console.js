@@ -4599,6 +4599,7 @@
       for (const m of (state.models || []).filter((x) => !modelInfo(x).pinned).concat(d[key] ? [d[key]] : [])) { if (seen.has(m)) continue; seen.add(m); const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o); }
       sel.value = d[key] || "";
     }
+    renderMinionPool(d);
 
     $("agent-run").disabled = !d.enabled || state.streaming;
     state.agentsOn = !!d.enabled;
@@ -4798,7 +4799,8 @@
       head.innerHTML = "<div class='skill-id'><b></b><span class='src mono'></span></div><span class='src mono'></span>";
       head.querySelector("b").textContent = sl.role || "slave";
       head.querySelectorAll(".src")[0].textContent =
-        (sl.network ? "network" : "no-network") + " · " + (sl.depth || "");
+        (sl.network ? "network" : "no-network") + " · " + (sl.depth || "") +
+        (sl.engine ? " · on " + sl.engine + (sl.model ? " (" + sl.model + ")" : "") : "");
       head.querySelectorAll(".src")[1].textContent = ok + " · " + (sl.tokens || 0) + " tok";
       const brief = document.createElement("div");
       brief.className = "skill-desc";
@@ -4839,11 +4841,47 @@
           master_name: $("master-name").value.trim(),
           master_instructions: $("master-instructions").value.trim(),
           run_timeout_s: Math.max(5, parseInt($("run-timeout").value, 10) || 180) * 60,
-          master_model: $("model-master").value, thinking_model: $("model-thinking").value, slave_model: $("model-slave").value }),
+          master_model: $("model-master").value, thinking_model: $("model-thinking").value, slave_model: $("model-slave").value,
+          minion_pool: minionPoolValue(), minion_slots: parseInt($("minion-slots").value, 10) || 4 }),
       });
       $("master-note").textContent = "Saved. The master uses this on the next run.";
     } catch (e) { $("master-note").textContent = "save failed: " + e.message; }
     btn.disabled = false;
+  }
+
+  // More engines for the minions: the same model (or a like one) served on other machines.
+  // Each run's minions spread over them by free room, and fail over when one stops answering.
+  function renderMinionPool(d) {
+    const box = $("minion-pool");
+    if (!box || box.contains(document.activeElement)) return;
+    box.textContent = "";
+    const chosen = new Map((d.minion_pool || []).map((e) => [e.model, e.slots || 4]));
+    if (document.activeElement !== $("minion-slots")) $("minion-slots").value = d.minion_slots || 4;
+    const main = $("model-slave").value;
+    const ids = (state.models || []).filter((m) => m !== main);
+    if (!ids.length) { const h = document.createElement("span"); h.className = "hint"; h.textContent = "Serve a model on another machine (or the same model on a second one) and it appears here."; box.appendChild(h); }
+    for (const m of ids) {
+      const row = document.createElement("label"); row.className = "pool-row";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.dataset.model = m; cb.checked = chosen.has(m);
+      const name = document.createElement("span"); name.className = "mono"; name.textContent = baseId(m);
+      const gw = document.createElement("span"); gw.className = "hint"; gw.textContent = gatewayOf(m) ? "on " + gatewayOf(m) : "";
+      const n = document.createElement("input"); n.type = "number"; n.min = 1; n.max = 64; n.className = "text-input pool-slots";
+      n.value = chosen.get(m) || 4; n.title = "How many minions it runs at once";
+      const at = document.createElement("span"); at.className = "hint"; at.textContent = "at once";
+      row.append(cb, name, gw, n, at);
+      box.appendChild(row);
+    }
+    const eng = d.pool_engines || [];
+    const now = $("minion-pool-now");
+    now.textContent = !main ? "" : eng.length > 1
+      ? (d.pool_supported ? "Minions spread over " : "Chosen, but this worker's harness predates engine pools (Update it): ") +
+        eng.map((e) => e.name + " (" + e.model + ", " + e.slots + " at once)").join(" · ") +
+        " — up to " + eng.reduce((a, e) => a + e.slots, 0) + " minions at once."
+      : "Minions run on " + (eng[0] ? eng[0].name + " (" + eng[0].model + ")" : "the doers' model") + ". Tick more engines to spread them.";
+  }
+  function minionPoolValue() {
+    return [...document.querySelectorAll("#minion-pool input[type=checkbox]:checked")].map((cb) => ({
+      model: cb.dataset.model, slots: parseInt(cb.parentElement.querySelector(".pool-slots").value, 10) || 4 }));
   }
 
   async function runAgent() {

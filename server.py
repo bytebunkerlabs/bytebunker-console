@@ -1161,6 +1161,13 @@ def agents_spec():
         if a.get(role + "_effort"):
             r["effort"] = a[role + "_effort"]
         out[role] = r
+    pool = minion_pool(a, pick.get("fast"), remote)
+    if pool and len(pool) > 1 and (a.get("harness") or {}).get("pool"):
+        # the router: the minions spread over these engines (the harness's engine_pool)
+        fast = {"pool": pool}
+        if out.get("fast", {}).get("effort"):
+            fast["effort"] = out["fast"]["effort"]
+        out["fast"] = fast
     court = (CFG.get("agents") or {}).get("court") or {}
     spec = {"version": 1}
     if out:
@@ -1169,6 +1176,40 @@ def agents_spec():
     if (court.get("roles") or court.get("concurrency") or court.get("access")) and caps.get("court"):
         spec["court"] = agentmod.court_for_run(court, caps, CFG.get("mcp_servers") or {})
     return spec if len(spec) > 1 else None
+
+
+def minion_pool(a, first, remote):
+    """The engines the minions spread over: the minion model's own, then each one
+    added in Agents > Settings (agents.minion_pool: [{model, slots}], a model as
+    "id" or "id@gateway" for the same model on another machine). An engine on this
+    machine's loopback is left out for a remote worker, which cannot reach it."""
+    entries = ([{"model": first, "slots": a.get("minion_slots") or 4}] if first else []) + \
+        [e for e in (a.get("minion_pool") or []) if isinstance(e, dict) and e.get("model")]
+    out, seen = [], set()
+    for e in entries:
+        try:
+            mid, gw = GW.resolve(e["model"])
+        except Exception:   # noqa: BLE001
+            continue
+        if not gw:
+            continue
+        url = gw.get("agents_url") or gw["url"]
+        if remote and (urllib.parse.urlparse(url).hostname or "") in ("127.0.0.1", "localhost", "::1"):
+            continue
+        if (url, mid) in seen:
+            continue
+        seen.add((url, mid))
+        try:
+            slots = max(1, min(64, int(e.get("slots") or 4)))
+        except (TypeError, ValueError):
+            slots = 4
+        gname = gw.get("name") or urllib.parse.urlparse(url).hostname or "engine"
+        name = gname if gname not in [x["name"] for x in out] else "%s-%s" % (gname, mid)
+        eng = {"name": name[:40], "model": mid, "base_url": url, "slots": slots}
+        if gw.get("key"):
+            eng["api_key"] = gw["key"]
+        out.append(eng)
+    return out
 
 
 def agent_goal(run, emit, goal, via="app"):
@@ -1280,6 +1321,11 @@ def agent_goal(run, emit, goal, via="app"):
         except Exception as e:   # noqa: BLE001 - report anything to the client
             emit({"error": str(e)[:300]})
             code, killed = -1, "error"
+        if end and end.get("outcome") != "answered":
+            # say how it ended, so a goal with no answer is never just silence
+            emit({"line": "%s> \u26a0\ufe0f no answer: the goal %s%s" % (
+                (CFG.get("agents") or {}).get("master_name") or "Master", end.get("outcome") or "ended",
+                " (%s)" % end["reason"] if end.get("reason") else "")})
         emit({"phase": "done", "exit": code, "killed": killed})
         TRACE.log("agent_run", id=run.id, goal=goal[:8000], host=st["host"], mode=st["mode"],
                   isolated=st["isolated"], exit=code, killed=killed or False, via=via,
@@ -3170,6 +3216,13 @@ class Handler(BaseHTTPRequestHandler):
             st["master_model"] = a.get("master_model") or ""
             st["thinking_model"] = a.get("thinking_model") or ""
             st["slave_model"] = a.get("slave_model") or ""
+            st["minion_pool"] = a.get("minion_pool") or []
+            st["minion_slots"] = a.get("minion_slots") or 4
+            # the engines a run's minions would spread over now, as the run spec would name them
+            st["pool_engines"] = [{k: e[k] for k in ("name", "model", "slots")}
+                                  for e in minion_pool(a, a.get("slave_model") or (CFG.get("roles") or {}).get("fast"),
+                                                       bool((a.get("ssh") or "").strip()))]
+            st["pool_supported"] = bool((a.get("harness") or {}).get("pool"))
             runs = []
             for e in TRACE.events(time.strftime("%Y-%m-%d",
                                   time.localtime(time.time() - 14 * 86400))):
@@ -3783,6 +3836,22 @@ class Handler(BaseHTTPRequestHandler):
             for key in ("master_model", "thinking_model", "slave_model"):
                 if key in body:
                     a[key] = str(body.get(key) or "")[:120]
+            if isinstance(body.get("minion_pool"), list):
+                # more engines for the minions: [{model ("id" or "id@gateway"), slots}]
+                pool = []
+                for e in body["minion_pool"][:16]:
+                    if isinstance(e, dict) and str(e.get("model") or "").strip():
+                        try:
+                            slots = max(1, min(64, int(e.get("slots") or 4)))
+                        except (TypeError, ValueError):
+                            slots = 4
+                        pool.append({"model": str(e["model"]).strip()[:160], "slots": slots})
+                a["minion_pool"] = pool
+            if body.get("minion_slots") is not None:
+                try:
+                    a["minion_slots"] = max(1, min(64, int(body["minion_slots"])))
+                except (TypeError, ValueError):
+                    pass
             if body.get("run_timeout_s") is not None:
                 try:
                     # 5 min .. 24 h; a multi-step goal on one Spark is a 1-2 h affair
@@ -3794,7 +3863,8 @@ class Handler(BaseHTTPRequestHandler):
                         "master_instructions": a["master_instructions"],
                         "run_timeout_s": agent_run_timeout(CFG),
                         "master_model": a.get("master_model") or "", "thinking_model": a.get("thinking_model") or "",
-                        "slave_model": a.get("slave_model") or ""})
+                        "slave_model": a.get("slave_model") or "", "minion_pool": a.get("minion_pool") or [],
+                        "minion_slots": a.get("minion_slots") or 4})
             return
         goal = body.get("goal") or ""
         try:

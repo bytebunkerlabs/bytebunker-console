@@ -651,3 +651,8 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
   .audit-bar{padding:0 16px 10px} #audit-list{padding:0 16px 20px} .audit-verdict{margin:0 16px 10px}
   .audit-row{grid-template-columns:auto 8px minmax(0,1fr)} .audit-row .who,.audit-row .cat{display:none}
 }
+
+/* the minions' engine pool (Agents > Settings) */
+.pool-list{display:flex;flex-direction:column;gap:4px}
+.pool-row{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
+.pool-row .pool-slots{width:56px;padding:3px 6px}

@@ -172,6 +172,13 @@
             <label class="hint" style="display:flex;align-items:center;gap:6px">master <select class="text-input" id="model-master" style="min-width:160px"></select></label>
             <label class="hint" style="display:flex;align-items:center;gap:6px">thinking (wazir, Malikah, panels) <select class="text-input" id="model-thinking" style="min-width:160px"></select></label>
             <label class="hint" style="display:flex;align-items:center;gap:6px">doers (minions) <select class="text-input" id="model-slave" style="min-width:160px"></select></label>
+            <label class="hint" style="display:flex;align-items:center;gap:6px"><input type="number" class="text-input" id="minion-slots" min="1" max="64" style="width:56px"> at once</label>
+          </div>
+          <div class="prow">
+            <b style="font-size:13px;font-weight:500">More engines for the minions</b>
+            <span class="hint">Every machine serving a minion model adds room: each run's minions go to whichever engine has the most free, stay there, and move to another if theirs stops answering. The thinking roles and the master stay on their own models.</span>
+            <div id="minion-pool" class="pool-list"></div>
+            <span class="hint" id="minion-pool-now"></span>
           </div>
           <div class="prow">
             <b style="font-size:13px;font-weight:500">Standing instructions</b>

@@ -89,7 +89,9 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
              "test -f %s && echo HARNESS_OK || echo NO_HARNESS; "
              "(command -v podman || command -v docker) >/dev/null 2>&1 && echo RUNTIME_OK || echo NO_RUNTIME; "
              "%s --version >/dev/null 2>&1 && echo LAUNCHER_OK || echo NO_LAUNCHER; "
-             "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null | sort -u | tr '\\n' ' '); "
+             "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null | sort -u | tr '\\n' ' ')"
+             "$([ -f src/bytebunker_agents/harness/tool_broker.py ] && echo ' --access')"
+             "$([ -f src/bytebunker_agents/harness/engine_pool.py ] && echo ' --pool'); "
              "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0], shlex.quote(script))
     try:
         r = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
@@ -118,7 +120,7 @@ def _caps_from(text):
     """What a harness's run_master.py understands, from its own text."""
     return {"goal_id": "--goal-id" in text, "proto2": "--proto" in text, "spec": "--spec" in text,
             "timeout": "--timeout-s" in text, "court": "--court" in text, "access": "--access" in text,
-            "checked": round(time.time())}
+            "pool": "--pool" in text, "checked": round(time.time())}
 
 
 # The Sultan's court as the harness defines it (slaves/archetypes.py): what
@@ -306,16 +308,18 @@ def harness_caps(CFG, refresh=False):
         if ssh:
             # a harness with the tool broker takes access (data and MCP tools for a role)
             probe = ("cd %s && { grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null; "
-                     "[ -f src/bytebunker_agents/harness/tool_broker.py ] && echo --access; } | sort -u") % (
+                     "[ -f src/bytebunker_agents/harness/tool_broker.py ] && echo --access; "
+                     "[ -f src/bytebunker_agents/harness/engine_pool.py ] && echo --pool; } | sort -u") % (
                 _rq(directory or "~/bytebunker-harness"), shlex.quote(script))
             text = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
                                   capture_output=True, text=True, timeout=20).stdout
         else:
             with open(os.path.join(os.path.expanduser(directory), script), encoding="utf-8", errors="replace") as f:
                 text = f.read()
-            if os.path.isfile(os.path.join(os.path.expanduser(directory), "src", "bytebunker_agents", "harness",
-                                           "tool_broker.py")):
-                text += "\n--access"
+            for name, flag in (("tool_broker.py", "--access"), ("engine_pool.py", "--pool")):
+                if os.path.isfile(os.path.join(os.path.expanduser(directory), "src", "bytebunker_agents", "harness",
+                                               name)):
+                    text += "\n" + flag
     except Exception:   # noqa: BLE001 - unknown means the old flags
         return {}
     a["harness"] = _caps_from(text)
@@ -430,6 +434,9 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None,
                   ) % (qdir, launch, launch)
         return ssh_base() + ["-o", "ConnectTimeout=15", ssh, remote]
 
+    # local: the app holds the run's stdin open; when the app quits the pipe
+    # closes and the goal stops cleanly (a harness that predates this ignores it)
+    envs["BYTEBUNKER_STOP_ON_EOF"] = "1"
     # local: no shell, goal is a discrete argv element; env via a leading `env`.
     # The app's own BYTEBUNKER_CONFIG names its config.json; the harness reads the
     # same variable first, so a run on this computer would load the app's file
@@ -534,7 +541,7 @@ def recent_slaves(CFG, limit=40, goal_id=None):
             "brief": (r.get("brief") or "")[:200], "success": r.get("success"),
             "tokens": r.get("tokens"), "network": r.get("network_granted"),
             "answer": (ans or "")[:400], "error": (r.get("error") or "")[:200],
-            "ts": r.get("timestamp"),
+            "ts": r.get("timestamp"), "engine": r.get("engine"), "model": r.get("model"),
         })
     return {"ok": True, "slaves": slaves[::-1], "live": live, "master": master}
 
