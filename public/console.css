@@ -577,3 +577,23 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
 .chk{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer}
 .chk input{margin:0}
 .court-access-box summary{cursor:pointer}
+/* updates: the sidebar's version chip and the install-and-restart dialog */
+.update-chip{display:flex;align-items:center;gap:7px;margin:0 10px 8px;padding:5px 10px;border-radius:8px;border:1px solid var(--border);font-size:12px;color:var(--faint);background:transparent;text-align:left}
+.update-chip:hover{color:var(--muted);background:var(--hover)}
+.update-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:0 0 auto}
+.update-chip.newer{color:var(--fg);border-color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent);font-weight:500}
+.update-chip.newer .dot{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.update-box{padding:18px 20px;gap:12px;width:min(520px,100%)}
+.update-box h2{font-size:17px;margin:0}
+.update-notes{border:1px solid var(--border);border-radius:9px;padding:8px 14px;max-height:240px;overflow:auto;font-size:13px}
+.update-steps{display:flex;gap:6px;list-style:none;margin:4px 0 0;padding:0;font-size:11.5px;color:var(--faint)}
+.update-steps li{flex:1;text-align:center;padding-top:6px;border-top:3px solid var(--border)}
+.update-steps li.done{color:var(--muted);border-top-color:var(--ok)}
+.update-steps li.on{color:var(--fg);border-top-color:var(--accent,var(--ok));font-weight:600}
+.update-bar{height:6px;border-radius:3px;background:var(--chip);overflow:hidden;display:none}
+.update-bar>div{height:100%;width:0;background:var(--ok);transition:width .3s}
+.update-box.running .update-bar{display:block}
+.update-status{min-height:1.3em}
+.update-actions{display:flex;gap:10px;justify-content:flex-end;align-items:center}
+.update-actions .linky{margin-right:auto;align-self:center}
+.update-chip:not(.newer) .dot{animation:none}

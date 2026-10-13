@@ -2329,14 +2329,15 @@
     if (r.none_published) { note.textContent = "no published release yet"; return; }
     if (!r.newer) { note.textContent = "you have the latest (" + r.current + ")"; return; }
     note.textContent = "ByteBunker " + r.latest + " is available (you have " + r.current + ")";
+    updateChip(r);
     const notes = document.createElement("div"); notes.style.cssText = "border:1px solid var(--border);border-radius:9px;padding:10px 14px;max-height:340px;overflow:auto";
     notes.appendChild(helpDom(r.notes || "This release has no notes."));
     detail.appendChild(notes);
     const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
     const prog = document.createElement("span"); prog.className = "hint";
     if (r.can_update) {
-      const b = document.createElement("button"); b.type = "button"; b.className = "solid-btn"; b.textContent = "Update to " + r.latest;
-      b.onclick = () => applyUpdate(b, prog);
+      const b = document.createElement("button"); b.type = "button"; b.className = "solid-btn"; b.textContent = "Install " + r.latest + " and restart";
+      b.onclick = () => updateDialog(r);
       row.appendChild(b);
     } else if (r.why_not) {
       prog.textContent = r.why_not;
@@ -2344,34 +2345,128 @@
     if (r.page) { const a = document.createElement("button"); a.type = "button"; a.className = "linky"; a.textContent = "release page"; a.onclick = () => openOut(r.page); row.appendChild(a); }
     row.appendChild(prog); detail.appendChild(row);
   }
-  async function applyUpdate(btn, prog) {
-    btn.disabled = true; prog.textContent = "starting\u2026";
-    const quit = () => {
-      const api = window.pywebview && window.pywebview.api;
-      if (api && api.quit_for_update) api.quit_for_update();
-      else prog.textContent += " Close this tab: ByteBunker reopens by itself.";
-    };
-    try {
-      const resp = await fetch("/api/update/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      if (!resp.ok) { let e = {}; try { e = await resp.json(); } catch (x) {} prog.textContent = e.error || ("could not start the update (HTTP " + resp.status + ")"); btn.disabled = false; return; }
-      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n"); buf = parts.pop();
-        for (const ln of parts) {
-          if (!ln.startsWith("data:")) continue;
-          let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
-          if (o.error) { prog.textContent = o.error; btn.disabled = false; }
-          else if (o.phase === "download") prog.textContent = "downloading " + mb(o.got) + (o.total ? " of " + mb(o.total) : "");
-          else if (o.phase === "verify") prog.textContent = "checking the download against its checksum\u2026";
-          else if (o.phase === "unpack") prog.textContent = "unpacking\u2026";
-          else if (o.phase === "ready") { prog.textContent = "restarting into " + o.version + "\u2026"; setTimeout(quit, 800); }
-        }
-      }
-    } catch (e) { prog.textContent = "the update stopped: " + e.message; btn.disabled = false; }
+  /* the sidebar's version chip: click to check; it lights up when a newer version is out */
+  let updateKnown = null;
+  function updateChip(r, current) {
+    const chip = $("update-chip");
+    if (r && r.newer) updateKnown = r;
+    chip.hidden = false;
+    chip.classList.toggle("newer", !!(updateKnown && updateKnown.newer));
+    $("update-chip-text").textContent = updateKnown && updateKnown.newer
+      ? "Update to " + updateKnown.latest : "ByteBunker " + (current || (r && r.current) || "");
+    chip.title = updateKnown && updateKnown.newer ? "Install " + updateKnown.latest + " and restart" : "Check for a newer ByteBunker";
   }
+  async function checkForUpdates() {
+    if (updateKnown && updateKnown.newer) return updateDialog(updateKnown);
+    const chip = $("update-chip"); const was = $("update-chip-text").textContent;
+    chip.disabled = true; $("update-chip-text").textContent = "Checking\u2026";
+    let r = null;
+    try { const resp = await fetch("/api/update/check"); r = await resp.json(); if (!resp.ok) throw new Error(r.error || "HTTP " + resp.status); }
+    catch (e) { r = { error: e.message }; }
+    chip.disabled = false; $("update-chip-text").textContent = was;
+    if (r.newer) updateChip(r);
+    updateDialog(r);
+  }
+  $("update-chip").onclick = checkForUpdates;
+
+  // Install and restart: the notes, then download, check, install and restart with a progress bar;
+  // the page waits for the new version to answer and reloads into it
+  function updateDialog(r) {
+    if ($("update-dialog")) return;
+    const wrap = document.createElement("div"); wrap.id = "update-dialog"; wrap.className = "palette-wrap";
+    const box = document.createElement("div"); box.className = "palette update-box"; wrap.appendChild(box);
+    const close = () => wrap.remove();
+    wrap.onclick = (e) => { if (e.target === wrap && !busy) close(); };
+    let busy = false;
+    const h = document.createElement("h2"); box.appendChild(h);
+    const sub = document.createElement("div"); sub.className = "hint"; box.appendChild(sub);
+    if (r.error || r.none_published || !r.newer) {
+      h.textContent = r.error ? "Could not check for updates" : "You have the latest";
+      sub.textContent = r.error ? r.error : r.none_published ? "No release is published yet." : "ByteBunker " + (r.current || "") + " is the newest version.";
+      const row = document.createElement("div"); row.className = "update-actions";
+      const ok = document.createElement("button"); ok.type = "button"; ok.className = "ghost-btn"; ok.textContent = "Close"; ok.onclick = close;
+      const wn = document.createElement("button"); wn.type = "button"; wn.className = "linky"; wn.textContent = "What's new"; wn.onclick = () => { close(); showWhatsNew(); };
+      row.appendChild(wn); row.appendChild(ok); box.appendChild(row);
+      document.body.appendChild(wrap); ok.focus();
+      return;
+    }
+    h.textContent = "ByteBunker " + r.latest + " is ready";
+    sub.textContent = "You have " + r.current + ". Installing takes a moment; ByteBunker restarts by itself, and your chats, settings and runs stay as they are.";
+    const notes = document.createElement("div"); notes.className = "update-notes"; notes.appendChild(helpDom(r.notes || "This release has no notes.")); box.appendChild(notes);
+    const steps = document.createElement("ol"); steps.className = "update-steps";
+    const names = [["download", "Download"], ["verify", "Check"], ["unpack", "Install"], ["ready", "Restart"]];
+    const li = {};
+    for (const [k, t] of names) { const x = document.createElement("li"); x.textContent = t; li[k] = x; steps.appendChild(x); }
+    const bar = document.createElement("div"); bar.className = "update-bar"; const fill = document.createElement("div"); bar.appendChild(fill);
+    const status = document.createElement("div"); status.className = "hint update-status";
+    const row = document.createElement("div"); row.className = "update-actions";
+    const later = document.createElement("button"); later.type = "button"; later.className = "ghost-btn"; later.textContent = "Later"; later.onclick = close;
+    const go = document.createElement("button"); go.type = "button"; go.className = "solid-btn"; go.id = "update-install";
+    go.textContent = r.can_update ? "Install and restart" : "Open the release page";
+    if (r.page) { const rp = document.createElement("button"); rp.type = "button"; rp.className = "linky"; rp.textContent = "release page"; rp.onclick = () => openOut(r.page); row.appendChild(rp); }
+    row.appendChild(later); row.appendChild(go);
+    if (!r.can_update && r.why_not) status.textContent = r.why_not;
+    if (r.can_update) { box.appendChild(steps); box.appendChild(bar); }
+    box.appendChild(status); box.appendChild(row);
+    document.body.appendChild(wrap); go.focus();
+    const phase = (k) => {
+      let past = true;
+      for (const [n] of names) { li[n].className = n === k ? "on" : past ? "done" : ""; if (n === k) past = false; }
+    };
+    go.onclick = async () => {
+      if (!r.can_update) { if (r.page) openOut(r.page); return; }
+      busy = true; go.disabled = true; later.disabled = true; wrap.classList.add("busy"); box.classList.add("running");
+      phase("download"); status.textContent = "Downloading\u2026";
+      try {
+        const resp = await fetch("/api/update/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (!resp.ok) { let e = {}; try { e = await resp.json(); } catch (x) {} throw new Error(e.error || "could not start the update (HTTP " + resp.status + ")"); }
+        const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "", ready = null;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const parts = buf.split("\n"); buf = parts.pop();
+          for (const ln of parts) {
+            if (!ln.startsWith("data:")) continue;
+            let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
+            if (o.error) throw new Error(o.error);
+            if (o.phase === "download") {
+              phase("download");
+              const pct = o.total ? Math.round(100 * o.got / o.total) : 0;
+              fill.style.width = (o.total ? pct * 0.8 : 10) + "%";
+              status.textContent = "Downloading " + mb(o.got) + (o.total ? " of " + mb(o.total) : "");
+            } else if (o.phase === "verify") { phase("verify"); fill.style.width = "84%"; status.textContent = "Checking the download against its checksum\u2026"; }
+            else if (o.phase === "unpack") { phase("unpack"); fill.style.width = "92%"; status.textContent = "Installing\u2026"; }
+            else if (o.phase === "ready") { ready = o; }
+          }
+        }
+        if (!ready) throw new Error("the update ended without finishing");
+        phase("ready"); fill.style.width = "100%";
+        status.textContent = "Restarting into " + ready.version + "\u2026";
+        restartInto(ready.version, status);
+      } catch (e) {
+        busy = false; go.disabled = false; later.disabled = false; wrap.classList.remove("busy"); box.classList.remove("running");
+        status.textContent = "The update stopped: " + e.message + ". Nothing changed; you can try again.";
+        go.textContent = "Try again";
+      }
+    };
+  }
+  function restartInto(version, status) {
+    const api = window.pywebview && window.pywebview.api;
+    setTimeout(() => { if (api && api.quit_for_update) api.quit_for_update(); }, 700);
+    // a browser tab (or a window that outlives the swap) waits for the new version, then reloads into it
+    const t0 = Date.now();
+    const poll = async () => {
+      try {
+        const h = await (await fetch("/api/hello", { cache: "no-store" })).json();
+        if (h.version === version) { location.reload(); return; }
+      } catch (e) {}
+      if (Date.now() - t0 > 120000) { status.textContent = "ByteBunker " + version + " is installed. If it did not open by itself, open ByteBunker again."; return; }
+      setTimeout(poll, 1500);
+    };
+    setTimeout(poll, 2500);
+  }
+
   async function showWhatsNew() {
     let d = { sections: [] };
     try { d = await (await fetch("/api/changelog")).json(); } catch (e) {}
@@ -2394,6 +2489,7 @@
     let s = {};
     try { s = await (await fetch("/api/settings")).json(); } catch (e) { return; }
     if (!s.desktop) return;
+    updateChip(null, s.version);
     const seen = () => fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "update_seen" }) }).catch(() => {});
     const link = (text, fn) => { const a = document.createElement("button"); a.type = "button"; a.className = "linky"; a.textContent = text; a.onclick = fn; return a; };
     if (s.updated) {
@@ -2406,7 +2502,10 @@
     } else if (s.update_check_at_start) {
       try {
         const r = await (await fetch("/api/update/check")).json();
-        if (r.newer) appBanner((t) => { t.appendChild(document.createTextNode("ByteBunker " + r.latest + " is available. ")); t.appendChild(link("Update in Settings", () => go("settings"))); }, null);
+        if (r.newer) {
+          updateChip(r);
+          appBanner((t) => { t.appendChild(document.createTextNode("ByteBunker " + r.latest + " is available. ")); t.appendChild(link("Install and restart", () => updateDialog(r))); }, null);
+        }
       } catch (e) {}
     }
   }
@@ -5471,6 +5570,7 @@
     items.push({ label: "Agents settings", kind: "screen", kw: "court plane workers", run: () => { go("agents"); agentsTab("settings"); } });
     items.push({ label: "New chat", kind: "action", kw: "", run: newChat });
     items.push({ label: "Light or dark theme", kind: "action", kw: "theme", run: () => $("theme-btn").click() });
+    if (!$("update-chip").hidden) items.push({ label: "Check for updates", kind: "action", kw: "update upgrade install version new", run: checkForUpdates });
     items.push({ label: "Help contents", kind: "help", kw: "guides docs", run: () => helpHome() });
     for (const g of help.guides || []) items.push({ label: g.title, kind: "help", kw: g.summary || "", run: () => openHelp(g.id) });
     return items;
