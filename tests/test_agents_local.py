@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import agents  # noqa: E402
 
 
+@unittest.skipIf(sys.platform == "win32", "a run on this computer starts through env; on Windows agents work in WSL2")
 class LocalRun(unittest.TestCase):
     def test_the_harness_does_not_see_the_apps_config(self):
         d = tempfile.mkdtemp()
