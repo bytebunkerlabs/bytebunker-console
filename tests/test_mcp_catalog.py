@@ -68,7 +68,10 @@ class OneTerminal(unittest.TestCase):
         self.assertEqual(r["config"]["terminal"]["enabled"], True)
         self.assertEqual(r["config"]["terminal"]["args"], ["mcp_terminal.py", folder])
         self.assertEqual(r["servers"]["terminal"]["state"], "ready", r["servers"])
-        st, out = self.srv.request("POST", "/api/tool-call", {"name": "terminal__run", "arguments": {"command": "pwd"}})
+        import cmdbox
+        # sandboxed where this computer has one; elsewhere (Windows without WSL2) a full-access chat, which never asks
+        st, out = self.srv.request("POST", "/api/tool-call", {"name": "terminal__run", "arguments": {"command": "pwd"}},
+                                   headers={"X-BB-Access": "local" if cmdbox.kind() else "full"})
         self.assertFalse(out["isError"], out)
         self.assertIn(os.path.realpath(folder), os.path.realpath(out["content"].split("cwd: ", 1)[1].split(")")[0]))
 

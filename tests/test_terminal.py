@@ -16,6 +16,9 @@ class TerminalTest(unittest.TestCase):
         os.makedirs(os.path.join(self.dir, "sub"))
         term.STATE["cwd"] = self.dir
         term.STATE["root"] = os.path.realpath(self.dir)     # the sandbox's writable folder
+        # these test the shell itself; where there is no sandbox (Windows without WSL2) that means full access
+        import cmdbox
+        term.STATE["mode"] = "local" if cmdbox.kind() else "full"
 
     def test_output_and_exit_codes(self):
         text, err = term.run({"command": "echo hello-bb"})
