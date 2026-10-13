@@ -4621,9 +4621,14 @@
       const last = d.master[d.master.length - 1] || {};
       const ended = last.name === "final_answer" || last.kind === "final_answer";
       const st = mh.querySelector(".master-state");
-      if (d.running) { st.textContent = "\u25c6 deciding"; st.classList.add("live-dot"); }
-      else { st.textContent = ended ? "\u2713 answered" + (last.ts ? " \u00b7 " + relTime(last.ts * 1000) : "") : "idle"; mc.classList.remove("live-card"); }
       mh.querySelector(".src").textContent = d.master.length + " recent decisions";
+      if (d.running) {
+        const g = d.progress || {};
+        const mins = (x) => Math.round((x || 0) / 60);
+        st.textContent = g.wrapping ? "\u25c6 wrapping up" : "\u25c6 deciding"; st.classList.add("live-dot");
+        if (g.round) mh.querySelector(".src").textContent = "round " + g.round + "  \u00b7  " + mins(g.elapsed_s) + (g.deadline_s ? " of " + mins(g.deadline_s) : "") + " min  \u00b7  workers " + (g.done || 0) + " of " + (g.spawned || 0) + " done" + (g.running ? ", " + g.running + " running" : "");
+      }
+      else { st.textContent = ended ? "\u2713 answered" + (last.ts ? " \u00b7 " + relTime(last.ts * 1000) : "") : "idle"; mc.classList.remove("live-card"); }
       mc.appendChild(mh);
       const ev = document.createElement("div");
       ev.className = "skill-tags mono"; ev.style.whiteSpace = "pre-wrap"; ev.style.lineHeight = "1.55";
@@ -4750,6 +4755,9 @@
     $("agent-run").disabled = true;
     $("agent-stop").hidden = false;
     $("agent-stop").disabled = false;
+    $("agent-wrap").hidden = false;
+    $("agent-wrap").disabled = false;
+    $("agent-wrap").textContent = "Wrap up";
     const ctl = new AbortController();
     state.agentAbort = ctl;
     const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
@@ -4797,6 +4805,7 @@
       state.agentRun = null;
       $("agent-run").disabled = false;
       $("agent-stop").hidden = true;
+      $("agent-wrap").hidden = true;
       if (!attachTo) renderAgents();
     }
     if (attachTo) {
@@ -4805,6 +4814,14 @@
     }
   }
 
+  // Wrap up: the master answers now with what it has (unlike Stop, you still get an answer)
+  $("agent-wrap").onclick = async () => {
+    const b = $("agent-wrap"); b.disabled = true;
+    try {
+      const r = await (await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "wrapup" }) })).json();
+      b.textContent = r.ok ? "Wrapping up\u2026" : (r.error || "could not ask");
+    } catch (e) { b.disabled = false; }
+  };
   async function stopAgentRun() {
     // the goal runs on the server: stop it there; the stream ends when the worker has stopped it
     if (state.agentRun) {

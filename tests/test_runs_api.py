@@ -70,6 +70,15 @@ ev("goal_accepted", text=goal)
 if goal == "file a job":
     ev("job_filed", job={"name": "weekly digest", "kind": "chat", "prompt": "digest", "schedule": {"kind": "interval", "every_min": 10080}})
 print("working on it", flush=True)
+if goal == "wrap me":
+    # a master that works until it is told to wrap up, then answers with what it has
+    wrap = os.environ.get("BYTEBUNKER_WRAP_FILE") or ""
+    for i in range(300):
+        ev("master_round", round=i + 1, elapsed_s=i, deadline_s=3600, spawned=2, done=1, running=1, wrapping=False)
+        if wrap and os.path.exists(wrap) and os.path.getsize(wrap):
+            print("told to wrap up", flush=True)
+            break
+        time.sleep(0.05)
 if goal == "fail please":
     ev("run_end", outcome="failed", exit_code=1, reason="no final answer")
     sys.exit(1)
@@ -189,6 +198,29 @@ class AgentRunsV2Test(unittest.TestCase):
         full = [json.loads(f["data"]) for f in self.srv.sse("/api/runs/%s/events" % rid, timeout=10,
                 until=lambda fr: json.loads(fr[-1]["data"])["type"] == "finished")]
         return rid, frames, full
+
+    def test_wrap_up_reaches_the_master_and_its_progress_shows(self):
+        import threading as th
+        result = {}
+        t = th.Thread(target=lambda: result.update(r=self.goal("wrap me")))
+        t.start()
+        deadline = time.time() + 10
+        prog = None
+        while time.time() < deadline:
+            st, d = self.srv.request("GET", "/api/agents/slaves")
+            if d.get("running") and d.get("progress"):
+                prog = d["progress"]
+                break
+            time.sleep(0.1)
+        self.assertTrue(prog and prog["spawned"] == 2 and prog["deadline_s"] == 3600, prog)
+        st, r = self.srv.request("POST", "/api/agents", {"action": "wrapup"})
+        self.assertEqual(st, 200, r)
+        t.join(20)
+        rid, frames, full = result["r"]
+        lines = [f.get("line") for f in frames if f.get("line")]
+        self.assertIn("told to wrap up", lines)
+        st, r = self.srv.request("POST", "/api/agents", {"action": "wrapup"})
+        self.assertEqual(st, 409)                               # nothing running now
 
     def test_the_court_travels_with_the_run(self):
         st, d = self.srv.request("GET", "/api/agents/court")

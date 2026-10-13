@@ -107,7 +107,7 @@ DEFAULT_CONFIG = {
     # Safe by default: the harness launcher is inert until you enable it and
     # point dir/ssh at a dedicated worker host (see agents.py).
     "agents": {"enabled": False, "ssh": "", "dir": "", "python": "uv run",
-               "script": "scripts/run_master.py", "run_timeout_s": 10800},
+               "script": "scripts/run_master.py", "run_timeout_s": 3600},
 }
 
 
@@ -1062,9 +1062,16 @@ def agent_goal(run, emit, goal, via="app"):
         os.chmod(spec_path, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(spec)
+    # Wrap up (the Master tab's button): an event the run's watchdog turns into the master's signal
+    run.wrap_event = threading.Event()
+    wrap_file = None
+    if st["mode"] != "ssh":
+        import tempfile
+        fd, wrap_file = tempfile.mkstemp(prefix="bb-wrap-")
+        os.close(fd)
     cmd = agentmod.build_command(CFG, goal, run_id=run.id, caps=caps,
                                  spec_len=len(spec.encode("utf-8")) if st["mode"] == "ssh" else 0,
-                                 spec_path=spec_path)
+                                 spec_path=spec_path, wrap_file=wrap_file)
     if not AGENT_SLOT.acquire(blocking=False):
         if spec_path:
             os.remove(spec_path)
@@ -1106,6 +1113,12 @@ def agent_goal(run, emit, goal, via="app"):
                 RUNS.emit(run, "agent_event", evt)
                 if evt.get("type") == "job_filed" and isinstance(evt.get("job"), dict):
                     file_job(evt["job"])
+                elif evt.get("type") == "master_round":
+                    # where the master is: the Master tab's progress line
+                    run.meta["progress"] = {k: evt.get(k) for k in ("round", "elapsed_s", "deadline_s", "spawned",
+                                                                   "done", "running", "wrapping")}
+                elif evt.get("type") == "wrap_up":
+                    run.meta.setdefault("progress", {})["wrapping"] = True
                 elif evt.get("type") == "run_end":
                     end.update(outcome=evt.get("outcome"), exit_code=evt.get("exit_code"), reason=evt.get("reason"))
                 return
@@ -1132,7 +1145,8 @@ def agent_goal(run, emit, goal, via="app"):
         try:
             code, killed = agentmod.run_streaming(cmd, cwd, on_line, run.cancel_event,
                                                   timeout_s=agent_run_timeout(CFG),
-                                                  stdin_first=spec if st["mode"] == "ssh" else "")
+                                                  stdin_first=spec if st["mode"] == "ssh" else "",
+                                                  wrap_event=run.wrap_event, wrap_file=wrap_file)
         except FileNotFoundError as e:
             emit({"error": "could not launch the harness: %s" % e})
             code, killed = -1, "error"
@@ -1151,11 +1165,12 @@ def agent_goal(run, emit, goal, via="app"):
                  "outcome": end.get("outcome")}, captured)
     finally:
         AGENT_SLOT.release()
-        if spec_path:
-            try:
-                os.remove(spec_path)
-            except OSError:
-                pass
+        for path in (spec_path, wrap_file):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 def run_job(job, run):
@@ -2950,6 +2965,7 @@ class Handler(BaseHTTPRequestHandler):
             going = RUNS.active("agents")
             out = agentmod.recent_slaves(CFG, goal_id=going[0].meta.get("goal_id") if going else None)
             out["running"] = bool(going)             # whether the master is working now, not just its last events
+            out["progress"] = going[0].meta.get("progress") if going else None
             self._json(out)
         elif path == "/api/agents/stats":
             self._json(agentmod.stats(CFG))
@@ -3382,6 +3398,16 @@ class Handler(BaseHTTPRequestHandler):
             save_config()
             TRACE.log("agents", action="court", roles=sorted(court["roles"]))
             self._json({"ok": True, "court": court})
+            return
+        if body.get("action") == "wrapup":
+            going = [r for r in RUNS.active("agents") if getattr(r, "wrap_event", None) is not None]
+            if not going:
+                self._json({"error": "no goal is running"}, 409)
+                return
+            going[0].wrap_event.set()
+            RUNS.emit(going[0], "out", {"line": "console: wrap up asked: the master answers with what it has"})
+            TRACE.log("agents", action="wrapup", run=going[0].id)
+            self._json({"ok": True})
             return
         if body.get("action") == "plane_install":
             target, what = str(body.get("target") or "").strip(), str(body.get("what") or "")

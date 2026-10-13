@@ -41,11 +41,11 @@ def agent_cfg(CFG):
 
 
 def agent_timeout(CFG):
-    """Wall-clock cap on one goal, 5 min to 24 h (run_timeout_s, 3 h by default)."""
+    """Wall-clock cap on one goal, 5 min to 24 h (run_timeout_s, 1 h by default; the master wraps up at 70%)."""
     try:
-        return max(300, min(86400, int(agent_cfg(CFG).get("run_timeout_s") or 10800)))
+        return max(300, min(86400, int(agent_cfg(CFG).get("run_timeout_s") or 3600)))
     except (TypeError, ValueError):
-        return 10800
+        return 3600
 
 
 def status(CFG):
@@ -322,7 +322,7 @@ def harness_caps(CFG, refresh=False):
     return a["harness"]
 
 
-def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None):
+def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None, wrap_file=None):
     """Return an argv list to spawn. Raises AgentConfigError when the feature
     is off or unconfigured. The goal is never interpolated into a shell
     unquoted: locally it is its own argv element; over SSH it is shlex-quoted
@@ -363,6 +363,8 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None)
     # arrived in one lump at exit (or never, if the run was stopped). Unbuffered
     # makes it stream line by line, which is the point of watching a run.
     envs = {"PYTHONUNBUFFERED": "1"}
+    if wrap_file:
+        envs["BYTEBUNKER_WRAP_FILE"] = wrap_file      # local: the app writes it when you press Wrap up
     if (a.get("master_name") or "").strip():
         envs["BYTEBUNKER_MASTER_NAME"] = a["master_name"].strip()
     if (a.get("master_instructions") or "").strip():
@@ -388,6 +390,9 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None)
         # setsid execs a COMMAND, so env assignments must go through `env`
         # rather than as a shell prefix (setsid would try to run "VAR=x").
         env_prefix = ("env " + "".join("%s=%s " % (k, shlex.quote(v)) for k, v in envs.items())) if envs else ""
+        # Wrap up, over ssh: the app writes "wrapup" on the run's stdin; the sidecar puts it in a
+        # file the master checks each round (a harness that predates it never looks)
+        env_prefix = (env_prefix or "env ") + 'BYTEBUNKER_WRAP_FILE="$WRAPF" '
         launch = "%s%s %s --goal %s%s%s" % (env_prefix, launcher, shlex.quote(script), shlex.quote(goal),
                                           "".join(" " + shlex.quote(x) for x in extra),
                                           ' --spec "$SPEC"' if caps.get("spec") and spec_len else "")
@@ -408,9 +413,11 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None)
         # stdin is the stop channel, as before
         spec_in = ('SPEC=$(mktemp) && chmod 600 "$SPEC" && head -c %d <&3 > "$SPEC"; ' % int(spec_len)
                    if caps.get("spec") and spec_len else "")
-        remote = ("cd %s && exec 3<&0; " + spec_in + "if command -v setsid >/dev/null 2>&1; then setsid %s & "
+        remote = ("cd %s && exec 3<&0; " + spec_in + "WRAPF=$(mktemp); "
+                  "if command -v setsid >/dev/null 2>&1; then setsid %s & "
                   "else %s & fi; CPID=$!; "
-                  "( cat <&3 >/dev/null; kill -TERM -- -$CPID 2>/dev/null; kill -TERM $CPID 2>/dev/null; "
+                  "( while IFS= read -r l <&3; do [ \"$l\" = wrapup ] && echo 1 > \"$WRAPF\"; done; "
+                  "kill -TERM -- -$CPID 2>/dev/null; kill -TERM $CPID 2>/dev/null; "
                   "sleep 8; kill -KILL -- -$CPID 2>/dev/null; kill -KILL $CPID 2>/dev/null; "
                   # belt and braces: any slave container the dead harness left behind
                   "for rt in podman docker; do command -v $rt >/dev/null 2>&1 && "
@@ -419,7 +426,7 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None)
                   # the run is over: quiet the shell before the sidecar goes, or
                   # its "Terminated" notice lands in the transcript
                   "SIDE=$!; wait $CPID; RC=$?; exec 2>/dev/null; pkill -P $SIDE; kill $SIDE; "
-                  + ('rm -f "$SPEC"; ' if spec_in else "") + "exit $RC"
+                  + ('rm -f "$SPEC"; ' if spec_in else "") + 'rm -f "$WRAPF"; exit $RC'
                   ) % (qdir, launch, launch)
         return ssh_base() + ["-o", "ConnectTimeout=15", ssh, remote]
 
@@ -946,7 +953,7 @@ def kill_slave(CFG, slave_id):
     return {"ok": out == "killed", "id": slave_id, "result": out}
 
 
-def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600, stdin_first=""):
+def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600, stdin_first="", wrap_event=None, wrap_file=None):
     """Run cmd, calling on_line(text) for each stdout line. Returns
     (exit_code, killed). Merges stderr into stdout so a crash is visible.
     A watchdog thread enforces the timeout and honours stop_event, which is
@@ -970,9 +977,23 @@ def run_streaming(cmd, cwd, on_line, stop_event, timeout_s=3600, stdin_first="")
 
     def watchdog():
         deadline = time.time() + timeout_s
+        wrapped = False
         while True:
             if ended.is_set():
                 return
+            if wrap_event is not None and wrap_event.is_set() and not wrapped:
+                # Wrap up: the master answers with what it has (a local run reads the file; over ssh the
+                # sidecar turns the line into it)
+                wrapped = True
+                try:
+                    if wrap_file:
+                        with open(wrap_file, "w") as f:
+                            f.write("1")
+                    else:
+                        proc.stdin.write("wrapup\n")
+                        proc.stdin.flush()
+                except OSError:
+                    pass
             if stop_event.wait(max(0.0, min(1.0, deadline - time.time()))):
                 killed["v"] = "stopped"
                 break
