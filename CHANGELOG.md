@@ -3,6 +3,27 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.7.2 — 2026-10-13
+
+### New
+- **The answer, on top of the Agents screen.** What you asked, the master's
+  answer from its workers' results (tables and links shown properly, a Copy
+  button), how long it took, or how it ended without one.
+- **Thinking, per role**, in Agents > Settings: how hard the master thinks
+  while it plans and spawns (quick by default), and while it answers; the
+  thinking roles; the minions.
+
+### Faster
+- **A simple question is three steps**: plan and spawn, one wait that brings
+  back every worker's answer, the answer. Measured on GLM: 49 s, three rounds
+  (before: 83 s to the first spawn, then four or more rounds).
+- **The master plans with a quick think** and thinks fully once results come
+  back.
+- **No second check of an answer already checked** by the worker's own judge;
+  the queen's review only for a deep, multi-source report.
+- **A web task asked of a minion goes to an internet agent** instead of being
+  refused.
+
 ## 0.7.1 — 2026-10-13
 
 ### Fixed

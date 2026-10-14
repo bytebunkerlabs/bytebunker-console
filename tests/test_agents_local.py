@@ -145,5 +145,55 @@ class MinionPool(unittest.TestCase):
         self.assertEqual([e["name"] for e in fast["pool"]], ["box", "spark-1"])
 
 
+class GoalAnswer(unittest.TestCase):
+    """The Agents screen's Answer: what was asked, the master's answer, how it ended."""
+
+    def test_the_latest_goals_answer(self):
+        import json
+        d = tempfile.mkdtemp()
+        g = os.path.join(d, "trajectories", "agents-abc123")
+        os.makedirs(g)
+        open(os.path.join(d, "trajectories", "spawns.jsonl"), "w").close()
+        with open(os.path.join(g, "events.jsonl"), "w") as f:
+            for e in ({"type": "goal_accepted", "goal_id": "agents-abc123", "ts": 1.0, "text": "versions?"},
+                      {"type": "slave_spawned", "goal_id": "agents-abc123", "ts": 2.0},
+                      {"type": "final_answer", "goal_id": "agents-abc123", "ts": 9.0, "text": "| a | b |\n|---|---|"},
+                      {"type": "run_end", "goal_id": "agents-abc123", "ts": 9.5, "outcome": "answered",
+                       "reason": "", "elapsed_s": 8.5}):
+                f.write(json.dumps(e) + "\n")
+        out = agents.recent_slaves({"agents": {"dir": d}})
+        a = out["answer"]
+        self.assertEqual((a["goal"], a["text"], a["outcome"], a["elapsed_s"]), ("versions?", "| a | b |\n|---|---|", "answered", 8.5))
+
+
+class Thinking(unittest.TestCase):
+    def test_efforts_and_the_masters_planning_reach_the_spec(self):
+        home = tempfile.mkdtemp()
+        os.environ.setdefault("BYTEBUNKER_DATA", os.path.join(home, "data"))
+        os.environ.setdefault("BYTEBUNKER_CONFIG", os.path.join(home, "config.json"))
+        import server
+
+        class GW:
+            models, model_map = [{"id": "glm"}, {"id": "qwen"}], {"glm": "spark-1", "qwen": "mac"}
+
+            def refresh(self, force=False):
+                pass
+
+            def resolve(self, model):
+                return model, {"name": "x", "url": "http://10.0.0.1:8888/v1"}
+        saved = server.CFG, server.GW
+        server.CFG = {"agents": {"master_model": "glm", "slave_model": "qwen", "master_effort": "high",
+                                 "master_plan_effort": "off", "fast_effort": "low", "harness": {"plan": True}}}
+        server.GW = GW()
+        try:
+            roles = server.agents_spec()["roles"]
+            self.assertEqual((roles["master"]["effort"], roles["master"]["plan_effort"], roles["fast"]["effort"]),
+                             ("high", "off", "low"))
+            server.CFG["agents"]["harness"] = {}
+            self.assertNotIn("plan_effort", server.agents_spec()["roles"]["master"])   # an older harness
+        finally:
+            server.CFG, server.GW = saved
+
+
 if __name__ == "__main__":
     unittest.main()

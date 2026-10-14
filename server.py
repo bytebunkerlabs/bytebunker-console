@@ -1160,6 +1160,8 @@ def agents_spec():
                     r["api_key"] = gw["key"]
         if a.get(role + "_effort"):
             r["effort"] = a[role + "_effort"]
+        if role == "master" and a.get("master_plan_effort") and (a.get("harness") or {}).get("plan"):
+            r["plan_effort"] = a["master_plan_effort"]       # how hard it thinks while planning and spawning
         out[role] = r
     pool = minion_pool(a, pick.get("fast"), remote)
     if pool and len(pool) > 1 and (a.get("harness") or {}).get("pool"):
@@ -1178,6 +1180,7 @@ def agents_spec():
     return spec if len(spec) > 1 else None
 
 
+EFFORTS = ("off", "low", "medium", "high", "max")
 ROLE_LABELS = {"master_model": "the master", "thinking_model": "the thinking roles",
                "slave_model": "the minions"}
 
@@ -3259,6 +3262,8 @@ class Handler(BaseHTTPRequestHandler):
             st["thinking_model"] = a.get("thinking_model") or ""
             st["slave_model"] = a.get("slave_model") or ""
             st["minion_pool"] = a.get("minion_pool") or []
+            for k in ("master_effort", "thinking_effort", "fast_effort", "master_plan_effort"):
+                st[k] = a.get(k) or ""
             st["unserved"] = {k: a[k] for k in ("master_model", "thinking_model", "slave_model")
                               if (a.get(k) or "").strip() and not model_served(a[k].strip())}
             st["minion_slots"] = a.get("minion_slots") or 4
@@ -3883,6 +3888,14 @@ class Handler(BaseHTTPRequestHandler):
             for key in ("master_model", "thinking_model", "slave_model"):
                 if key in body:
                     a[key] = str(body.get(key) or "")[:120]
+            for key, allowed in (("master_effort", EFFORTS), ("thinking_effort", EFFORTS), ("fast_effort", EFFORTS),
+                                 ("master_plan_effort", EFFORTS + ("same",))):
+                if key in body:
+                    v = str(body.get(key) or "").strip().lower()
+                    if v in allowed:
+                        a[key] = v
+                    else:
+                        a.pop(key, None)             # blank: the model's (or the worker's) default
             if isinstance(body.get("minion_pool"), list):
                 # more engines for the minions: [{model ("id" or "id@gateway"), slots}]
                 pool = []
@@ -3911,6 +3924,8 @@ class Handler(BaseHTTPRequestHandler):
                         "run_timeout_s": agent_run_timeout(CFG),
                         "master_model": a.get("master_model") or "", "thinking_model": a.get("thinking_model") or "",
                         "slave_model": a.get("slave_model") or "", "minion_pool": a.get("minion_pool") or [],
+                        **{k: a.get(k) or "" for k in ("master_effort", "thinking_effort", "fast_effort",
+                                                        "master_plan_effort")},
                         "minion_slots": a.get("minion_slots") or 4})
             return
         goal = body.get("goal") or ""

@@ -657,3 +657,9 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
 .pool-row{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
 .pool-row .pool-slots{width:56px;padding:3px 6px}
 .not-served{color:var(--err);font-size:11.5px;font-weight:500;white-space:nowrap}
+
+/* the goal's answer on the Agents screen */
+.answer-card{border-color:var(--accent)}
+.answer-card .answer-body{font-size:13.5px;line-height:1.6;max-height:520px;overflow:auto}
+.answer-card .answer-body table{border-collapse:collapse;margin:6px 0}
+.answer-card .answer-body td,.answer-card .answer-body th{border:1px solid var(--border);padding:4px 8px;text-align:left}

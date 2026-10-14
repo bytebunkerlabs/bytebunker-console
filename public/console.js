@@ -4605,6 +4605,16 @@
       if (warn) { warn.hidden = !missing; warn.textContent = missing ? "not served anywhere" : ""; warn.title = missing ? missing + " is not served by any gateway right now: pick another, or serve it on Deploy" : ""; }
     }
     renderMinionPool(d);
+    for (const sel of document.querySelectorAll(".effort-sel")) {
+      if (document.activeElement === sel) continue;
+      const plan = sel.dataset.plan === "1";
+      sel.textContent = "";
+      for (const [v, label] of [["", plan ? "quick (default)" : "model default"], ["off", "off"], ["low", "low"], ["medium", "medium"],
+                                ["high", "high"], ["max", "max"]].concat(plan ? [["same", "same as answering"]] : [])) {
+        const o = document.createElement("option"); o.value = v; o.textContent = label; sel.appendChild(o);
+      }
+      sel.value = d[sel.dataset.key] || "";
+    }
 
     $("agent-run").disabled = !d.enabled || state.streaming;
     state.agentsOn = !!d.enabled;
@@ -4730,11 +4740,41 @@
     add("What it did \u00b7 " + (d.events || []).length + " events", (d.events || []).map(fmtEvent), true);
   }
 
+  // The goal's result, on top: what was asked, the master's answer drawn from its
+  // workers' results, and how it ended (or that it is still working).
+  function answerCard(d) {
+    const a = d.answer || {};
+    const card = document.createElement("div"); card.className = "card answer-card"; card.style.gap = "8px";
+    if (!a.goal_id && !d.running) { card.hidden = true; return card; }
+    const head = document.createElement("div"); head.className = "skill-head";
+    head.innerHTML = "<div class='skill-id'><b>Answer</b><span class='src mono'></span></div><span class='src mono answer-state'></span>";
+    const st = head.querySelector(".answer-state");
+    const mins = (s) => s >= 90 ? Math.round(s / 60) + " min" : Math.round(s || 0) + " s";
+    if (d.running) { st.textContent = "◆ working — the answer comes here"; st.classList.add("live-dot"); }
+    else if (a.outcome === "answered" || a.text) st.textContent = "✓ answered" + (a.elapsed_s ? " in " + mins(a.elapsed_s) : "") + (a.ended ? " · " + relTime(a.ended * 1000) : "");
+    else if (a.outcome) { st.textContent = "⚠ " + a.outcome.replace("_", " ") + (a.reason ? ": " + a.reason : ""); st.style.color = "var(--err)"; }
+    head.querySelector(".src").textContent = a.goal ? "“" + (a.goal.length > 140 ? a.goal.slice(0, 140) + "…" : a.goal) + "”" : "";
+    card.appendChild(head);
+    if (a.text && !(d.running && a.goal_id && d.progress && !a.outcome)) {
+      const body = helpDom(a.text); body.classList.add("answer-body");
+      card.appendChild(body);
+      const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:8px";
+      const cp = document.createElement("button"); cp.type = "button"; cp.className = "ghost-btn"; cp.textContent = "Copy";
+      cp.onclick = async () => { try { await navigator.clipboard.writeText(a.text); cp.textContent = "Copied"; setTimeout(() => (cp.textContent = "Copy"), 1500); } catch (e) {} };
+      acts.appendChild(cp); card.appendChild(acts);
+    } else if (!d.running && a.outcome && !a.text) {
+      const n = document.createElement("div"); n.className = "hint"; n.textContent = "No answer came back. The master's decisions below say where it stopped.";
+      card.appendChild(n);
+    }
+    return card;
+  }
+
   async function renderAgentSlaves() {
     const box = $("agents-slaves");
     let d = { ok: false };
     try { d = await (await fetch("/api/agents/slaves")).json(); } catch (e) {}
     box.textContent = "";
+    box.appendChild(answerCard(d));
     // The master's own decisions, live: spawns, waits, results collected,
     // synthesis. This is the Sultan working, not just its minions.
     if ((d.master || []).length) {
@@ -4847,7 +4887,8 @@
           master_instructions: $("master-instructions").value.trim(),
           run_timeout_s: Math.max(5, parseInt($("run-timeout").value, 10) || 180) * 60,
           master_model: $("model-master").value, thinking_model: $("model-thinking").value, slave_model: $("model-slave").value,
-          minion_pool: minionPoolValue(), minion_slots: parseInt($("minion-slots").value, 10) || 4 }),
+          minion_pool: minionPoolValue(), minion_slots: parseInt($("minion-slots").value, 10) || 4,
+          ...Object.fromEntries([...document.querySelectorAll(".effort-sel")].map((x) => [x.dataset.key, x.value])) }),
       });
       $("master-note").textContent = "Saved. The master uses this on the next run.";
     } catch (e) { $("master-note").textContent = "save failed: " + e.message; }

@@ -91,7 +91,8 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
              "%s --version >/dev/null 2>&1 && echo LAUNCHER_OK || echo NO_LAUNCHER; "
              "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null | sort -u | tr '\\n' ' ')"
              "$([ -f src/bytebunker_agents/harness/tool_broker.py ] && echo ' --access')"
-             "$([ -f src/bytebunker_agents/harness/engine_pool.py ] && echo ' --pool'); "
+             "$([ -f src/bytebunker_agents/harness/engine_pool.py ] && echo ' --pool')"
+             "$(grep -q plan_effort src/bytebunker_agents/runspec.py 2>/dev/null && echo ' --plan'); "
              "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0], shlex.quote(script))
     try:
         r = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
@@ -120,7 +121,7 @@ def _caps_from(text):
     """What a harness's run_master.py understands, from its own text."""
     return {"goal_id": "--goal-id" in text, "proto2": "--proto" in text, "spec": "--spec" in text,
             "timeout": "--timeout-s" in text, "court": "--court" in text, "access": "--access" in text,
-            "pool": "--pool" in text, "checked": round(time.time())}
+            "pool": "--pool" in text, "plan": "--plan" in text, "checked": round(time.time())}
 
 
 # The Sultan's court as the harness defines it (slaves/archetypes.py): what
@@ -311,7 +312,8 @@ def harness_caps(CFG, refresh=False):
             # a harness with the tool broker takes access (data and MCP tools for a role)
             probe = ("cd %s && { grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null; "
                      "[ -f src/bytebunker_agents/harness/tool_broker.py ] && echo --access; "
-                     "[ -f src/bytebunker_agents/harness/engine_pool.py ] && echo --pool; } | sort -u") % (
+                     "[ -f src/bytebunker_agents/harness/engine_pool.py ] && echo --pool; "
+                     "grep -q plan_effort src/bytebunker_agents/runspec.py 2>/dev/null && echo --plan; } | sort -u") % (
                 _rq(directory or "~/bytebunker-harness"), shlex.quote(script))
             text = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
                                   capture_output=True, text=True, timeout=20).stdout
@@ -322,6 +324,13 @@ def harness_caps(CFG, refresh=False):
                 if os.path.isfile(os.path.join(os.path.expanduser(directory), "src", "bytebunker_agents", "harness",
                                                name)):
                     text += "\n" + flag
+            try:
+                with open(os.path.join(os.path.expanduser(directory), "src", "bytebunker_agents", "runspec.py"),
+                          encoding="utf-8", errors="replace") as f:
+                    if "plan_effort" in f.read():
+                        text += "\n--plan"
+            except OSError:
+                pass
     except Exception:   # noqa: BLE001 - unknown means the old flags
         return {}
     a["harness"] = _caps_from(text)
@@ -469,9 +478,13 @@ def recent_slaves(CFG, limit=40, goal_id=None):
     if goal_id and re.match(r"^[A-Za-z0-9._-]{1,80}$", goal_id):
         pick_goal = "G={dir}/trajectories/%s/; " % goal_id
     else:
-        pick_goal = "G=$(ls -td {dir}/trajectories/goal-*/ {dir}/trajectories/g-*/ 2>/dev/null | head -1); "
+        pick_goal = ("G=$(ls -td {dir}/trajectories/agents-*/ {dir}/trajectories/goal-*/ "
+                     "{dir}/trajectories/g-*/ 2>/dev/null | head -1); ")
     live_cmd = ("echo ===MASTER===; " + pick_goal +
                 "[ -n \"$G\" ] && tail -n 14 \"$G/master.jsonl\" 2>/dev/null; "
+                # the goal's answer: what was asked, the master's final answer, how it ended
+                "echo ===ANSWER===; [ -n \"$G\" ] && grep -h -E '\"type\": \"(goal_accepted|final_answer|run_end)\"' "
+                "\"$G/events.jsonl\" 2>/dev/null | tail -n 4; "
                 "echo ===LIVE===; RUNNING=\" $( (podman ps --format '{{.Names}}'; docker ps --format '{{.Names}}') 2>/dev/null | tr '\\n' ' ') \"; "
                 "for f in $(find /tmp/ -maxdepth 2 -name events.jsonl -mmin -60 -path '*/bb-*' 2>/dev/null | head -12); do "
                 "n=$(basename $(dirname $f)); n=${n#bb-}; n=${n%-*}; case \"$RUNNING\" in *\" $n \"*) echo \"### $f\"; tail -n 10 \"$f\";; esac; done")
@@ -503,7 +516,26 @@ def recent_slaves(CFG, limit=40, goal_id=None):
         except (subprocess.TimeoutExpired, OSError):
             pass
     spawn_part, _, rest = out.partition("===MASTER===")
-    master_part, _, live_part = rest.partition("===LIVE===")
+    master_part, _, rest = rest.partition("===ANSWER===")
+    answer_part, _, live_part = rest.partition("===LIVE===")
+    answer = {}
+    for line in answer_part.splitlines():
+        try:
+            e = _json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        answer.setdefault("goal_id", e.get("goal_id"))
+        if e.get("type") == "goal_accepted":
+            answer.update(goal=(e.get("text") or "")[:2000], started=e.get("ts"))
+        elif e.get("type") == "final_answer":
+            answer.update(text=(e.get("text") or "")[:20000], ts=e.get("ts"), draft=bool(e.get("draft")))
+        elif e.get("type") == "run_end":
+            answer.update(outcome=e.get("outcome"), reason=e.get("reason"), ended=e.get("ts"),
+                          elapsed_s=e.get("elapsed_s"))
+            if e.get("answer") and not answer.get("text"):
+                answer["text"] = e["answer"][:20000]
     master = []
     for line in master_part.splitlines():
         try:
@@ -545,7 +577,7 @@ def recent_slaves(CFG, limit=40, goal_id=None):
             "answer": (ans or "")[:400], "error": (r.get("error") or "")[:200],
             "ts": r.get("timestamp"), "engine": r.get("engine"), "model": r.get("model"),
         })
-    return {"ok": True, "slaves": slaves[::-1], "live": live, "master": master}
+    return {"ok": True, "slaves": slaves[::-1], "live": live, "master": master, "answer": answer or None}
 
 
 _SLAVE_ID = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
