@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=${PYTHON:-desktop/.venv/bin/python}
 "$PY" -m PyInstaller --noconfirm --clean --log-level WARN --distpath desktop/dist --workpath desktop/build desktop/bytebunker.spec
+# a Developer ID and notarization when the credentials are set (release builds); else ad-hoc
+bash desktop/sign-mac.sh app desktop/dist/ByteBunker.app
 VER=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' version.py)
 STAGE=desktop/dist/dmg
 rm -rf "$STAGE" && mkdir -p "$STAGE"
@@ -21,6 +23,7 @@ for attempt in 1 2 3 4 5; do
   sleep $((attempt * 5))
 done
 rm -rf "$STAGE"
+bash desktop/sign-mac.sh dmg "$OUT"
 # the app's own updater takes this zip (ditto keeps the bundle and its signature)
 ZIP="desktop/dist/ByteBunker-$VER-mac-$(uname -m).zip"
 rm -f "$ZIP"

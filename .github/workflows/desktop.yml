@@ -47,6 +47,15 @@ jobs:
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: PYTHON=python bash desktop/build-mac.sh
+        env:
+          # release builds only (v* tags): Developer ID signing and notarization, when the
+          # owner has added the secrets; without them the app stays ad-hoc signed, as before
+          MACOS_CERT_P12: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.MACOS_CERT_P12 || '' }}
+          MACOS_CERT_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.MACOS_CERT_PASSWORD || '' }}
+          APPLE_API_KEY_P8: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_API_KEY_P8 || '' }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
