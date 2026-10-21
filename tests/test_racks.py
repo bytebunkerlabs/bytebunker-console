@@ -129,9 +129,19 @@ class AddARack(unittest.TestCase):
         shutil.rmtree(self.f, ignore_errors=True)
 
     def pair(self, target="you@box"):
-        frames = self.srv.sse("/api/racks", method="POST", body={"action": "pair", "target": target}, timeout=60,
-                              until=lambda fr: json.loads(fr[-1]["data"]).get("phase") == "done")
-        return [json.loads(x["data"]) for x in frames]
+        import time
+        from test_api import HttpError
+        deadline = time.time() + 5
+        while True:
+            try:
+                frames = self.srv.sse("/api/racks", method="POST", body={"action": "pair", "target": target},
+                                      timeout=60, until=lambda fr: json.loads(fr[-1]["data"]).get("phase") == "done")
+                return [json.loads(x["data"]) for x in frames]
+            except HttpError as e:
+                # the last pairing's run lets go of its key just after its done frame: a moment later it is free
+                if e.status != 409 or time.time() > deadline:
+                    raise
+                time.sleep(0.1)
 
     def found(self, frames):
         return next((x["found"] for x in frames if x.get("found")), None)
