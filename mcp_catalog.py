@@ -23,6 +23,17 @@ CATALOG = [
         "docs": "https://github.com/microsoft/playwright-mcp",
     },
     {
+        "id": "burp", "name": "Burp Suite", "status": "official (PortSwigger)",
+        "description": "Drive Burp Suite over its MCP Server extension: send HTTP/1.1 and HTTP/2 requests, open Repeater and Intruder tabs, read proxy and WebSocket history, list scanner issues, mint Collaborator OOB payloads and poll them, control intercept and the task engine, and encode/decode helpers. For authorised testing only.",
+        "runtime": "node", "command": "npx",
+        "args": ["-y", "mcp-remote@0.15.1", "{url}", "--allow-http", "--transport", "sse-only"],
+        "params": [{"name": "url", "label": "Burp MCP URL", "default": "http://127.0.0.1:9876/", "kind": "text",
+                    "help": "the endpoint the MCP Server extension serves inside Burp (Burp > Settings > MCP); default host and port shown"}],
+        "env": [], "install": ["npm install -g mcp-remote@0.15.1"],
+        "install_note": "Burp itself and its MCP Server extension are installed inside Burp (Extensions > BApp Store > MCP Server, then enable it under Settings > MCP); this only installs the stdio-to-SSE bridge the console speaks through.",
+        "docs": "https://portswigger.net/burp/documentation/desktop/mcp",
+    },
+    {
         "id": "filesystem", "name": "Filesystem", "status": "reference (MCP project)",
         "description": "Read, write, search and move files under one root directory.",
         "runtime": "node", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "{root}"],

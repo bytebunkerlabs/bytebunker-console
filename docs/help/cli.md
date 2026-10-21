@@ -48,6 +48,7 @@ bb pair you@host                    add a rack: its engine and monitor come too
 bb deploy up qwen3-8b               serve a recipe on a rack
 bb agents "goal"                    give the agents a goal and follow it
 bb doctor                           what is reachable, and what to do if not
+bb open                             the app in your browser, with a one-time link
 ```
 
 ## Projects

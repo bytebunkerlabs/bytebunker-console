@@ -38,6 +38,48 @@ class Describe(unittest.TestCase):
         self.assertIn("no NVIDIA GPU", machines.describe(machines.parse("os=Linux\nmem_kb=1000\n"))["why_not"])
         self.assertIn("WSL2", machines.describe(machines.parse(""))["why_not"])
 
+    def test_what_only_you_can_install_is_named(self):
+        spark = "os=Linux\nmem_kb=127600000\ngpu=NVIDIA GB10, [N/A], 580\n"
+        self.assertEqual(machines.describe(machines.parse(spark + "has_python3=1\nhas_git=1\nhas_docker=1\n"))["needs"], [])
+        self.assertEqual(machines.describe(machines.parse(spark + "has_git=1\n"))["needs"], ["python3", "docker"])
+        self.assertEqual(machines.describe(machines.parse(spark + "has_python3=1\nhas_docker=1\n"))["needs"], ["python3"])
+        wsl = "os=Linux\nmem_kb=32000000\ngpu=NVIDIA GeForce RTX 2070, 8192, 610\nwsl=1\nhas_python3=1\nhas_curl=1\n"
+        self.assertEqual(machines.describe(machines.parse(wsl))["needs"], [])        # WSL2 serves without Docker
+        mac = "os=Darwin\narch=arm64\nmem_b=17179869184\n"
+        self.assertEqual(machines.describe(machines.parse(mac))["needs"], ["mac-tools"])
+        self.assertEqual(machines.describe(machines.parse(mac + "has_python3=1\n"))["needs"], [])
+        import server
+        for need in ("python3", "docker", "mac-tools", "bubblewrap", "linger"):
+            self.assertIn(need, server.NEEDS)
+        line = server.install_terminal_line("me@box", "docker")
+        self.assertTrue(line.startswith("ssh -t me@box 'sudo apt-get install -y docker.io"), line)
+        saved = os.environ.pop("BYTEBUNKER_DESKTOP", None)
+        try:   # a server with no desktop opens nothing: it gives the line to run
+            self.assertEqual(server.open_install_terminal("me@box", "python3"),
+                             {"opened": False, "command": "ssh -t me@box 'sudo apt-get install -y python3 git curl'"})
+        finally:
+            if saved is not None:
+                os.environ["BYTEBUNKER_DESKTOP"] = saved
+
+    def test_a_head_names_its_recipe_and_a_worker_its_share(self):
+        base = "os=Linux\nmem_kb=127600000\ngpu=NVIDIA GB10, [N/A], 580\n"
+        head = machines.describe(machines.parse(base + "serving=glm53-flash-keys\nengine_container=1\n"))
+        self.assertEqual((head["serving"], head["share"]), ("glm53-flash-keys", False))
+        worker = machines.describe(machines.parse(base + "engine_container=1\n"))
+        self.assertEqual((worker["serving"], worker["share"]), ("", True))
+        idle = machines.describe(machines.parse(base))
+        self.assertEqual((idle["serving"], idle["share"]), ("", False))
+        # the probe reads the recipe from dgx-serve's own serving.json
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home)
+        os.makedirs(os.path.join(home, ".local/state/dgx-serve"))
+        with open(os.path.join(home, ".local/state/dgx-serve/serving.json"), "w") as f:
+            json.dump({"schema": 1, "recipe": "qwen3-8b", "engine": "llamacpp"}, f, indent=2)
+        import subprocess
+        out = subprocess.run(["/bin/sh", "-c", machines.PROBE], capture_output=True, text=True,
+                             env=dict(os.environ, HOME=home, PATH="/usr/bin:/bin")).stdout
+        self.assertEqual(machines.parse(out).get("serving"), "qwen3-8b")
+
 
 class Suggest(unittest.TestCase):
     def test_what_fits_first_the_largest_first(self):

@@ -9,6 +9,7 @@ started through the app itself (--mcp) and calling back to it, and the
 Cluster screen's path: a (fake) rack monitor added with its token, read
 back through the server, feeding the engine-busy hint."""
 import json
+import os
 import sys
 import threading
 import time
@@ -17,15 +18,28 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:18765").rstrip("/")
+TOKEN = {"value": ""}
 
 
-def get(path, timeout=10):
-    with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
+def instance_token():
+    """The server's token, from instance.json in the app's data folder (BYTEBUNKER_HOME)."""
+    home = os.environ.get("BYTEBUNKER_HOME") or ""
+    try:
+        with open(os.path.join(os.environ.get("BYTEBUNKER_DATA") or os.path.join(home, "data"), "instance.json")) as f:
+            return json.load(f).get("token") or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def get(path, timeout=10, token=True):
+    req = urllib.request.Request(BASE + path, headers={"X-BB-Token": TOKEN["value"]} if token else {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read()
 
 
 def post(path, body):
-    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "X-BB-Token": TOKEN["value"]})
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read().decode())
 
@@ -33,6 +47,7 @@ def post(path, body):
 deadline = time.time() + 90
 while True:
     try:
+        TOKEN["value"] = instance_token()
         get("/api/config", 3)
         break
     except Exception as e:   # noqa: BLE001
@@ -41,6 +56,11 @@ while True:
         time.sleep(1)
 
 checks = []
+try:
+    get("/api/config", 5, token=False)
+    checks.append(("the API refuses a request without the token", False))
+except urllib.error.HTTPError as e:
+    checks.append(("the API refuses a request without the token", e.code == 401))
 cfg = json.loads(get("/api/config")[1])
 checks.append(("desktop config", cfg.get("desktop") is True and cfg.get("gateways") == [] and cfg.get("monitors") == 0))
 checks.append(("index.html", get("/")[0] == 200))
@@ -59,7 +79,8 @@ rows = json.loads(get("/api/sessions")[1])
 one = json.loads(get("/api/sessions?id=s-smoke")[1])
 checks.append(("sessions: list + one", any(r.get("id") == "s-smoke" and "messages" not in r for r in rows)
                and len(one.get("messages") or []) == 2))
-with urllib.request.urlopen(BASE + "/api/events?topics=sessions&after=0", timeout=10) as r:
+with urllib.request.urlopen(urllib.request.Request(BASE + "/api/events?topics=sessions&after=0",
+                                                   headers={"X-BB-Token": TOKEN["value"]}), timeout=10) as r:
     frame = b""
     while not frame.endswith(b"\n\n") or b"data:" not in frame:
         frame += r.readline()

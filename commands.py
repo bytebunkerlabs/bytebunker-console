@@ -92,6 +92,8 @@ COMMANDS = [
     {"cli": "doctor", "slash": None, "args": "", "route": "GET /api/hello",
      "help": "is everything reachable, and what to do if not"},
     {"cli": "serve", "slash": None, "args": "", "route": None, "help": "run the server in this terminal"},
+    {"cli": "open", "slash": None, "args": "[--print]", "route": "POST /api/handoff",
+     "help": "open the app in your browser with a one-time link"},
 ]
 
 

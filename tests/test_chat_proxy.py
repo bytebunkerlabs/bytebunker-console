@@ -38,7 +38,7 @@ class ChatProxyTest(unittest.TestCase):
 
     def chat(self, body, headers=None):
         c = http.client.HTTPConnection("127.0.0.1", self.srv.port, timeout=30)
-        h = {"Host": "127.0.0.1:%d" % self.srv.port, "Content-Type": "application/json"}
+        h = {"Host": "127.0.0.1:%d" % self.srv.port, "Content-Type": "application/json", "X-BB-Token": self.srv.token}
         h.update(headers or {})
         c.request("POST", "/api/chat", body=json.dumps(body), headers=h)
         r = c.getresponse()

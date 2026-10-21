@@ -30,6 +30,7 @@ import time
 
 SEP = "__"          # server/tool name separator in the flattened tool name
 BUILTIN_SCRIPTS = ("mcp_terminal.py", "mcp_jobs.py")
+APP_TOKEN = None    # the app's local token, set by the server once it is published
 
 
 def extra_path():
@@ -204,6 +205,10 @@ class MCPServer:
         # invisible even when installed. Search the usual install roots.
         env["PATH"] = env.get("PATH", "") + os.pathsep + os.pathsep.join(extra_path())
         env.update(self.spec.get("env") or {})
+        # the built-in jobs server calls the app back: it alone gets the app's token
+        # (never the environment, which every command a model runs would inherit)
+        if APP_TOKEN and any(str(a).endswith("mcp_jobs.py") for a in self.spec.get("args") or []):
+            env["BB_CONSOLE_TOKEN"] = APP_TOKEN
         # a folder it is pointed at that is not there yet is made, not refused
         import mcp_catalog
         for folder in mcp_catalog.folders_for(self.spec):

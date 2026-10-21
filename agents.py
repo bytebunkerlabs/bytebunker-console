@@ -937,6 +937,47 @@ def _rq(path):
     return shlex.quote(path)
 
 
+WORKER_DEFAULTS = (("master", "master_model"), ("thinking", "thinking_model"), ("fast", "default_slave_model"))
+
+
+def parse_worker_models(text):
+    """{master, thinking, fast}: the models the harness's config.yaml names under
+    llm: (thinking unset = the master's), read line by line, no YAML library."""
+    found, inside = {}, False
+    for ln in (text or "").splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        if not ln[:1].isspace():
+            inside = ln.split("#")[0].strip() == "llm:"
+            continue
+        if inside:
+            k, sep, v = ln.split("#")[0].strip().partition(":")
+            v = v.strip().strip("'\"")
+            if sep and v:
+                found[k.strip()] = v
+    out = {role: found[key] for role, key in WORKER_DEFAULTS if found.get(key)}
+    if out.get("master") and not out.get("thinking"):
+        out["thinking"] = out["master"]
+    return out
+
+
+def worker_models(CFG):
+    """The models the worker falls back to when a run does not name one: its
+    config.yaml's, over ssh or from this computer; {} when it cannot be read."""
+    ssh, d = _remote_dir(CFG)
+    try:
+        if ssh:
+            text = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, "cat %s/config/config.yaml" % _rq(d)],
+                                  capture_output=True, text=True, timeout=20).stdout
+        else:
+            with open(os.path.join(os.path.expanduser(d), "config", "config.yaml"), encoding="utf-8",
+                      errors="replace") as f:
+                text = f.read()
+    except Exception:   # noqa: BLE001  (unreachable now: the run's own error says so)
+        return {}
+    return parse_worker_models(text)
+
+
 def push_skill(CFG, name, text):
     """Mirror a skill written in the console to the agent worker's harness
     skills/ so the Sultan's roster and the console's Skills screen agree.
@@ -978,6 +1019,48 @@ def remove_skill_remote(CFG, name):
         return {"removed": True}
     except Exception as e:   # noqa: BLE001
         return {"removed": False, "reason": str(e)[:120]}
+
+
+def mirror_skills_dir(CFG, skills_dir):
+    """Copy every skill under skills_dir into the agent worker's harness
+    skills/, so a plugin bundle's private skills reach the Sultan. Local mode
+    copies on disk; an ssh worker gets the tree as a tar over the wire. Unlike
+    push_skill (one SKILL.md) this carries a skill's whole folder, assets and
+    all. Returns a summary."""
+    import io, shutil, tarfile
+    if not agent_cfg(CFG).get("enabled"):
+        return {"pushed": False, "reason": "agents disabled"}
+    if not skills_dir or not os.path.isdir(skills_dir):
+        return {"pushed": False, "reason": "no skills in the bundle"}
+    names = sorted(e for e in os.listdir(skills_dir)
+                   if os.path.isdir(os.path.join(skills_dir, e)) or e.endswith(".md"))
+    if not names:
+        return {"pushed": False, "reason": "no skills in the bundle"}
+    ssh, d = _remote_dir(CFG)
+    try:
+        if ssh:
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                for e in names:
+                    tar.add(os.path.join(skills_dir, e), arcname=e)
+            cmd = ssh_base() + ["-o", "ConnectTimeout=8", ssh,
+                                "mkdir -p %s && tar xzf - -C %s" % (_rq(d + "/skills"), _rq(d + "/skills"))]
+            r = subprocess.run(cmd, input=buf.getvalue(), capture_output=True, timeout=60)
+            if r.returncode != 0:
+                return {"pushed": False, "reason": (r.stderr.decode("utf-8", "replace") or "ssh failed")[:160]}
+            return {"pushed": True, "where": ssh + ":" + d + "/skills", "skills": names}
+        dest = os.path.join(os.path.expanduser(d), "skills")
+        os.makedirs(dest, exist_ok=True)
+        for e in names:
+            src = os.path.join(skills_dir, e)
+            tgt = os.path.join(dest, e)
+            if os.path.isdir(src):
+                shutil.copytree(src, tgt, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, tgt)
+        return {"pushed": True, "where": dest, "skills": names}
+    except Exception as e:   # noqa: BLE001
+        return {"pushed": False, "reason": str(e)[:160]}
 
 
 def kill_slave(CFG, slave_id):

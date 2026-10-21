@@ -38,7 +38,7 @@ The sandbox is macOS's Seatbelt or Linux's bubblewrap. On Windows, it is WSL2: u
 
 ## Tools and skills
 
-With tools on, the model can call the [MCP servers](help:mcp) you added. When chats run on the server (below), a tool that may change something asks first: a card appears with **Allow**, **Always allow** and **Deny**. Attach skills from the [Skills](#skills) screen; their instructions go ahead of your system prompt.
+With tools on, the model can call the [MCP servers](help:mcp) you added. In chats (they run on the server, below), a tool that may change something asks first: a card appears with **Allow**, **Always allow** and **Deny**. Attach skills from the [Skills](#skills) screen; their instructions go ahead of your system prompt.
 
 ## Attachments
 
@@ -52,6 +52,6 @@ The window is shared by the prompt and the answer. When a conversation passes 80
 
 Next to the model, pick a [project](help:projects): the chat follows its instructions and is kept with its other chats. **Terminal** opens this chat in [bb](help:cli), in a terminal window in the project's folder, where the model can work on your files with your tools. Each turn bb adds shows here too.
 
-## Run chats on the server
+## Chats run on the server
 
-In [Settings](#settings), **Chats**, you can run the Playground's turns on the ByteBunker server: they keep going when you close the tab, and a turn started from a terminal with [bb](help:cli) in the open session appears here as it streams.
+The Playground's turns run on the ByteBunker server: they keep going when you close the tab, and a turn started from a terminal with [bb](help:cli) in the open session appears here as it streams. To run them in the tab instead, as before 0.8, turn off [Settings](#settings), **Chats**.

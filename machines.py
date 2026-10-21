@@ -55,6 +55,9 @@ echo "disk_kb=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
 for t in docker podman bwrap git python3 curl; do command -v "$t" >/dev/null 2>&1 && echo "has_$t=1"; done
 R=$(PATH="$HOME/.local/bin:$PATH" command -v rack 2>/dev/null)
 [ -n "$R" ] && echo "rack=$("$R" version 2>/dev/null | head -1)"
+S="$HOME/.local/state/dgx-serve/serving.json"
+[ -s "$S" ] && echo "serving=$(sed -n 's/.*"recipe": *"\([^"]*\)".*/\1/p' "$S" | head -1)"
+command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx serve_node && echo "engine_container=1"
 echo "BB_PROBE_OK"
 '''
 
@@ -157,7 +160,7 @@ def parse(text):
             mem = parts[1] if len(parts) > 1 else ""
             info["gpus"].append({"name": parts[0], "mem_mb": int(mem) if mem.isdigit() else None,
                                  "driver": parts[2] if len(parts) > 2 else ""})
-        elif re.match(r"^[a-z_]+$", k):
+        elif re.match(r"^[a-z_][a-z0-9_]*$", k):         # has_python3 too
             info[k] = v
     return info
 
@@ -201,7 +204,20 @@ def describe(info):
         "%d GB free" % (int(info["disk_kb"]) // 1000000) if info.get("disk_kb", "").isdigit() else "",
     ) if b]
     desc = (kind + ": " if kind else "") + " · ".join(bits)
+    serving = info.get("serving") or ""
+    has = lambda t: info.get("has_" + t) == "1"
+    needs = []
+    if platform == "mac" and not has("python3"):
+        needs.append("mac-tools")
+    elif platform in ("dgx", "linux", "windows") and (not has("python3") or not (has("git") or has("curl"))):
+        needs.append("python3")
+    if platform in ("dgx", "linux") and not has("docker"):
+        needs.append("docker")
     return {"platform": platform, "budget_mb": budget, "description": desc, "why_not": why, "mem_mb": mem_mb,
+            # a rack's head keeps serving.json; a worker runs its share of the engine with none
+            "serving": serving, "share": info.get("engine_container") == "1" and not serving,
+            # what only you can install there (server.NEEDS: one line each, in a terminal)
+            "needs": needs,
             "gpus": gpus, "disk_gb": int(info["disk_kb"]) // 1000000 if info.get("disk_kb", "").isdigit() else None,
             "has": sorted(k[4:] for k, v in info.items() if k.startswith("has_") and v == "1"),
             "rack": info.get("rack") or "", "hostname": info.get("hostname") or ""}

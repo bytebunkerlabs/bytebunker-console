@@ -253,7 +253,9 @@ class IdleExitTest(unittest.TestCase):
         p, port = self.start(data)
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
         try:
-            c.request("GET", "/api/events", headers={"Host": "127.0.0.1:%d" % port})
+            with open(os.path.join(data, "instance.json")) as f:
+                token = json.load(f)["token"]
+            c.request("GET", "/api/events", headers={"Host": "127.0.0.1:%d" % port, "X-BB-Token": token})
             c.getresponse()
             time.sleep(9)
             self.assertIsNone(p.poll())                      # a window is listening

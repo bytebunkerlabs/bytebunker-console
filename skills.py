@@ -31,9 +31,36 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_DESC = 500
+
+
+def git_status(root):
+    """Git facts about a plugin's folder, or None when it is not a git
+    checkout. Used so the Plugins screen can offer a Sync (git pull) and show
+    whether the folder is behind its remote. Cheap: a few read-only git calls,
+    never the network — `git fetch` happens only on an explicit sync."""
+    if not os.path.isdir(os.path.join(root, ".git")):
+        return None
+
+    def g(*args):
+        try:
+            r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    remote = g("remote", "get-url", "origin")
+    branch = g("rev-parse", "--abbrev-ref", "HEAD")
+    head = g("rev-parse", "--short", "HEAD")
+    behind = 0
+    counts = g("rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+    if counts and len(counts.split()) == 2:
+        behind = int(counts.split()[1])
+    dirty = bool(g("status", "--porcelain"))
+    return {"remote": remote, "branch": branch, "head": head, "behind": behind, "dirty": dirty}
 
 
 # ----------------------------------------------------------- frontmatter --
@@ -283,7 +310,8 @@ class Plugin:
         return {"name": self.name, "description": self.description, "version": self.version,
                 "author": self.author, "enabled": enabled, "root": self.root,
                 "skills": skills, "mcp_servers": sorted(self.mcp_servers),
-                "has_skills": bool(skills), "has_mcp": bool(self.mcp_servers)}
+                "has_skills": bool(skills), "has_mcp": bool(self.mcp_servers),
+                "git": git_status(self.root)}
 
 
 def _plugin_manifest(root):

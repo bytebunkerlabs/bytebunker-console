@@ -3,6 +3,64 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.8.0 — 2026-10-21
+
+### Safer
+- **Only this app and bb reach its API.** Other accounts on the same
+  computer could call ByteBunker on 127.0.0.1; now every API request needs
+  the server's own token. The app's window and `bb` carry it by themselves. A
+  browser tab gets it from a one-time link (two minutes, once): `bb open`.
+  A tab left open across a restart asks for a new link instead of failing
+  quietly. Commands a model runs in a chat never see the token.
+- **Deploy refuses a rack's worker even when its head is not paired.**
+  Find machines now reads what each machine serves: a head names its recipe
+  ("serving glm53-flash-keys now"), and a worker, which runs its share of a
+  model served from another machine, has no Deploy button. Deploying on a
+  machine that serves something names what will stop.
+- **Agents do not start on models nobody serves, even the worker's own.**
+  A role left blank here, or a worker whose harness is too old to take the
+  models picked here, falls back to the worker's config.yaml: those models are
+  checked too, and a goal that would fail at its first call says so and how to
+  fix it.
+
+### Changed
+- **Chats run on the server by default.** A turn keeps going when the tab
+  closes, and the app and bb follow each other's turns live. Settings →
+  Chats turns it off.
+- **Settings in tabs**: General, Models & chats, Sandbox, Command line.
+- **Gateways**: Add a gateway and Find engines open from two buttons.
+
+### New
+- **What a machine needs, installed from Deploy.** Find machines says what
+  is missing (python3, git and curl; Docker on Linux; Apple's command line
+  tools on a Mac), and **Install in a terminal** opens a terminal with the one
+  line that installs it, where it can ask for your password. Deploy waits
+  until it is there. Terminals open on macOS, Linux and Windows now, for the
+  agents' installs too.
+- **`bb open`**: the app in your browser, with a one-time link.
+
+### Fixed
+- Find machines never saw python3 (a probe key with a digit was dropped).
+
+### Also in this release (from 0.7.3, which was not published)
+- **Private skill + tool bundles from your own GitHub.** Add a plugin from a
+  git URL, then **Sync from GitHub** on its card pulls new skills and MCP
+  servers in place — it shows the remote and how many commits it is behind. In
+  bb: `bb plugins add|sync|enable|disable|remove`. Enabling or syncing a bundle
+  also copies its skills to the agent worker, so the court can attach them on
+  the next run.
+- **Connect a git host for private repos.** A private repo now opens a short
+  *Connect* step — paste a read-only access token (any host: GitHub, GitLab,
+  self-hosted) and it installs; SSH `git@` keeps working with no token. The
+  token lives in a new owner-only `secrets.json`, never in `config.json`, logs
+  or the audit trail, and reaches git through an env-fed helper, never the
+  saved URL. A **Connected** line shows linked hosts; `bb git connect|ls|
+  disconnect` mirrors it. A one-click "Connect with GitHub" sign-in is next.
+- **Burp Suite in the tools catalog.** One-click add for Burp's MCP Server
+  extension (HTTP/1.1 and HTTP/2 requests, Repeater, Intruder, proxy history,
+  scanner issues, Collaborator), through a built-in stdio bridge. Share it
+  under Access to let agents use it too, with their sandboxes still offline.
+
 ## 0.7.2 — 2026-10-13
 
 ### New

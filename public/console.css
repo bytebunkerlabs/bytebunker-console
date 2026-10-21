@@ -252,6 +252,10 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:14px}
 .cards-col{display:flex;flex-direction:column;gap:12px;max-width:820px}
 .skill-card.on,.plugin-card.on{border-color:var(--accent)}
+.plugin-actions{display:flex;gap:8px;flex-wrap:wrap}
+.git-connect{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.git-hosts{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:2px 0 8px}
+.linkish{background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline}
 .skill-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .skill-id{display:flex;flex-direction:column;gap:2px;min-width:0}
 .skill-id b{font-size:14px}
@@ -663,3 +667,9 @@ details.pgroup.adv > summary:hover{color:var(--muted)}
 .answer-card .answer-body{font-size:13.5px;line-height:1.6;max-height:520px;overflow:auto}
 .answer-card .answer-body table{border-collapse:collapse;margin:6px 0}
 .answer-card .answer-body td,.answer-card .answer-body th{border:1px solid var(--border);padding:4px 8px;text-align:left}
+/* the API wants this app's token: how to get back in */
+.locked{position:fixed;inset:0;z-index:1000;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:16px}
+.locked-card{max-width:520px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px 28px}
+.locked-card h2{margin:0 0 10px;font-size:18px}
+.locked-card p{color:var(--muted);line-height:1.55;margin:0 0 14px}
+.locked-card code{display:inline-block;background:var(--soft);border-radius:6px;padding:4px 10px;font-family:var(--mono, ui-monospace, monospace)}

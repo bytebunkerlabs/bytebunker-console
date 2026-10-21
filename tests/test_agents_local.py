@@ -139,6 +139,42 @@ class MinionPool(unittest.TestCase):
         finally:
             server.CFG, server.GW = saved
 
+    def test_the_workers_own_defaults_are_checked_when_a_run_leaves_a_role_to_them(self):
+        import server
+        saved = server.CFG, server.GW
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "config"))
+        with open(os.path.join(d, "config", "config.yaml"), "w") as f:
+            f.write('llm:\n  base_url: "http://127.0.0.1:4000/v1"\n  master_model: "deepseek"  # old\n'
+                    '  default_slave_model: qwen3-4b-fast\n  # thinking_model: "x"\nconsole_url: ""\n')
+        with open(os.path.join(d, "config", "config.yaml")) as f:
+            self.assertEqual(agents.parse_worker_models(f.read()),
+                             {"master": "deepseek", "thinking": "deepseek", "fast": "qwen3-4b-fast"})
+
+        class GW:
+            models, model_map = [{"id": "glm"}], {"glm": "spark-1"}
+
+            def refresh(self, force=False):
+                pass
+        server.GW = GW()
+        try:
+            # an old harness (no run spec): every role falls to config.yaml, even the ones chosen here
+            server.CFG = {"agents": {"enabled": True, "dir": d, "master_model": "glm", "harness": {}}}
+            with self.assertRaises(agents.AgentConfigError) as e:
+                server.agents_ready("a goal")
+            self.assertIn("the minions (the worker's config.yaml)' model qwen3-4b-fast", str(e.exception))
+            self.assertIn("Work here updates it", str(e.exception))
+            # a harness that takes the spec: only the blank roles fall back
+            server.CFG = {"agents": {"enabled": True, "dir": d, "master_model": "glm", "thinking_model": "glm",
+                                     "harness": {"spec": True}}}
+            self.assertEqual(server.unserved_worker_defaults(),
+                             [("the minions (the worker's config.yaml)", "qwen3-4b-fast")])
+            server.CFG["agents"]["slave_model"] = "glm"
+            self.assertEqual(server.unserved_worker_defaults(), [])
+            server.agents_ready("a goal")
+        finally:
+            server.CFG, server.GW = saved
+
     def test_a_remote_worker_skips_this_machines_loopback(self):
         fast = self.spec({"ssh": "me@worker", "slave_model": "qwen-mac", "harness": {"pool": True},
                           "minion_pool": [{"model": "qwen-box"}, {"model": "spark-1", "slots": 2}]}, self.GWS)

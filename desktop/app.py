@@ -134,6 +134,27 @@ def running_instance(home):
     return found["url"] if found else None
 
 
+def entry_url(url, home):
+    """The window's first page: a one-time link that gives it the server's
+    token (the API answers nothing without it). The server in this process
+    makes one itself; one already running is asked with the token from its
+    instance.json."""
+    import server
+    if server.INSTANCE is not None:
+        return server.handoff_url(server.INSTANCE.info["port"])
+    data = os.environ.get("BYTEBUNKER_DATA") or os.path.join(home, "data")
+    info = instancemod.read(data) or {}
+    try:
+        import json
+        import urllib.request
+        req = urllib.request.Request(url.rstrip("/") + "/api/handoff", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json", "X-BB-Token": info.get("token") or ""})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read().decode("utf-8")).get("url") or url
+    except Exception:   # noqa: BLE001  (an older server: no token to hand off)
+        return url
+
+
 # ---------------------------------------------------------------- windows --
 def quiet_subprocesses():
     """A GUI app on Windows flashes a console window for every child process
@@ -199,6 +220,7 @@ class Bridge:
 
 def open_window(url, home):
     import webview
+    url = entry_url(url, home)
     settings = getattr(webview, "settings", None)
     if isinstance(settings, dict):
         settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
@@ -351,7 +373,7 @@ def main(argv=None):
     try:
         if smoke_out:
             threading.Thread(target=srv.serve_forever, name="http", daemon=True).start()
-            return smoke_gui(url, smoke_out)
+            return smoke_gui(entry_url(url, home), smoke_out)
         if headless:
             print("%s %s on %s  (data: %s)" % (APP, VERSION, url, home), flush=True)
             srv.serve_forever()

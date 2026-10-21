@@ -36,6 +36,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("palette: jumps to Gateways, under the Models group", await page.locator("#screen-gateways.on").count() === 1
         && await page.locator("#screen-gateways #group-models").isVisible() && await page.locator('[data-group="models"].on').count() === 1);
   check("palette: closes after the jump", await page.locator("#palette").count() === 0);
+  // ---- Gateways: the add and find forms open from their buttons
+  check("gateways: forms folded behind buttons", await page.locator("#gw-add").isVisible() === false
+        && await page.locator("#gw-find").isVisible() === false && await page.locator("#gw-add-open").isVisible());
+  await page.click("#gw-add-open"); await sleep(150);
+  check("gateways: Add a gateway opens its form", await page.locator("#gw-add").isVisible());
+  await page.click("#gw-find-open"); await sleep(150);
+  check("gateways: Find engines opens its form", await page.locator("#gw-find").isVisible());
+  // ---- Settings: four tabs; the one picked comes back after a reload
+  await page.click('[data-nav="settings"]'); await sleep(600);
+  check("settings: tabs, General first", await page.locator("#settings-tabs button").count() === 4
+        && await page.locator("#settings-box .card:visible", { hasText: "Your data" }).count() === 1
+        && await page.locator("#settings-box .card:visible", { hasText: "Roles" }).count() === 0);
+  await page.click('#settings-tabs [data-stab="models"]'); await sleep(150);
+  check("settings: Models & chats shows roles, profiles and chats", await page.locator("#settings-box .card:visible").count() === 3
+        && await page.locator("#server-runner").isChecked());
+  await page.reload(); await sleep(1200);
+  check("settings: the tab stays after a reload", await page.locator('#settings-tabs [data-stab="models"].on').count() === 1);
+  await page.click('#settings-tabs [data-stab="general"]');
+  await page.goto(BASE + "/"); await sleep(1000);
 
   // ---- Workflows: create one in the app, run it, watch the answer come in
   await page.click('[data-nav="workflows"]');
@@ -78,6 +97,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // ---- Settings: profiles listed, a new one saved
   await page.click('[data-nav="settings"]');
   await sleep(800);
+  await page.click('#settings-tabs [data-stab="models"]');
   check("settings: built-in profiles listed", (await page.locator("#settings-box").innerText()).includes("Deep"));
   await page.locator("#settings-box button", { hasText: "New profile" }).click();
   const pf = page.locator('#settings-box input[placeholder="Careful"]').locator("xpath=ancestor::div[1]");

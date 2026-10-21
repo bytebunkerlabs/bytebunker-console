@@ -28,5 +28,5 @@ Name the model for each kind of work once: **big** (the strongest), **fast** (qu
 ## Also here
 
 - **Profiles**: named turn settings. → [Profiles](help:profiles)
-- **Chats**: run the Playground's turns on the server. → [The Playground](help:playground)
+- **Chats**: the Playground's turns run on the server; turn it off to run them in the tab. → [The Playground](help:playground)
 - **Command line**: install bb, and keep the server running in the background. → [bb](help:cli)

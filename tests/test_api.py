@@ -47,6 +47,7 @@ class Server:
                     info = json.load(f)
                 if info.get("pid") == self.proc.pid:      # ours, not a server already there
                     self.port = info["port"]
+                    self.token = info.get("token") or ""  # every request sends it, as bb does
                     break
             except (OSError, ValueError, KeyError):
                 pass
@@ -60,7 +61,7 @@ class Server:
 
     def request(self, method, path, body=None, headers=None):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
-        h = {"Host": "127.0.0.1:%d" % self.port}
+        h = {"Host": "127.0.0.1:%d" % self.port, "X-BB-Token": self.token}
         if body is not None:
             h["Content-Type"] = "application/json"
             body = json.dumps(body)
@@ -77,7 +78,7 @@ class Server:
     def sse(self, path, headers=None, until=None, timeout=10, method="GET", body=None):
         """Read SSE frames until until(frames) is true or timeout. Returns frames."""
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-        h = {"Host": "127.0.0.1:%d" % self.port}
+        h = {"Host": "127.0.0.1:%d" % self.port, "X-BB-Token": self.token}
         if body is not None:
             h["Content-Type"] = "application/json"
             body = json.dumps(body)
@@ -261,6 +262,68 @@ class ApiTest(unittest.TestCase):
         c.close()
 
 
+class LocalTokenTest(unittest.TestCase):
+    """Other accounts on this computer reach 127.0.0.1 too: the API answers its token only."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data = tempfile.mkdtemp()
+        cls.srv = Server(cls.data)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stop()
+        shutil.rmtree(cls.data, ignore_errors=True)
+
+    def raw(self, method, path, headers=None, body=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.srv.port, timeout=10)
+        h = dict({"Host": "127.0.0.1:%d" % self.srv.port}, **(headers or {}))
+        if body is not None:
+            h["Content-Type"] = "application/json"
+        c.request(method, path, body=json.dumps(body) if body is not None else None, headers=h)
+        r = c.getresponse()
+        out = (r.status, dict(r.getheaders()), r.read())
+        c.close()
+        return out
+
+    def test_no_token_no_api(self):
+        self.assertEqual(len(self.srv.token), 32)
+        for method, path, body in (("GET", "/api/config", None), ("POST", "/api/settings", {}),
+                                   ("GET", "/api/events", None), ("DELETE", "/api/sessions?id=x", None)):
+            st, _, raw = self.raw(method, path, body=body)
+            self.assertEqual(st, 401, path)
+            self.assertTrue(json.loads(raw)["locked"])
+        self.assertEqual(self.raw("GET", "/api/config", {"X-BB-Token": "wrong" * 6})[0], 401)
+        self.assertEqual(self.raw("GET", "/api/config", {"X-BB-Token": self.srv.token})[0], 200)
+        # what finds the server, and the page itself, need none
+        self.assertEqual(self.raw("GET", "/api/hello")[0], 200)
+        self.assertEqual(self.raw("GET", "/")[0], 200)
+
+    def test_a_one_time_link_becomes_the_browsers_cookie(self):
+        st, _, raw = self.raw("POST", "/api/handoff", {"X-BB-Token": self.srv.token}, body={})
+        url = json.loads(raw)["url"]
+        path = url.split("127.0.0.1:%d" % self.srv.port, 1)[1]
+        st, h, _ = self.raw("GET", path)
+        self.assertEqual((st, h.get("Location")), (302, "/"))
+        cookie = h["Set-Cookie"]
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=Strict", cookie)
+        self.assertEqual(self.raw("GET", "/api/config", {"Cookie": cookie.split(";")[0]})[0], 200)
+        self.assertEqual(self.raw("GET", path)[0], 403)                 # used once
+        self.assertEqual(self.raw("GET", "/handoff?code=made-up")[0], 403)
+        self.assertEqual(self.raw("POST", "/api/handoff", body={})[0], 401)   # only a client with the token asks
+
+    def test_whoever_starts_it_can_switch_it_off(self):
+        data = tempfile.mkdtemp()
+        srv = Server(data, env={"BYTEBUNKER_LOCAL_TOKEN": "off"})
+        try:
+            srv.token = ""
+            self.assertEqual(srv.request("GET", "/api/config")[0], 200)
+        finally:
+            srv.stop()
+            shutil.rmtree(data, ignore_errors=True)
+
+
 class SecondServerTest(unittest.TestCase):
     def test_second_server_on_same_folder_refuses(self):
         data = tempfile.mkdtemp()
@@ -300,7 +363,7 @@ class HeadlessStopTest(unittest.TestCase):
                 time.sleep(0.05)
             self.assertTrue(port, "the headless app never published instance.json")
             c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-            c.request("GET", "/api/events", headers={"Host": "127.0.0.1:%d" % port})
+            c.request("GET", "/api/events", headers={"Host": "127.0.0.1:%d" % port, "X-BB-Token": info["token"]})
             r = c.getresponse()
             self.assertEqual(r.status, 200)
             r.fp.readline()                          # the stream is open

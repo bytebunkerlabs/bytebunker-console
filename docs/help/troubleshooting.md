@@ -36,6 +36,16 @@ bb doctor
 
 The app needs **Local Network** access: System Settings, Privacy & Security, Local Network, ByteBunker on.
 
+## "This page needs ByteBunker's access link"
+
+ByteBunker answers only its own window and the `bb` command on this computer, so other accounts on the same machine cannot use it. A browser tab gets in through a one-time link, good for two minutes:
+
+```
+bb open
+```
+
+A tab left open across a restart of the app needs a new link too. `bb open --print` prints the link instead of opening it.
+
 ## The server stopped answering
 
 ```

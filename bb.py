@@ -902,6 +902,99 @@ def cmd_list(a, out):
     return EXIT_OK
 
 
+def cmd_git(a, out):
+    """Connect a git host so private repos can be cloned and synced. The token
+    is read from BB_GIT_TOKEN or prompted (hidden) — never passed on argv."""
+    srv = connect(out=out)
+    act = getattr(a, "action", "ls") or "ls"
+    if act == "ls":
+        d = srv.get("/api/git")
+        rows = [[h["host"], h.get("user") or "", h.get("kind") or "pat"] for h in d.get("hosts") or []]
+        out.say(table(rows, ["host", "user", "kind"]) if rows else "no git hosts connected")
+        return EXIT_OK
+    if act == "connect":
+        if not a.target:
+            raise BBError("bb git connect <repo-url>", EXIT_USAGE)
+        import getpass
+        token = (os.environ.get("BB_GIT_TOKEN") or "").strip()
+        if not token:
+            if not sys.stdin.isatty():
+                raise BBError("set BB_GIT_TOKEN, or run in a terminal to paste a token", EXIT_USAGE)
+            token = getpass.getpass("Access token for %s (hidden): " % a.target).strip()
+        if not token:
+            raise BBError("no token given", EXIT_USAGE)
+        d = srv.post("/api/git", {"action": "connect", "url": a.target, "token": token})
+        out.say(out.good("connected " + (d.get("host") or "") + ((" as @" + d["user"]) if d.get("user") else "")))
+        return EXIT_OK
+    if act == "disconnect":
+        if not a.target:
+            raise BBError("bb git disconnect <host>", EXIT_USAGE)
+        srv.post("/api/git", {"action": "disconnect", "host": a.target})
+        out.say(out.good("disconnected " + a.target))
+        return EXIT_OK
+    raise BBError("unknown: bb git %s" % act, EXIT_USAGE)
+
+
+def cmd_plugins(a, out):
+    """Private skill + MCP bundles pulled from git (e.g. your own GitHub)."""
+    srv = connect(out=out)
+    act = getattr(a, "action", "ls") or "ls"
+    if act == "ls":
+        d = srv.get("/api/plugins")
+        rows = []
+        for p in d.get("plugins") or []:
+            g = p.get("git") or {}
+            src = ("behind %d" % g["behind"]) if g.get("behind") else ("git" if g else "local")
+            rows.append([p["name"], "on" if p.get("enabled") else "off",
+                         ", ".join(p.get("skills") or []) or "-",
+                         ", ".join(p.get("mcp_servers") or []) or "-", src])
+        out.say(table(rows, ["plugin", "", "skills", "mcp", "source"]) if rows
+                else "no plugins: bb plugins add git@github.com:you/your-bundle.git")
+        return EXIT_OK
+    if act == "add":
+        if not a.target:
+            raise BBError("bb plugins add <git-url or local path> [--name NAME]", EXIT_USAGE)
+        body = {"action": "add", "source": a.target}
+        if a.name:
+            body["name"] = a.name
+        d = srv.post("/api/plugins", body)
+        names = [p["name"] for p in d.get("plugins") or []]
+        out.say(out.good("added. enable it with: bb plugins enable <name>"))
+        out.say("plugins: " + (", ".join(names) or "none"))
+        return EXIT_OK
+    if act == "sync":
+        if a.all:
+            d = srv.get("/api/plugins")
+            targets = [p["name"] for p in d.get("plugins") or [] if p.get("git")]
+            if not targets:
+                out.say("no git-backed plugins to sync")
+                return EXIT_OK
+        elif a.target:
+            targets = [a.target]
+        else:
+            raise BBError("bb plugins sync <name> | --all", EXIT_USAGE)
+        for n in targets:
+            d = srv.post("/api/plugins", {"action": "sync", "name": n})
+            m = d.get("mirror") or {}
+            if m.get("pushed"):
+                tail = "  (mirrored %d skill(s) to the worker)" % len(m.get("skills") or [])
+            elif m.get("reason"):
+                tail = "  (worker: %s)" % m["reason"]
+            else:
+                tail = ""
+            out.say(out.good("synced %s" % n) + tail)
+        return EXIT_OK
+    if act in ("enable", "disable", "remove"):
+        if not a.target:
+            raise BBError("bb plugins %s <name>" % act, EXIT_USAGE)
+        d = srv.post("/api/plugins", {"action": act, "name": a.target})
+        m = d.get("mirror") or {}
+        tail = "  (mirrored %d skill(s))" % len(m.get("skills") or []) if m.get("pushed") else ""
+        out.say(out.good("%sd %s" % (act.rstrip("e"), a.target)) + tail)
+        return EXIT_OK
+    raise BBError("unknown: bb plugins %s" % act, EXIT_USAGE)
+
+
 def cmd_runs(a, out):
     srv = connect(out=out)
     if a.action == "ls":
@@ -1130,6 +1223,24 @@ def cmd_racks(a, out):
     return EXIT_OK
 
 
+def cmd_open(a, out):
+    """The app in a browser: the server's one-time link (two minutes, once) sets
+    its token as the tab's cookie; the API answers nothing without it."""
+    srv = connect(out=out)
+    url = srv.post("/api/handoff", {}).get("url") or ""
+    if not url:
+        raise BBError("this server gives no link (an older version: open the app's window)", EXIT_FAILED)
+    if a.print:
+        out.say(url)
+        return EXIT_OK
+    import webbrowser
+    if not webbrowser.open(url):
+        out.say(url)
+    else:
+        out.say("opened ByteBunker in your browser")
+    return EXIT_OK
+
+
 def cmd_pair(a, out):
     """bb pair user@host: Add a rack, from here. The machine is asked once
     with your ssh; dgx-serve there adds this app's key (rack only), and the
@@ -1332,6 +1443,15 @@ def parser():
     w.add_argument("-P", "--project", help="a project by name")
     sub.add_parser("workflows")
     sub.add_parser("projects")
+    gi = sub.add_parser("git", help="connect a git host for private repos: ls, connect <url>, disconnect <host>")
+    gi.add_argument("action", nargs="?", default="ls", choices=["ls", "connect", "disconnect"])
+    gi.add_argument("target", nargs="?", help="a repo URL (connect) or a host (disconnect)")
+    pl = sub.add_parser("plugins", help="private skill+MCP bundles from git: ls, add, sync, enable, disable, remove")
+    pl.add_argument("action", nargs="?", default="ls",
+                    choices=["ls", "add", "sync", "enable", "disable", "remove"])
+    pl.add_argument("target", nargs="?", help="a git URL/path (add) or a plugin name")
+    pl.add_argument("--name", help="name for an added plugin")
+    pl.add_argument("--all", action="store_true", help="sync every git-backed plugin")
     sub.add_parser("racks", help="the racks this app drives")
     pr = sub.add_parser("pair", help="add a rack: pair with it over ssh")
     pr.add_argument("target", help="user@host, or a host from ~/.ssh/config")
@@ -1346,14 +1466,16 @@ def parser():
     sub.add_parser("profiles")
     sub.add_parser("doctor")
     sub.add_parser("serve")
+    op = sub.add_parser("open", help="open the app in your browser with a one-time link")
+    op.add_argument("--print", action="store_true", help="print the link instead of opening it")
     sub.add_parser("help")
     return p
 
 
 HANDLERS = {"ask": cmd_ask, "chat": cmd_chat, "sessions": cmd_sessions, "runs": cmd_runs, "agents": cmd_agents,
             "jobs": cmd_jobs, "doctor": cmd_doctor, "serve": cmd_serve, "help": cmd_help, "run": cmd_run,
-            "workflows": cmd_workflows, "profiles": cmd_profiles, "projects": cmd_projects,
-            "racks": cmd_racks, "pair": cmd_pair, "deploy": cmd_deploy, "audit": cmd_audit,
+            "workflows": cmd_workflows, "profiles": cmd_profiles, "projects": cmd_projects, "plugins": cmd_plugins, "git": cmd_git,
+            "racks": cmd_racks, "pair": cmd_pair, "deploy": cmd_deploy, "audit": cmd_audit, "open": cmd_open,
             "models": cmd_list, "gateways": cmd_list, "monitors": cmd_list, "cluster": cmd_list,
             "usage": cmd_list, "skills": cmd_list, "mcp": cmd_list}
 

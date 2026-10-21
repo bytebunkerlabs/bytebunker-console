@@ -40,9 +40,11 @@ TOOLS = [
 
 
 def api(path, payload=None):
+    headers = {"Content-Type": "application/json", "Host": "127.0.0.1"}
+    if os.environ.get("BB_CONSOLE_TOKEN"):
+        headers["X-BB-Token"] = os.environ["BB_CONSOLE_TOKEN"]     # the app gives it to this server alone
     req = urllib.request.Request(BASE + path, data=json.dumps(payload).encode() if payload is not None else None,
-                                 headers={"Content-Type": "application/json", "Host": "127.0.0.1"},
-                                 method="POST" if payload is not None else "GET")
+                                 headers=headers, method="POST" if payload is not None else "GET")
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 

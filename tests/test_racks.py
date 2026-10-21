@@ -217,7 +217,8 @@ class AddARack(unittest.TestCase):
         c = http.client.HTTPConnection("127.0.0.1", self.srv.port, timeout=30)
         t = time.time()
         c.request("POST", "/api/rack", body=json.dumps({"action": "status"}),
-                  headers={"Host": "127.0.0.1:%d" % self.srv.port, "Content-Type": "application/json"})
+                  headers={"Host": "127.0.0.1:%d" % self.srv.port, "Content-Type": "application/json",
+                           "X-BB-Token": self.srv.token})
         body = c.getresponse().read().decode()                             # to the end: the server closes it
         c.close()
         self.assertIn('"phase": "done"', body)

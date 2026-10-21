@@ -36,7 +36,10 @@ API:
 """
 import argparse
 import getpass
+import hmac
+import http.cookies
 import json
+import secrets
 import platform
 import sys
 import os
@@ -58,6 +61,7 @@ import jobs as jobmod
 import gateways as gwmod
 import monitors as monmod
 import racks as racksmod
+import vault as vaultmod
 import machines as machinesmod
 import instance as instancemod
 import events as eventsmod
@@ -400,6 +404,37 @@ def plugins_install_dir():
 KEYS = racksmod.Keys(os.path.dirname(CONFIG_PATH))
 agentmod.EXTRA_SSH[:] = ["-o", KEYS._known()]     # a worker found by Machines is known by its pinned key
 PAIRINGS = racksmod.Pending()
+# credentials the app keeps but never shows: git host tokens live here, 0600,
+# beside config but not in it (config is shown and may be shared)
+VAULT_DIR = os.path.dirname(CONFIG_PATH)
+VAULT = vaultmod.Vault(os.path.join(VAULT_DIR, "secrets.json"))
+
+
+def git_ls_remote(url, token_rec=None):
+    """Reach a git remote without cloning, to tell public from private and to
+    test a token. Returns (returncode or None, stderr/stdout)."""
+    import subprocess
+    env = vaultmod.git_env(VAULT_DIR, token_rec)
+    try:
+        r = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True,
+                           timeout=25, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, str(e)
+    return r.returncode, (r.stderr or r.stdout or "")
+
+
+def github_login(token):
+    """The @login a GitHub token belongs to, for display, or '' — also a cheap
+    validity check. Only called for github.com."""
+    import urllib.request
+    req = urllib.request.Request("https://api.github.com/user",
+                                 headers={"Authorization": "Bearer " + token,
+                                          "Accept": "application/vnd.github+json", "User-Agent": "ByteBunker"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read() or b"{}").get("login") or ""
+    except Exception:   # noqa: BLE001 — a login lookup must never block connecting
+        return ""
 
 
 def racks():
@@ -671,35 +706,70 @@ echo "sandbox image: bytebunker-slave:latest"
 '''
 
 
-# What a worker may need that only you can install (it asks for your password): the exact line,
-# opened in a terminal by "Install in a terminal". Nothing else is ever run this way.
+# What a machine may need that only you can install (it asks for your password): the exact line,
+# opened in a terminal by "Install in a terminal". Nothing else is ever run this way. Which ones a
+# machine lacks comes from Find machines (machines.needs).
 PLANE_NEEDS = {
     "bubblewrap": {"command": "sudo apt-get install -y bubblewrap",
                    "why": "bubblewrap, the sandbox agents run in on Linux"},
     "linger": {"command": "sudo loginctl enable-linger \"$USER\"",
                "why": "linger, so agents keep working after you log out there"},
+    "python3": {"command": "sudo apt-get install -y python3 git curl",
+                "why": "python3, git and curl, which dgx-serve installs and runs with"},
+    "docker": {"command": "sudo apt-get install -y docker.io && sudo usermod -aG docker \"$USER\"",
+               "why": "Docker, which serves the models there (log out and in again after it, so you may use it)"},
+    "mac-tools": {"command": "xcode-select --install",
+                  "why": "Apple's command line tools (python3 and git), which dgx-serve runs with"},
 }
+NEEDS = PLANE_NEEDS
+
+
+def install_terminal_line(target, what):
+    """The one line that installs `what` on target, as this computer's terminal runs it."""
+    import shlex
+    need = NEEDS[what]
+    if target != racksmod.LOCAL:
+        return "ssh -t %s %s" % (shlex.quote(target), shlex.quote(need["command"]))
+    if sys.platform == "win32":
+        return "wsl.exe -e bash -lc %s" % shlex.quote(need["command"])     # this computer serves through WSL2
+    return need["command"]
 
 
 def open_install_terminal(target, what):
-    """A terminal on this computer that runs one of PLANE_NEEDS there (over ssh with a terminal, so
-    sudo can ask for the password) and waits for Enter."""
-    import shlex
+    """A terminal on this computer that runs one of NEEDS there (over ssh with a terminal, so sudo
+    can ask for the password) and waits for Enter. A server with no desktop returns the line."""
+    import shutil
     import subprocess
-    need = PLANE_NEEDS[what]
-    remote = target != racksmod.LOCAL
-    line = ("ssh -t %s %s" % (shlex.quote(target), shlex.quote(need["command"]))) if remote else need["command"]
-    if not os.environ.get("BYTEBUNKER_DESKTOP") or sys.platform != "darwin":
+    need = NEEDS[what]
+    line = install_terminal_line(target, what)
+    if not os.environ.get("BYTEBUNKER_DESKTOP"):
         return {"opened": False, "command": line}
+    where = (" on " + target) if target != racksmod.LOCAL else ""
     d = os.path.join(os.path.dirname(CONFIG_PATH), "terminal")
     os.makedirs(d, exist_ok=True)
+    quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == "win32":
+        script = os.path.join(d, "install-%s.ps1" % what)
+        with open(script, "w", encoding="utf-8") as f:
+            f.write("# opened from ByteBunker: %s\nWrite-Host 'ByteBunker installs %s%s.'\nWrite-Host ''\n%s\n"
+                    "Write-Host ''\nRead-Host 'Done. Press Enter, then look again in ByteBunker'\n" % (
+                        need["why"], need["why"].replace("'", "''"), where, line))
+        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+                         creationflags=0x00000010, **quiet)          # CREATE_NEW_CONSOLE: a window of its own
+        return {"opened": True, "command": line}
     script = os.path.join(d, "install-%s.command" % what)
     with open(script, "w", encoding="utf-8") as f:
         f.write("#!/bin/bash\n# opened from ByteBunker: %s\necho 'ByteBunker installs %s%s.'\necho\n%s\n"
-                "echo\nread -r -p 'Done. Press Enter, then Work here again in ByteBunker. ' _\n" % (
-                    need["why"], need["why"], (" on " + target) if remote else "", line))
+                "echo\nread -r -p 'Done. Press Enter, then look again in ByteBunker. ' _\n" % (
+                    need["why"], need["why"].replace("'", ""), where, line))
     os.chmod(script, 0o700)
-    subprocess.Popen(["open", script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", script], **quiet)
+        return {"opened": True, "command": line}
+    term = next((t for t in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm") if shutil.which(t)), None)
+    if not term:
+        return {"opened": False, "command": line}
+    subprocess.Popen([term, "--", script] if term == "gnome-terminal" else [term, "-e", script], **quiet)
     return {"opened": True, "command": line}
 
 
@@ -1053,10 +1123,10 @@ def last_used_model():
 AGENT_SLOT = threading.Lock()   # one goal at a time: the harness keys a goal's state by its directory
 
 
-AUDIT_SKIP = ("/api/chat", "/api/tool-call", "/api/usage-event", "/api/rate", "/api/upload", "/api/video",
+AUDIT_SKIP = ("/api/chat", "/api/handoff", "/api/tool-call", "/api/usage-event", "/api/rate", "/api/upload", "/api/video",
               "/api/update/check", "/api/netcheck")
 AUDIT_CATEGORY = {"settings": "settings", "profiles": "settings", "update": "settings", "config": "settings",
-                  "mcp": "tools", "plugins": "tools", "skills": "tools", "tools": "tools",
+                  "mcp": "tools", "plugins": "tools", "skills": "tools", "tools": "tools", "git": "access",
                   "gateways": "serving", "monitors": "serving", "racks": "serving", "rack": "serving",
                   "recipes": "serving", "machines": "serving", "engine": "serving",
                   "agents": "agents", "jobs": "runs", "workflows": "runs", "runs": "runs",
@@ -1082,6 +1152,8 @@ def audit_action(method, path, body, query):
         return None                                  # reading what a machine serves changes nothing
     if path in ("/api/gateways", "/api/monitors") and act == "refresh":
         return None
+    if path == "/api/git" and act == "probe":
+        return None                                  # probing a URL changes nothing
     parts = [p for p in path.split("/")[2:] if p]
     if not parts:
         return None
@@ -1101,7 +1173,8 @@ def audit_action(method, path, body, query):
     if path in ("/api/gateways", "/api/monitors") and not act:
         act = "add"
     action = ".".join(parts).replace("-", "_") + ("." + act if act else "")
-    target = next((str(body[k]) for k in ("id", "name", "target", "rack", "ssh", "session") if body.get(k)), None) or q1("id")
+    target = next((str(body[k]) for k in ("id", "name", "target", "rack", "ssh", "session", "host") if body.get(k)), None) or q1("id")
+    # secrets (token, key, password...) are masked to *** by audit.py's SECRET filter
     detail = {k: v for k, v in body.items() if k not in ("action", "messages", "data", "content")}
     return cat, action, target, detail
 
@@ -1209,16 +1282,38 @@ def unserved_roles(a=None):
     return out
 
 
+def unserved_worker_defaults(a=None):
+    """[(who, model)] for each role this run leaves to the worker's config.yaml
+    (no model chosen here, or a harness that takes no run spec) whose model no
+    gateway serves: such a goal would fail at its first call to that role."""
+    a = a if a is not None else (CFG.get("agents") or {})
+    roles = CFG.get("roles") or {}
+    takes_spec = bool((a.get("harness") or {}).get("spec"))
+    chosen = {"master": a.get("master_model") or roles.get("big"),
+              "thinking": a.get("thinking_model") or roles.get("thinking"),
+              "fast": a.get("slave_model") or roles.get("fast")}
+    left = [r for r in ("master", "thinking", "fast") if not (takes_spec and (chosen[r] or "").strip())]
+    if not left:
+        return []
+    defaults = agentmod.worker_models(CFG)
+    who = {"master": "the master (the worker's config.yaml)", "thinking": "the thinking roles (the worker's config.yaml)",
+           "fast": "the minions (the worker's config.yaml)"}
+    return [(who[r], defaults[r]) for r in left if defaults.get(r) and not model_served(defaults[r])]
+
+
 def agents_ready(goal):
     """AgentConfigError unless a goal can start: agents set up, and every chosen
     model served somewhere now (a goal that starts anyway spends its workers on one
     error; measured: six on an HTTP 404)."""
     agentmod.build_command(CFG, goal)
-    missing = unserved_roles()
+    missing = unserved_roles() + unserved_worker_defaults()
     if missing:
         raise agentmod.AgentConfigError(
             "not started: " + "; ".join("%s' model %s is not served anywhere right now" % (w, m) for w, m in missing)
-            + ". Pick served models in Agents > Settings > Models, or serve them on the Deploy screen.")
+            + ". Pick served models in Agents > Settings > Models, or serve them on the Deploy screen."
+            + ("" if ((CFG.get("agents") or {}).get("harness") or {}).get("spec") or not any(
+                "config.yaml" in w for w, _ in missing) else
+               " This worker's harness is too old to take the models picked here: Work here updates it."))
 
 
 def minion_pool(a, first, remote):
@@ -2470,7 +2565,51 @@ class Handler(BaseHTTPRequestHandler):
                 self._drain()
                 self._json({"error": "expected " + want}, 415, close=True)
                 return False
+        if not self._token_ok():
+            self._drain()
+            self._json({"error": "this app's API wants its access token: open ByteBunker from its window, or run "
+                                 "`bb open` on this computer", "locked": True}, 401, close=True)
+            return False
         return True
+
+    def _token_ok(self):
+        """Other accounts on this computer reach 127.0.0.1 too: the API answers
+        only with this server's token (instance.json, 0600), sent as X-BB-Token
+        by bb and the built-in tools, or as the cookie a one-time link set."""
+        token = local_token()
+        path = urllib.parse.urlparse(self.path).path
+        if not token or not path.startswith("/api/") or path in OPEN_API:
+            return True
+        sent = self.headers.get("X-BB-Token") or ""
+        if not sent:
+            jar = http.cookies.SimpleCookie()
+            try:
+                jar.load(self.headers.get("Cookie") or "")
+            except http.cookies.CookieError:
+                pass
+            sent = jar[TOKEN_COOKIE].value if TOKEN_COOKIE in jar else ""
+        return hmac.compare_digest(sent.encode(), token.encode())
+
+    def _handoff(self, query):
+        """GET /handoff?code=: a one-time link from the window or `bb open`
+        becomes this browser's cookie, then the app."""
+        code = (urllib.parse.parse_qs(query).get("code") or [""])[0]
+        token = local_token()
+        if not token or not take_handoff(code):
+            body = ("<!doctype html><meta charset=utf-8><title>ByteBunker</title><body style=\"font:15px system-ui;"
+                    "padding:40px\"><h1>This link has been used or has expired</h1><p>Open ByteBunker from its "
+                    "window, or run <code>bb open</code> on this computer for a new one.</p>").encode()
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(302)
+        self.send_header("Set-Cookie", "%s=%s; Path=/; HttpOnly; SameSite=Strict" % (TOKEN_COOKIE, token))
+        self.send_header("Location", "/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _audit_request(self):
         """Every change made through the API, one audit line: what was asked, by whom, and whether it
@@ -3103,7 +3242,11 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         if not self._guard():
             return
-        path = urllib.parse.urlparse(self.path).path
+        u = urllib.parse.urlparse(self.path)
+        path = u.path
+        if path == "/handoff":
+            self._handoff(u.query)
+            return
         if path == "/api/hello":
             # how clients (the window, the CLI) confirm they found the right server
             self._json({"service": "bytebunker", "version": app_version(), "pid": os.getpid(),
@@ -3332,11 +3475,15 @@ class Handler(BaseHTTPRequestHandler):
             found, warnings = discover_plugins()
             st = _plugin_state()
             self._json({"plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
-                                    for n in sorted(found)], "warnings": warnings})
+                                    for n in sorted(found)], "warnings": warnings,
+                        "git_hosts": VAULT.git_hosts()})
+        elif path == "/api/git":
+            self._json({"hosts": VAULT.git_hosts()})
         elif path == "/api/rack":
             self._json(rack_overview((urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("rack") or [None])[0]))
         elif path == "/api/machines":
-            self._json({"at": _machines["at"], "machines": annotate_machines(_machines["list"]), "here": _machines["here"]})
+            self._json({"at": _machines["at"], "machines": annotate_machines(_machines["list"]), "here": _machines["here"],
+                        "need_info": {k: v["why"] for k, v in NEEDS.items()}})
         elif path == "/api/racks":
             self._json({"racks": racks(), "local": racksmod.local_entry(),
                         "app": {"key": os.path.exists(KEYS.key), "known_hosts": KEYS.known_hosts}})
@@ -3510,8 +3657,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
-                        "/api/update/apply", "/api/projects", "/api/terminal", "/api/audit"):
+                        "/api/plugins", "/api/git", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
+                        "/api/update/apply", "/api/projects", "/api/terminal", "/api/audit", "/api/handoff"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
             return
@@ -3550,6 +3697,8 @@ class Handler(BaseHTTPRequestHandler):
             self._terminal(body)
         elif path == "/api/plugins":
             self._plugin_admin(body)
+        elif path == "/api/git":
+            self._git_admin(body)
         elif path == "/api/skills":
             self._skill_admin(body)
         elif path == "/api/recipes":
@@ -3718,6 +3867,9 @@ class Handler(BaseHTTPRequestHandler):
                 evt["gateway"] = (mid[1] if len(mid) == 2 else None) or GW.model_map.get(mid[0]) or ((GW.gateways() or [{}])[0].get("name") or "upstream")
                 append_usage(evt)
             self._json({"ok": bool(evt)})
+        elif path == "/api/handoff":
+            # a one-time link that opens this app in a browser with its token (bb open, a second window)
+            self._json({"url": handoff_url(self.server.server_address[1])})
         elif path == "/api/gateways":
             self._gateways_admin(body)
         elif path == "/api/monitors":
@@ -4050,7 +4202,17 @@ class Handler(BaseHTTPRequestHandler):
                              workers=rack_workers())
             TRACE.log("machine", action="find", answered=sum(1 for m in _machines["list"] if m.get("ok")),
                       asked=len(_machines["list"]))
-            self._json({"at": _machines["at"], "machines": annotate_machines(_machines["list"]), "here": _machines["here"]})
+            self._json({"at": _machines["at"], "machines": annotate_machines(_machines["list"]), "here": _machines["here"],
+                        "need_info": {k: v["why"] for k, v in NEEDS.items()}})
+            return
+        if action == "install":
+            # one of NEEDS, in a terminal on this computer (ssh -t there), where sudo can ask
+            target, what = str(body.get("target") or "").strip(), str(body.get("what") or "")
+            if what not in NEEDS or (target != racksmod.LOCAL and not racksmod.TARGET.match(target)):
+                self._json({"error": "nothing to install by that name"}, 400)
+                return
+            TRACE.log("machine", action="install", target=target, what=what)
+            self._json(open_install_terminal(target, what))
             return
         if action == "deploy":
             target = str(body.get("target") or "").strip()
@@ -4065,6 +4227,10 @@ class Handler(BaseHTTPRequestHandler):
             if m and m.get("worker_of"):
                 self._json({"error": "%s is a worker in %s's rack: deploy on %s, which serves across both"
                                      % (target, m["worker_of"], m["worker_of"])}, 409)
+                return
+            if m and m.get("share"):
+                self._json({"error": "%s runs its share of a model served from another machine (a rack's worker): "
+                                     "deploy on that rack's head" % target}, 409)
                 return
             where = "this computer" if target == racksmod.LOCAL else target
             self._run_streamed("deploy", "serve %s on %s" % (recipe, where),
@@ -4499,6 +4665,68 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "path": target, "worker": worker,
                     "skills": skill_catalog().summaries()})
 
+    def _git_admin(self, body):
+        """Connect a git host (store a token in the vault), disconnect it, or
+        probe a URL to tell public from private. Tokens are write-only: they go
+        in, they never come back out of the API."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = body.get("action") or ""
+        if action == "probe":
+            url = str(body.get("url") or "").strip()
+            if not url:
+                self._json({"error": "a repository URL is required"}, 400)
+                return
+            host = vaultmod.host_of(url)
+            local = not url.startswith(("http://", "https://", "git@", "ssh://", "file://"))
+            if local:
+                self._json({"host": "", "local": True, "reachable": os.path.isdir(os.path.expanduser(url)),
+                            "needs_auth": False, "connected": False, "error": ""})
+                return
+            rc, err = git_ls_remote(url, VAULT.git_token(host))
+            reachable = rc == 0
+            self._json({"host": host, "local": False, "reachable": reachable,
+                        "connected": bool(VAULT.git_token(host)),
+                        "needs_auth": (not reachable) and (vaultmod.looks_like_auth(err) or not VAULT.git_token(host)),
+                        "error": "" if reachable else (err or "").strip()[-200:]})
+            return
+        if action == "connect":
+            url = str(body.get("url") or "").strip()
+            token = str(body.get("token") or "").strip()
+            host = (str(body.get("host") or "").strip() or vaultmod.host_of(url)).lower()
+            user = str(body.get("user") or "").strip()
+            if not host:
+                self._json({"error": "could not tell the host; add the repository URL"}, 400)
+                return
+            if not token:
+                self._json({"error": "a token is required"}, 400)
+                return
+            rec = {"token": token, "user": user, "kind": "pat"}
+            if url:        # validate against the very repo they are adding
+                rc, err = git_ls_remote(url, rec)
+                if rc != 0:
+                    if err and not vaultmod.looks_like_auth(err):
+                        self._json({"error": "could not reach that repository: " + err.strip()[-160:]}, 400)
+                    else:
+                        self._json({"error": "the token did not work for that repository"}, 400)
+                    return
+            if not user and host == "github.com":
+                user = github_login(token)
+            VAULT.set_git(host, token, user=user, kind="pat")
+            TRACE.log("git", action="connect", host=host, user=user)   # the token is never logged
+            self._json({"ok": True, "host": host, "user": user, "hosts": VAULT.git_hosts()})
+            return
+        if action == "disconnect":
+            host = str(body.get("host") or "").strip().lower()
+            if not VAULT.delete_git(host):
+                self._json({"error": "not connected"}, 404)
+                return
+            TRACE.log("git", action="disconnect", host=host)
+            self._json({"ok": True, "hosts": VAULT.git_hosts()})
+            return
+        self._json({"error": "unknown action"}, 400)
+
     def _plugin_admin(self, body):
         if not isinstance(body, dict):
             self._json({"error": "expected object"}, 400)
@@ -4506,12 +4734,17 @@ class Handler(BaseHTTPRequestHandler):
         action = body.get("action")
         name = (body.get("name") or "").strip()
         found, warnings = discover_plugins()
-        if action in ("add", "create", "remove"):
+        mirror = None
+        touched = name          # the plugin whose skills may need mirroring
+        if action in ("add", "create", "remove", "sync"):
+            before = set(found)
             err = self._plugin_install(action, body, found)
             if err:
                 self._json({"error": err}, 400)
                 return
             found, warnings = discover_plugins()
+            if action == "add" and not touched:          # name derived from the git URL
+                touched = next(iter(set(found) - before), "")
         elif action in ("enable", "disable"):
             if name not in found:
                 self._json({"error": "no such plugin"}, 404)
@@ -4525,15 +4758,48 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "unknown action"}, 400)
             return
         st = _plugin_state()
+        # an enabled bundle's private skills follow it to the agent worker, so
+        # the Sultan can attach them on the next run (only when agents are on)
+        if action in ("add", "sync", "enable") and touched in found:
+            p = found[touched]
+            if p.skills_dir and st.get(touched, {}).get("enabled"):
+                mirror = agentmod.mirror_skills_dir(CFG, p.skills_dir)
         self._json({"ok": True, "plugins": [found[n].info(bool(st.get(n, {}).get("enabled")))
-                                            for n in sorted(found)], "warnings": warnings})
+                                            for n in sorted(found)], "warnings": warnings,
+                    "mirror": mirror})
 
     def _plugin_install(self, action, body, found):
-        """add: git URL or local path into the plugins dir; create: a new
-        empty plugin (manifest + optional MCP servers); remove: delete one the
-        console installed. Returns an error string or None."""
+        """add: git URL or local path into the plugins dir; sync: git pull a
+        plugin the console cloned; create: a new empty plugin (manifest +
+        optional MCP servers); remove: delete one the console installed.
+        Returns an error string or None."""
         import shutil, subprocess
         root = plugins_install_dir()
+        if action == "sync":
+            name = (body.get("name") or "").strip()
+            p = found.get(name)
+            if not p:
+                return "no such plugin"
+            if not os.path.isdir(os.path.join(p.root, ".git")):
+                return "%s is not a git checkout; to sync it, remove it and add it again from a git URL" % name
+            remote = (skillmod.git_status(p.root) or {}).get("remote") or ""
+            env = vaultmod.git_env(VAULT_DIR, VAULT.git_token(vaultmod.host_of(remote)))
+            try:
+                subprocess.run(["git", "-C", p.root, "fetch", "origin"],
+                               capture_output=True, text=True, timeout=120, env=env)
+                r = subprocess.run(["git", "-C", p.root, "pull", "--ff-only"],
+                                   capture_output=True, text=True, timeout=120, env=env)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return "git pull failed: %s" % e
+            if r.returncode != 0:
+                detail = (r.stderr or r.stdout or "").strip()[-300:]
+                if vaultmod.looks_like_auth(detail):
+                    return "git pull failed: the token for %s no longer works — reconnect it on the Plugins page" % (
+                        vaultmod.host_of(remote) or "this host")
+                return "git pull failed: " + (detail or "the folder has diverged from its remote; resolve it on disk")
+            TRACE.log("plugin", action="sync", name=name, source=(skillmod.git_status(p.root) or {}).get("remote"))
+            mcp_reload()
+            return None
         if action == "remove":
             name = (body.get("name") or "").strip()
             p = found.get(name)
@@ -4586,15 +4852,22 @@ class Handler(BaseHTTPRequestHandler):
         dest = os.path.join(root, name)
         if os.path.exists(dest):
             return "a plugin named %s already exists" % name
-        if source.startswith(("http://", "https://", "git@", "ssh://")):
+        if source.startswith(("http://", "https://", "git@", "ssh://", "file://")):
+            env = vaultmod.git_env(VAULT_DIR, VAULT.git_token(vaultmod.host_of(source)))
             try:
-                r = subprocess.run(["git", "clone", "--depth", "1", source, dest],
-                                   capture_output=True, text=True, timeout=120)
+                # a full clone (not --depth 1) so a later `sync` is a clean
+                # `git pull --ff-only`; skills/MCP repos are small
+                r = subprocess.run(["git", "clone", source, dest],
+                                   capture_output=True, text=True, timeout=120, env=env)
             except (OSError, subprocess.TimeoutExpired) as e:
                 return "git clone failed: %s" % e
             if r.returncode != 0:
                 shutil.rmtree(dest, ignore_errors=True)
-                return "git clone failed: " + (r.stderr or "").strip()[-300:]
+                detail = (r.stderr or "").strip()[-300:]
+                if vaultmod.looks_like_auth(detail):
+                    return ("that repo needs sign-in: connect %s on the Plugins page (paste a token), then add it again"
+                            % (vaultmod.host_of(source) or "the host"))
+                return "git clone failed: " + detail
         else:
             src = os.path.abspath(os.path.expanduser(source))
             if not os.path.isdir(src):
@@ -4836,8 +5109,10 @@ def serve(bind=None, port=None, idle_exit=None):
         shutil.rmtree(os.path.join(update_home(), "staging"), ignore_errors=True)
     import atexit
     atexit.register(release_instance)
-    # the built-in jobs MCP server calls the console back on this port
+    # the built-in jobs MCP server calls the console back on this port, with the token
     os.environ["BB_CONSOLE_PORT"] = str(srv.server_address[1])
+    import mcp as mcpmod
+    mcpmod.APP_TOKEN = local_token()
     start_scheduler()
     threading.Thread(target=watch_models, name="models", daemon=True).start()
     if idle_exit:
@@ -4848,6 +5123,43 @@ def serve(bind=None, port=None, idle_exit=None):
 
 INSTANCE = None
 STARTED = time.time()
+
+# ---- the local token: the API answers this server's own clients only ---------
+TOKEN_COOKIE = "bb_token"
+# /api/hello finds the server (no data in it); agents on this computer report usage with no token
+OPEN_API = ("/api/hello", "/api/usage-event")
+_HANDOFFS = {}
+_HANDOFF_LOCK = threading.Lock()
+
+
+def local_token():
+    """This server's token, or None: no instance (a bare test server), or the
+    check switched off by whoever started it (BYTEBUNKER_LOCAL_TOKEN=off)."""
+    if os.environ.get("BYTEBUNKER_LOCAL_TOKEN") == "off" or INSTANCE is None:
+        return None
+    return (INSTANCE.info or {}).get("token")
+
+
+def handoff_code(ttl_s=120):
+    """A one-time code for GET /handoff, good for ttl_s."""
+    now = time.time()
+    code = secrets.token_urlsafe(24)
+    with _HANDOFF_LOCK:
+        for k, exp in list(_HANDOFFS.items()):
+            if exp < now:
+                del _HANDOFFS[k]
+        _HANDOFFS[code] = now + ttl_s
+    return code
+
+
+def take_handoff(code):
+    with _HANDOFF_LOCK:
+        exp = _HANDOFFS.pop(code, None) if code else None
+    return exp is not None and exp >= time.time()
+
+
+def handoff_url(port):
+    return "http://127.0.0.1:%d/handoff?code=%s" % (int(port), handoff_code())
 STOPPING = threading.Event()
 IDLE = {"last": time.time()}
 

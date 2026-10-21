@@ -43,7 +43,7 @@ json.dump({"gateways": [{"name": "fake", "url": "http://127.0.0.1:%s/v1" % eport
            "model_capabilities": {"fake-model": {"effort": ["low", "medium", "high"]}}},
           open(os.path.join(h, "config.json"), "w"))
 PYEOF
-BYTEBUNKER_LOCAL_RACK=off PATH="$H/rackfake/bin:$PATH" BYTEBUNKER_DATA="$H/data" BYTEBUNKER_CONFIG="$H/config.json" "$PY" -c "import sys; sys.path.insert(0, '$R'); import server; srv = server.serve('127.0.0.1', $SERVER_PORT); srv.serve_forever()" > "$H/server.log" 2>&1 &
+BYTEBUNKER_LOCAL_TOKEN=off BYTEBUNKER_LOCAL_RACK=off PATH="$H/rackfake/bin:$PATH" BYTEBUNKER_DATA="$H/data" BYTEBUNKER_CONFIG="$H/config.json" "$PY" -c "import sys; sys.path.insert(0, '$R'); import server; srv = server.serve('127.0.0.1', $SERVER_PORT); srv.serve_forever()" > "$H/server.log" 2>&1 &
 SPID=$!
 for i in $(seq 1 100); do curl -s -o /dev/null "$BB_UI_BASE/api/hello" && break; sleep 0.1; done
 for i in $(seq 1 100); do curl -s "$BB_UI_BASE/api/tools" | grep -q fake__echo && break; sleep 0.1; done

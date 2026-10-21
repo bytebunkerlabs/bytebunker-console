@@ -37,6 +37,18 @@ class Catalog(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_burp_bridge_renders_the_sse_url(self):
+        burp = cat.get("burp")
+        self.assertIsNotNone(burp)
+        self.assertIsNone(cat.problem(burp, {}))                      # the default URL is enough
+        cmd, args = cat.render(burp, {"url": "http://127.0.0.1:9876/"})
+        self.assertEqual(cmd, "npx")
+        self.assertIn("mcp-remote@0.15.1", args)
+        self.assertIn("http://127.0.0.1:9876/", args)
+        self.assertIn("--allow-http", args)
+        _, args2 = cat.render(burp, {"url": "http://10.0.0.9:9876/"})
+        self.assertIn("http://10.0.0.9:9876/", args2)                 # a different host is substituted
+
     def test_the_folders_a_server_needs(self):
         self.assertEqual(cat.folders_for({"catalog": "filesystem", "args": ["-y", "pkg", "~/projects"]}),
                          [os.path.expanduser("~/projects")])
