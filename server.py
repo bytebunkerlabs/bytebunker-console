@@ -4800,7 +4800,7 @@ class Handler(BaseHTTPRequestHandler):
                         vaultmod.host_of(remote) or "this host")
                 return "git pull failed: " + (detail or "the folder has diverged from its remote; resolve it on disk")
             TRACE.log("plugin", action="sync", name=name, source=(skillmod.git_status(p.root) or {}).get("remote"))
-            mcp_reload()
+            mcp_reload(wait=False)      # its servers restart in the background, as on enable
             return None
         if action == "remove":
             name = (body.get("name") or "").strip()
@@ -4816,7 +4816,7 @@ class Handler(BaseHTTPRequestHandler):
             _plugin_state().pop(name, None)
             save_config()
             TRACE.log("plugin", action="remove", name=name)
-            mcp_reload()
+            mcp_reload(wait=False)
             return None
         if action == "create":
             name = str(body.get("name") or "").strip().lower()
