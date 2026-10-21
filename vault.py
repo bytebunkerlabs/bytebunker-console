@@ -5,7 +5,7 @@ Today it holds one kind of secret: a token per git host (github.com, gitlab.com,
 a self-hosted host...), used to clone and pull private plugin repos over https.
 Tokens never leave the app: the API returns only which hosts are connected and
 the user name when known, never the token. A token reaches git through
-GIT_ASKPASS (an env-fed helper), never the remote URL — which would persist in
+a credential helper fed from the environment, never the remote URL — which would persist in
 .git/config — and never the command line.
 
 Kept out of config.json on purpose: config is shown, migrated and may be shared;
@@ -102,58 +102,34 @@ class Vault:
 
 
 # --------------------------------------------------------------- git auth ---
-_ASKPASS_SH = (
-    "#!/bin/sh\n"
-    "# ByteBunker git askpass: the token comes from the environment, never a\n"
-    "# command line or the remote URL. Written 0700; reads BB_GIT_* from env.\n"
-    'case "$1" in\n'
-    '  *[Uu]sername*) printf %s "${BB_GIT_USER:-x-access-token}" ;;\n'
-    '  *) printf %s "$BB_GIT_TOKEN" ;;\n'
-    "esac\n"
-)
-
-_ASKPASS_CMD = (
-    "@echo off\r\n"
-    'echo %~1 | findstr /I "sername" >nul\r\n'
-    "if %errorlevel%==0 (<nul set /p=%BB_GIT_USER%) else (<nul set /p=%BB_GIT_TOKEN%)\r\n"
-)
-
-
-def _ensure_askpass(dirpath: str) -> str:
-    """Write (once, or when it changed) the helper git runs to get credentials;
-    return its path."""
-    if os.name == "nt":
-        path, body = os.path.join(dirpath, "git-askpass.cmd"), _ASKPASS_CMD
-    else:
-        path, body = os.path.join(dirpath, "git-askpass.sh"), _ASKPASS_SH
-    try:
-        cur = open(path, encoding="utf-8", newline="").read()
-    except OSError:
-        cur = None
-    if cur != body:
-        os.makedirs(dirpath, exist_ok=True)
-        with open(path, "w", encoding="utf-8", newline="") as f:
-            f.write(body)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        pass
-    return path
+# git's own credential protocol, as config set through the environment (git 2.31+): the
+# first, empty value drops any helper from your git config, the second answers from
+# BB_GIT_*. git runs a "!" helper with its sh, Git for Windows' bundled one included,
+# so one helper serves every platform (a .cmd askpass could not pass a token through
+# batch quoting on Windows).
+GIT_HELPER = ('!f() { test "$1" = get || return 0; '
+              'printf "username=%s\\npassword=%s\\n" "${BB_GIT_USER:-x-access-token}" "$BB_GIT_TOKEN"; }; f')
 
 
 def git_env(dirpath: str, token_rec, base=None) -> dict:
     """Environment for a git command. Always turns off interactive prompts so a
     private repo fails fast instead of hanging a background clone. When a token
-    is given, wires GIT_ASKPASS to feed it from the environment — the token is
-    never on the command line or in the stored remote URL."""
+    is given, a credential helper feeds it from the environment: the token is
+    never on the command line or in the stored remote URL. (dirpath: kept for
+    callers; no helper file is written.)"""
     env = dict(base if base is not None else os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     if token_rec and token_rec.get("token"):
-        env["GIT_ASKPASS"] = _ensure_askpass(dirpath)
         env["BB_GIT_TOKEN"] = token_rec["token"]
         env["BB_GIT_USER"] = token_rec.get("user") or "x-access-token"
         env["GIT_CONFIG_NOSYSTEM"] = "1"       # ignore a machine-wide helper/askpass
-        env.pop("SSH_ASKPASS", None)
+        n = int(env.get("GIT_CONFIG_COUNT") or 0)
+        for i, value in enumerate(("", GIT_HELPER)):
+            env["GIT_CONFIG_KEY_%d" % (n + i)] = "credential.helper"
+            env["GIT_CONFIG_VALUE_%d" % (n + i)] = value
+        env["GIT_CONFIG_COUNT"] = str(n + 2)
+        for k in ("GIT_ASKPASS", "SSH_ASKPASS"):
+            env.pop(k, None)
     return env
 
 

@@ -69,7 +69,10 @@ class Describe(unittest.TestCase):
         self.assertEqual((worker["serving"], worker["share"]), ("", True))
         idle = machines.describe(machines.parse(base))
         self.assertEqual((idle["serving"], idle["share"]), ("", False))
-        # the probe reads the recipe from dgx-serve's own serving.json
+        # the probe reads the recipe from dgx-serve's own serving.json (a POSIX shell's job:
+        # on Windows the probe runs inside WSL2)
+        if sys.platform == "win32":
+            return
         home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, home)
         os.makedirs(os.path.join(home, ".local/state/dgx-serve"))

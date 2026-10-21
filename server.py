@@ -4753,7 +4753,9 @@ class Handler(BaseHTTPRequestHandler):
             save_config()
             TRACE.log("plugin", action=action, name=name,
                       contributes=found[name].info(action == "enable"))
-            mcp_reload()   # a plugin's MCP servers come or go with it
+            # a plugin's MCP servers come or go with it, in the background: one that takes
+            # its time to start (npx fetching a package) must not hold the button
+            mcp_reload(wait=False)
         elif action != "rescan":
             self._json({"error": "unknown action"}, 400)
             return

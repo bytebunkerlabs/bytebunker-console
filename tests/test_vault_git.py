@@ -52,22 +52,20 @@ class Unit(unittest.TestCase):
         self.assertIsNone(v.git_token("github.com"))
         self.assertFalse(v.delete_git("github.com"))
 
-    def test_askpass_feeds_the_token_from_env_only(self):
-        if os.name == "nt":
-            self.skipTest("POSIX askpass")
+    def test_the_credential_helper_feeds_the_token_from_env_only(self):
         d = tempfile.mkdtemp()
-        env = vaultmod.git_env(d, {"token": "T0P_SECRET", "user": "x-access-token"})
+        env = vaultmod.git_env(d, {"token": "T0P/SE$CRET&x", "user": "x-access-token"},
+                               base=dict(os.environ, GIT_ASKPASS="/somewhere/else"))
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
-        helper = env["GIT_ASKPASS"]
-        self.assertEqual(stat.S_IMODE(os.stat(helper).st_mode), 0o700)
-        # git calls the helper with the prompt as argv[1]; the token is in env, not argv
-        run = lambda prompt: subprocess.run([helper, prompt], capture_output=True, text=True,
-                                            env=dict(BB_GIT_TOKEN=env["BB_GIT_TOKEN"],
-                                                     BB_GIT_USER=env["BB_GIT_USER"])).stdout
-        self.assertEqual(run("Password for 'https://github.com': "), "T0P_SECRET")
-        self.assertEqual(run("Username for 'https://github.com': "), "x-access-token")
+        self.assertNotIn("GIT_ASKPASS", env)
+        self.assertNotIn("T0P", " ".join(v for k, v in env.items() if k.startswith("GIT_")))   # only BB_GIT_TOKEN holds it
+        # git itself asks the helper, as a clone would (and as Git for Windows does, with its own sh)
+        r = subprocess.run(["git", "credential", "fill"], input="protocol=https\nhost=github.com\n\n",
+                           capture_output=True, text=True, env=env, cwd=d, timeout=30)
+        self.assertIn("username=x-access-token\n", r.stdout, r.stderr)
+        self.assertIn("password=T0P/SE$CRET&x\n", r.stdout, r.stderr)
         # no token wired when none is held
-        self.assertNotIn("GIT_ASKPASS", vaultmod.git_env(d, None))
+        self.assertNotIn("GIT_CONFIG_COUNT", vaultmod.git_env(d, None, base={}))
 
     def test_looks_like_auth(self):
         self.assertTrue(vaultmod.looks_like_auth("fatal: Authentication failed for 'https://..'"))
