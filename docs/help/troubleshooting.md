@@ -24,6 +24,10 @@ A tool asks before it runs and nobody could answer: bb was in a script. Allow it
 
 The engine stopped mid-answer: it restarted, ran out of memory, or the network dropped. Ask again; if it keeps happening, look at the engine on [Cluster](#cluster).
 
+## A model you just started is not in the list
+
+A big model takes minutes to load: about ten for GLM-5.3-Flash on two Sparks. While it does, the model picker and the Models screen show it greyed out as loading, with the time so far, and it becomes selectable by itself when it answers. If it says it did not start, the reason is beside it; `rack logs` on the machine has the rest. This needs a rack monitor on the Cluster screen.
+
 ## "no gateway serves …" or no models at all
 
 No connected server lists that model. Check [Gateways](#gateways): a red one shows the error it gave. From a terminal:

@@ -206,6 +206,13 @@ class Monitors:
                     out.setdefault(name, dict(s, node=n.get("name")))
         return out
 
+    def starting(self, max_age=300):
+        """What rack up is loading on each node, or last failed to (the monitor's starting block),
+        from the last fetch only. While a big model loads, this is all there is to show."""
+        d = self.latest(max_age)
+        return [dict(n["starting"], node=n.get("name")) for n in (d or {}).get("nodes") or []
+                if isinstance(n.get("starting"), dict)]
+
     def engine_stats(self):
         """What every monitored engine is doing right now, summed: the
         playground asks when a stream goes quiet."""

@@ -874,7 +874,14 @@ def cmd_list(a, out):
     if what == "models":
         d = srv.get("/api/models")
         rows = [[m["id"], m.get("gateway") or "", (m.get("caps") or {}).get("ctx") or ""] for m in d.get("data") or []]
-        out.say(table(rows, ["model", "gateway", "window"]) if rows else "no models: add a model server on the Gateways screen")
+        loading = d.get("starting") or []
+        if rows or not loading:
+            out.say(table(rows, ["model", "gateway", "window"]) if rows else "no models: add a model server on the Gateways screen")
+        for s in loading:
+            name = s.get("gateway_name") or s.get("served_name") or s.get("recipe") or "a model"
+            out.say("%s on %s: %s%s" % (name, s.get("node") or "?",
+                                        {"loading": "loading", "failed": "did not start"}.get(s.get("state"), "stopped while loading"),
+                                        " (%s)" % s["error"] if s.get("error") else ""))
     elif what == "gateways":
         d = srv.get("/api/gateways")
         out.say(table([[g["name"], g["url"], "ok" if g.get("ok") else (g.get("error") or "down")[:60],

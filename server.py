@@ -3282,7 +3282,7 @@ class Handler(BaseHTTPRequestHandler):
                     data = [dict(m, served=(m.get("base_id") or m["id"]) in serving
                                  or (GW.status.get(m["gateway"]) or {}).get("kind") not in ("litellm",))
                             for m in GW.models]
-                self._json({"object": "list", "data": data, "gateways": GW.status,
+                self._json({"object": "list", "data": data, "gateways": GW.status, "starting": MON.starting(),
                             "last_used": last_used_model()})
             except Exception as e:   # noqa: BLE001
                 self._json({"error": str(e), "data": []}, 502)
@@ -5189,7 +5189,8 @@ _LISTEN_LOCK = threading.Lock()
 
 def _models_signature():
     return (tuple(sorted(m["id"] for m in GW.models)),
-            tuple(sorted((n, bool(st.get("ok"))) for n, st in GW.status.items())))
+            tuple(sorted((n, bool(st.get("ok"))) for n, st in GW.status.items())),
+            tuple(sorted((s.get("node") or "", s.get("recipe") or "", s.get("state") or "") for s in MON.starting())))
 
 
 def watch_models():
@@ -5205,7 +5206,8 @@ def watch_models():
                     MON.cluster(0, max_age=every)       # the serving blocks, for caps_for
                 GW.refresh(force=True)
                 sig = _models_signature()
-                if last is not None and sig != last:
+                # the first look too when something is loading: a window opened before the monitors answered
+                if (last is not None and sig != last) or (last is None and sig[2]):
                     BUS.publish("models", "changed", {"models": len(sig[0])})
                 last = sig
             except Exception:   # noqa: BLE001 - a bad probe must not end the watch

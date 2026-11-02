@@ -3,6 +3,16 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.8.1 — 2026-11-02
+
+### Better
+- **A model that is loading shows as loading.** While a rack loads a model, the
+  picker and the Models screen show it greyed out with the time so far ("loading,
+  6 min so far"), and it becomes selectable by itself once it answers. One that
+  could not start says so, and why. A big model takes minutes, and until now
+  that looked the same as a broken connection. `bb models` says the same. This
+  needs dgx-serve from 2026-11-02 or newer.
+
 ## 0.8.0 — 2026-10-21
 
 ### Safer

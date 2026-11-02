@@ -23,6 +23,8 @@ SERVING = {"schema": 1, "recipe": "qwen3-8b", "platform": "dgx", "engine": "vllm
            "dialect": {"thinking": "chat_template_kwargs.enable_thinking", "strip_reasoning": "1",
                        "effort": "low medium high", "min_max_tokens": "2048"}}
 
+STARTING = {"state": "loading", "recipe": "big-recipe", "gateway_name": "big", "served_name": "big-1", "started_at": 1000}
+
 
 class FakeMonitor:
     def __init__(self):
@@ -38,7 +40,7 @@ class FakeMonitor:
                 else:
                     body = {"service": "rack-monitor", "schema": 1, "cluster": "t", "head": "spark",
                             "nodes": [{"schema": 1, "name": "spark", "ok": True, "gpus": [], "engines": [],
-                                       "serving": SERVING}]}
+                                       "serving": SERVING, "starting": STARTING}]}
                 raw = json.dumps(body).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(raw)))
@@ -89,6 +91,11 @@ class ServingTest(unittest.TestCase):
         self.assertIs(models["qwen-route"]["served"], True)
         self.assertEqual((models["qwen-route"]["caps"]["ctx"], models["qwen-route"]["caps"]["min_max_tokens"]),
                          (40960, 2048))
+
+    def test_what_is_loading_is_listed_apart_from_the_models(self):
+        d = self.srv.request("GET", "/api/models")[1]
+        self.assertEqual([(s["node"], s["gateway_name"], s["state"]) for s in d["starting"]], [("spark", "big", "loading")])
+        self.assertNotIn("big", [m["id"] for m in d["data"]])     # nothing to pick until it answers
 
     def test_effort_off_turns_thinking_off_and_a_level_turns_it_on(self):
         self.eng.script([{"content": "a"}, {"content": "b"}, {"content": "c"}])

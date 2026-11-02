@@ -627,8 +627,33 @@
       const pct = Math.round(state.ctxUsed / win * 100);
       base += ` · ctx ${fmt(state.ctxUsed)} / ${fmt(win)} (${pct}%)`;
     }
+    const st = !txt && startingLine();
+    if (st) base = state.model ? base + " · " + st : st;
     $("serving-line").textContent = txt || base;
   }
+  // What a rack is loading, or could not: a big model takes minutes, and an empty list says nothing.
+  function startingName(s) { return s.gateway_name || s.served_name || s.recipe || "a model"; }
+  function startingNote(s) {
+    if (s.state === "loading") {
+      const min = Math.max(0, Math.round((Date.now() / 1000 - (s.started_at || Date.now() / 1000)) / 60));
+      return "loading, " + (min ? min + " min so far" : "just started");
+    }
+    return s.state === "failed" ? "did not start" : "stopped while loading";
+  }
+  function startingLine() {
+    const list = state.starting || [];
+    if (!list.length) return "";
+    return list.map((s) => startingName(s) + " on " + (s.node || "?") + ": " + startingNote(s) +
+                           (s.error ? " (" + s.error + ")" : "")).join(" · ");
+  }
+  function refreshStarting() {
+    for (const o of $("model-select").options) {
+      const s = (state.starting || [])[o.dataset.starting];
+      if (s) o.textContent = startingName(s) + "  \u00b7  " + (s.node || "?") + "  (" + startingNote(s) + ")";
+    }
+    servingLine();
+  }
+  setInterval(() => { if ((state.starting || []).some((s) => s.state === "loading")) refreshStarting(); }, 30000);
 
   // One upstream turn. Returns {toolCalls, usage, finishReason} so the caller
   // can decide whether to run tools and go around again.
@@ -1842,6 +1867,7 @@
     state.modelGateway = {}; for (const m of (data.data || [])) state.modelGateway[m.id] = m.gateway || "";
     state.modelInfo = {}; for (const m of (data.data || [])) state.modelInfo[m.id] = m;
     state.gatewayStatus = data.gateways || {};
+    state.starting = data.starting || [];
     // The server publishes what each model actually supports; without this the
     // client guesses, and a wrong guess is a 400 that reads like a crash.
     state.caps = {};
@@ -1859,6 +1885,11 @@
                       (notServed(id) ? "  (configured, not serving)" : "");
       sel.appendChild(o);
     }
+    state.starting.forEach((s, i) => {
+      const o = document.createElement("option");
+      o.disabled = true; o.value = ""; o.dataset.starting = i; o.title = s.error || "";
+      sel.appendChild(o);
+    });
     // a gateway's list is what it is configured for, not what is up: start
     // on the model that last worked, then the first one listed
     if (state.model && !state.models.includes(state.model)) state.model = "";
@@ -1871,11 +1902,13 @@
     }
     if (!state.model && state.models.length) state.model = state.models[0];
     if (state.model) sel.value = state.model;
-    servingLine();
+    else if (state.starting.length) sel.selectedIndex = 0;
+    refreshStarting();
     const gwCount = Object.keys(state.gatewayStatus || {}).length;
-    $("models-sub").textContent = state.models.length
-      ? `${plural(state.models.length, "model")} across ${plural(gwCount, "gateway")}`
-      : (gwCount ? "no models reachable — see the Gateways screen" : "no gateway configured — add one on the Gateways screen");
+    const startingNow = startingLine();
+    $("models-sub").textContent = (state.models.length
+      ? `${plural(state.models.length, "model")} across ${plural(gwCount, "gateway")}` + (startingNow ? " · " + startingNow : "")
+      : startingNow || (gwCount ? "no models reachable — see the Gateways screen" : "no gateway configured — add one on the Gateways screen"));
     const facts = $("model-facts");
     facts.innerHTML = "";
     const add = (k, v) => {
