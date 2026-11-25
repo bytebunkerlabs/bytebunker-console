@@ -220,8 +220,10 @@ class ApiTest(unittest.TestCase):
         self.assertIn("runs", body)
         st, _ = self.srv.request("GET", "/api/runs/run-nope/events?after=x")
         self.assertEqual(st, 404)
-        frames = self.srv.sse("/api/events?after=soon", timeout=2)
-        self.assertEqual(frames, [])          # starts at now: nothing new yet, no error
+        # a bad after= starts at now: no error, and none of the sessions other tests made is replayed. One topic is
+        # asked for, since an audit line of the request before this one may still be on its way to every topic
+        frames = self.srv.sse("/api/events?topics=sessions&after=soon", timeout=2)
+        self.assertEqual(frames, [])
 
     def test_the_page_loads_nothing_from_the_internet(self):
         st, html = self.srv.request("GET", "/")
