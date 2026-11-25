@@ -122,7 +122,7 @@ Why pywebview + PyInstaller rather than Electron or Tauri: the app is Python alr
 1. `desktop/bytebunker.spec` (PyInstaller): entry `desktop/app.py`, name `ByteBunker`, `--windowed`, onedir; datas: `public/`, `skills/`, `plugins/`, `mcp_terminal.py`, `mcp_jobs.py`, `config.json.example`; hidden imports as PyInstaller reports; an icon (`desktop/icon.icns`, `desktop/icon.ico`).
 2. macOS: `pyinstaller desktop/bytebunker.spec` → `dist/ByteBunker.app`; `hdiutil create -volname ByteBunker -srcfolder dist/ByteBunker.app -ov -format UDZO dist/ByteBunker-mac.dmg`.
 3. Windows: same spec on a Windows runner → `dist/ByteBunker/ByteBunker.exe`; zip the folder as `ByteBunker-win.zip` (an NSIS or MSIX installer is a later nicety; the zip "just works" and WebView2 is present on Windows 10/11).
-4. `.github/workflows/desktop.yml`: on tag `v*` and `workflow_dispatch`; matrix `macos-14`, `windows-latest`; `actions/setup-python@v5` 3.12; `pip install pywebview pyinstaller`; build; `actions/upload-artifact`; on tags `softprops/action-gh-release` with both assets. Public repo → free runners.
+4. `.github/workflows/desktop.yml`: on tag `v*` and `workflow_dispatch`; matrix `macos-15` (it was `macos-14` until GitHub retired it), `windows-latest`; `actions/setup-python@v5` 3.12; `pip install pywebview pyinstaller`; build; `actions/upload-artifact`; on tags `softprops/action-gh-release` with both assets. Public repo → free runners.
 5. Smoke test in CI: launch `ByteBunker --headless --port 0` in the background, `curl /api/config` until 200, kill. Catches missing datas/hidden imports on both OSes.
 6. Acceptance: a tagged push produces a dmg and a zip; a fresh Mac and a fresh Windows machine open the app with no Python installed, and it reaches a gateway added by IP:port.
 
