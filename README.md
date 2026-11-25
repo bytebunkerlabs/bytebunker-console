@@ -159,7 +159,8 @@ git diff | bb "review this"         piped input is attached to the question
 bb ask -p Fast -e off "…"           a profile (Default, Fast, Deep, yours), an effort level
 bb ask --json "…"                   the answer as JSON, for scripts
 bb sessions ls                      recent sessions, the app's and bb's
-bb agents "goal"                    give the agents a goal and follow it; bb agents stop
+bb agents ls | new | show | ask     your agents; bb agents ask ops "…" prints the answer
+bb agents "goal"                    give the court a goal and follow it; bb agents stop
 bb jobs ls · bb jobs run JOB        scheduled jobs; run one now and follow it
 bb runs ls · bb runs watch RUN      everything that ran or runs; attach to any of it
 bb models · gateways · cluster · usage · skills · mcp
@@ -253,6 +254,46 @@ bundles skills and MCP servers behind one switch. Enable it on the **Plugins**
 screen: its skills join the catalog and its MCP servers join the tool host.
 Manifest and layout are in `plugins/README.md`; the Claude Code plugin shape
 (`.claude-plugin/plugin.json` + `.mcp.json`) is understood too.
+
+## Agents that persist
+
+An agent is a name, a purpose, rules, a budget and a memory, kept as a folder
+in `data/agents/<id>/`: `agent.json`, `memory/` (one fact per file, each with
+its source, plus a `MEMORY.md` index), `inbox.jsonl` (what woke it and what
+became of each wake) and `runs/`. Three small modules sit between whatever
+wakes an agent and the runs the console already had:
+
+| module | what it does |
+|---|---|
+| `agentstore.py` | the agent folder and memory format; this server is its only writer |
+| `dispatch.py` | one thread: inbox lines into runs (one per agent), runs into replies; the agent's own tools, each through its rules |
+| `router.py` | a pure function: which live model fits each role now, and what to do when none does (wait, degrade, ask for a rack switch, park) |
+| `rules.py` | classes of action with allow, ask or deny per agent; quiet hours; budgets; the label on untrusted input; the guard hook |
+| `channels/` | what wakes an agent from outside, all of it pulled: `telegram.py` (long polling), `mail.py` (IMAP), `pollers.py` (feeds, GitHub, CI), `folder.py` (a drop folder), `rack.py` (what the monitors say changed) |
+
+```
+bb agents new ops --purpose "Keeps the rack serving. Reports what changed."
+bb agents ask ops "what served overnight?"
+bb agents memory ops        bb agents rules ops        bb agents router
+```
+
+A short ask is one chat turn on the server's runner, with the agent's memory
+in its system prompt and its tools (`remember`, `forget`, `ask_agent`,
+`rack_status`, `rack_switch`, `start_goal`, ...) answered by the dispatcher. A
+bigger one is a goal for the court below, started with the agent's identity
+and memory in the run spec; the master keeps a fact by printing one
+`BB_MEMORY {json}` line, the way it files a job with `BB_JOB`. Nothing listens
+on a port: the API stays loopback-only behind its token, and every channel
+asks out. Help → Agents, Rules and approvals, Channels and wakes.
+
+Beside the unit tests (`python3 -m unittest discover -s tests`), two checks
+say what those cannot. `python3 tests/soak.py --minutes 30` runs three agents
+on their schedules and channels against stand-ins and passes when the
+console's memory, threads and open files stay flat and none of its secrets is
+in anything it wrote or said. `tests/real/mail_setup.sh` and
+`tests/real/mail_check.py` put the mail channel in front of real servers
+(Dovecot and Postfix, over TLS) on a throwaway Ubuntu machine. CI runs both
+on every push.
 
 ## Agents (the harness)
 
@@ -412,7 +453,9 @@ WireGuard) works the same way.
 | `frontier_rates_per_mtok` | 3 / 15 | used for the "not spent" figure on Usage |
 | `skills_dirs` | *(empty)* | extra directories of skill packs; point one at the agent harness's `skills/` to share them |
 | `plugins_dirs` | *(empty)* | extra directories of plugins (beyond the repo's `plugins/`) |
-| `agents` | *(disabled)* | harness launcher: `enabled`, `ssh` (worker host; `""` = local, not isolated), `dir` (harness checkout), `python`, `script` |
+| `agents` | *(disabled)* | harness launcher: `enabled`, `ssh` (worker host; `""` = local, not isolated), `dir` (harness checkout), `python`, `script`; `parallel_goals` (2): goals at once on the worker |
+| `agents_parallel` | `3` | how many persistent agents run at once |
+| `channels` | *(empty)* | `mail.accounts`: `{name: {host, user, folder, smtp_host}}`; passwords and the Telegram bot token live in `secrets.json`, never here |
 | `model_capabilities` | *(built-in table)* | per-model overrides keyed by a substring of the model id: `ctx` (the window the engine *serves*, `--max-model-len`), `tools`, `effort`, `ctk`, `strip_reasoning` |
 
 State lives in `data/`: `sessions/` (one file per conversation plus an

@@ -17,3 +17,5 @@ Each run is one turn on the model, with your tools and skills, and its result la
 - Deleting a job deletes its history.
 
 Agents can file jobs too: a goal that needs doing every morning becomes a job, marked **filed by agents**.
+
+A job can also name one of your [agents](help:agents). Firing it starts nothing by itself: it writes a line in that agent's inbox, and the agent runs it with its memory, its rules and its models, and reports on its channel. An agent's own schedule (the cron and interval entries of its wake list) shows here as such jobs, and editing the agent changes them. **Run now** does what the schedule would.

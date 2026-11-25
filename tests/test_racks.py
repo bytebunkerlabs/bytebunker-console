@@ -80,6 +80,7 @@ case "$1" in
       status) echo "serving"; echo "  qwen3-8b (Qwen/Qwen3-8B) with vllm under docker on box, since now" ;;
       "recipes show "*) echo "# /home/you/.config/dgx-serve/recipes/$3/model.env"; echo "MODEL=Qwen/Qwen3-8B" ;;
       "up "*) echo "serving $2: healthy" ;;
+      "switch "*) echo "stopping what serves"; echo "switching to $2: loading" ;;
       unpair) grep -v "bytebunker:$app\$" "$F/authorized_keys" > "$F/ak.tmp"; mv "$F/ak.tmp" "$F/authorized_keys"; echo "removed 1 app key ($app)" ;;
       *) echo "rack remote: not one of the commands an app may run here: $*" >&2; exit 1 ;;
     esac ;;
@@ -460,6 +461,90 @@ class ThisComputer(unittest.TestCase):
                          [("this computer", "http://127.0.0.1:%d/v1" % self.eng.port, "ek")])
         self.assertEqual(cfg.get("racks") or [], [])                   # this computer is never a configured rack
         self.assertIn("local-model", [m["id"] for m in self.srv.request("GET", "/api/models")[1]["data"]])
+
+
+@unittest.skipIf(sys.platform == "win32", "the stand-in ssh and rack are POSIX shell")
+@unittest.skipIf(not shutil.which("ssh-keygen"), "pairing makes a key with ssh-keygen")
+class RackReflex(unittest.TestCase):
+    """An agent that watches the rack, with rack: allow. The monitor loses the engine twice in a row;
+    the rack is switched back to the recipe by rule, with the app's own key and no model's help,
+    and the agent's memory says what happened."""
+    pair = AddARack.pair
+    found = AddARack.found
+
+    def setUp(self):
+        self.f = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.f, "bin"))
+        os.makedirs(os.path.join(self.f, "home"))
+        self.eng = FakeEngine(models=[{"id": "fake-model"}], api_key="ek").start()
+        self.nodes = [{"schema": 1, "name": "box", "ok": True, "gpus": [], "disks": [],
+                       "engines": [{"kind": "vllm", "ok": True, "models": ["fake-model"], "running": 0}],
+                       "serving": {"schema": 1, "recipe": "qwen3-8b", "served_name": "fake-model", "gateway_name": "fake-model"}}]
+        self.mon = FakeMonitor("mt", self.nodes)
+        sub = lambda t: t.replace("__F__", self.f).replace("__EPORT__", str(self.eng.port)) \
+            .replace("__MPORT__", self.mon.url.rsplit(":", 1)[1])
+        script(os.path.join(self.f, "bin", "ssh"), sub(SSH))
+        script(os.path.join(self.f, "bin", "rack"), sub(RACK))
+        self.data = os.path.join(self.f, "data")
+        os.makedirs(self.data)
+        self.srv = Server(self.data, {}, env={"PATH": os.path.join(self.f, "bin") + os.pathsep + clean_path(),
+                                              "BYTEBUNKER_POLL_CAP_S": "1"})
+
+    def tearDown(self):
+        self.srv.stop()
+        self.eng.stop()
+        self.mon.close()
+        shutil.rmtree(self.f, ignore_errors=True)
+
+    def until(self, fn, what, timeout=30):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            got = fn()
+            if got:
+                return got
+            time.sleep(0.1)
+        self.fail("%s never happened" % what)
+
+    def remote_log(self):
+        p = os.path.join(self.f, "remote.log")
+        return text(p).splitlines() if os.path.exists(p) else []
+
+    def test_the_rack_is_switched_back_by_rule_and_the_agent_remembers(self):
+        got = self.found(self.pair())
+        st, r = self.srv.request("POST", "/api/racks", {"action": "save", "pairing": got["pairing"]})
+        self.assertEqual(st, 200, r)
+        st, r = self.srv.request("POST", "/api/agents/agent", {"action": "create", "agent": {
+            "id": "ops", "name": "Ops", "purpose": "Keeps the rack serving.", "budget": {"quiet": ""}, "rules": {"rack": "allow"},
+            "wake": [{"kind": "rack", "events": ["engine_down", "engine_up"], "recipe": "qwen3-8b"}]}})
+        self.assertEqual(st, 200, r)
+        picture = os.path.join(self.data, "channels", "rack.json")
+        self.until(lambda: os.path.exists(picture) and "box" in (json.loads(text(picture)).get("picture") or {}), "the first look")
+        self.assertFalse([l for l in self.remote_log() if "switch" in l])
+        self.nodes[0]["engines"] = []                                # the engine dies
+        try:
+            line = self.until(lambda: next((l for l in self.remote_log() if "switch" in l), None), "the switch")
+        except AssertionError:
+            d = self.srv.request("GET", "/api/agents/agent?id=ops")[1]
+            ch = self.srv.request("GET", "/api/channels")[1]
+            self.fail("the switch never happened. wakes: %s; approvals: %s; runs: %s; picture: %s; looks: %s; rack: %s; monitor hits: %s" % (
+                [{k: w.get(k) for k in ("source", "state", "reflex", "why")} for w in d.get("inbox") or []],
+                self.srv.request("GET", "/api/approvals")[1],
+                [(r["kind"], r["state"], r.get("title")) for r in self.srv.request("GET", "/api/runs?limit=20")[1].get("runs") or []],
+                text(picture) if os.path.exists(picture) else None, ch.get("pollers"),
+                ch.get("rack"), self.mon.hits))
+        self.assertTrue(line.endswith("rack switch qwen3-8b"), line)   # with the app's key: rack remote saw it
+        entry = self.until(lambda: next((e for e in self.srv.request("GET", "/api/audit?q=agent.rack.switch")[1]["entries"]
+                                         if e["action"] == "agent.rack.switch"), None), "the audit line")
+        self.assertEqual((entry["ok"], entry["actor"], entry["detail"]["recipe"], entry["detail"]["by_rule"]),
+                         (True, "agent:ops", "qwen3-8b", True))
+        d = self.srv.request("GET", "/api/agents/agent?id=ops")[1]
+        wake = next(w for w in d["inbox"] if w["source"] == "rack")
+        self.assertEqual((wake["reflex"], wake["event"]["kind"], wake["event"]["recipe"]), ("allow", "engine_down", "qwen3-8b"))
+        facts = [f for f in d["memory"] if f["name"].startswith("rack-engine-down-")]
+        self.assertEqual(len(facts), 1)
+        self.assertIn("The engine on box is down", facts[0]["fact"])
+        self.assertEqual(len([l for l in self.remote_log() if "switch" in l]), 1)          # once, not at every look
 
 
 if __name__ == "__main__":

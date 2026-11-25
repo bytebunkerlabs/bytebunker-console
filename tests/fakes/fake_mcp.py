@@ -30,6 +30,9 @@ TOOLS = [
     {"name": "crash", "description": "exit the server", "annotations": {"destructiveHint": True},
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "ping_client", "description": "ping the client", "inputSchema": {"type": "object", "properties": {}}},
+    # a fetch, as the usual MCP servers describe theirs: it changes nothing, and it reaches anywhere
+    {"name": "fetch", "description": "fetch a page", "annotations": {"readOnlyHint": True, "openWorldHint": True},
+     "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}},
 ]
 
 
@@ -42,6 +45,8 @@ def handle_call(rid, params):
     elif name == "slow":
         time.sleep(float(args.get("seconds") or 1))
         send({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": "slept"}]}})
+    elif name == "fetch":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": "fetched:" + str(args.get("url"))}]}})
     elif name == "crash":
         os._exit(3)
     elif name == "ping_client":

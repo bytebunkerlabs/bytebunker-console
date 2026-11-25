@@ -67,6 +67,15 @@ def normalize(cfg):
     return out
 
 
+def served_window(m):
+    """The window an engine says it serves for one model on its list: vLLM's max_model_len, or
+    llama.cpp's meta.n_ctx (what it was started with, not the n_ctx_train its weights could do)."""
+    for n in (m.get("max_model_len"), (m.get("meta") or {}).get("n_ctx") if isinstance(m.get("meta"), dict) else None):
+        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+            return n
+    return None
+
+
 class Registry:
     """Merged model list across gateways, refreshed at most every TTL seconds."""
 
@@ -122,9 +131,8 @@ class Registry:
             data = get_json(g["url"] + "/models", g.get("key"), timeout=6)
             ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
             owned = {m.get("id"): m.get("owned_by") for m in (data.get("data") or [])}
-            # vLLM says the window it serves; the capability table only guesses
-            ctx = {m.get("id"): m["max_model_len"] for m in (data.get("data") or [])
-                   if isinstance(m.get("max_model_len"), int) and m["max_model_len"] > 0}
+            # the engine says the window it serves; the capability table only guesses
+            ctx = {m.get("id"): served_window(m) for m in (data.get("data") or []) if served_window(m)}
             return g, {"ok": True, "models": len(ids), "ms": int((time.time() - t0) * 1000), "error": None,
                        "kind": g.get("kind") or detect_kind(g["url"], owned), "url": g["url"]}, ids, owned, ctx
         except Exception as e:   # noqa: BLE001

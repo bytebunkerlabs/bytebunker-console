@@ -3,6 +3,7 @@ starts) the server for its data folder, streams answers, and whose work
 shows up in the app's sessions and runs."""
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -163,9 +164,10 @@ class BBTest(unittest.TestCase):
     @unittest.skipIf(sys.platform == "win32", "SIGINT to a child is a POSIX thing")
     def test_ctrl_c_stops_the_turn_on_the_server(self):
         self.eng.script([{"content": "word " * 300, "chunk": 5, "pace": 0.05}])
+        # a suite started in the background of a script inherits "ignore Ctrl-C", and so would bb: here it must not
         p = subprocess.Popen([sys.executable, os.path.join(ROOT, "bb.py"), "ask", "-m", MODEL, "tell me a long story"],
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                             env=bb_env(self.data))
+                             env=bb_env(self.data), preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
         time.sleep(2.0)
         p.send_signal(signal.SIGINT)
         out, err = p.communicate(timeout=20)
@@ -264,6 +266,176 @@ class IdleExitTest(unittest.TestCase):
             p.kill()
             p.wait(10)
             shutil.rmtree(data, ignore_errors=True)
+
+
+class AgentsCliTest(unittest.TestCase):
+    """bb agents: make one, ask it, read what it remembers, change its rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.eng = FakeEngine(models=[{"id": "glm-5.3-flash", "max_model_len": 131072}]).start()
+        cls.data = tempfile.mkdtemp()
+        cls.srv = Server(cls.data, {"gateways": [{"name": "fake", "url": cls.eng.url, "key": "", "enabled": True}]})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stop()
+        cls.eng.stop()
+        shutil.rmtree(cls.data, ignore_errors=True)
+
+    def bb(self, *args, stdin="", timeout=60):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bb.py")] + list(args), input=stdin,
+                              capture_output=True, text=True, timeout=timeout, env=bb_env(self.data))
+
+    def test_1_new_ls_and_show(self):
+        r = self.bb("agents", "ls")
+        self.assertIn("no agents yet", r.stdout)
+        r = self.bb("agents", "new", "ops", "--purpose", "Keeps the rack serving.", "--name", "Ops",
+                    "--cron", "0 7 * * 1-5", "--prompt", "Morning report.")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("made ops (Ops)", r.stderr)
+        r = self.bb("agents", "new", "ops", "--purpose", "again")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("there is already an agent 'ops'", r.stderr)
+        r = self.bb("agents", "ls")
+        self.assertIn("ops", r.stdout.splitlines()[1])
+        self.assertIn("Keeps the rack serving.", r.stdout)
+        r = self.bb("agents", "show", "ops")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("master: glm-5.3-flash (the only live model that fits", r.stdout)
+        self.assertIn("outward=ask", r.stdout)
+        self.assertIn("wakes on cron 0 7 * * 1-5: Morning report.", r.stdout)
+        self.assertEqual(json.loads(self.bb("agents", "show", "ops", "--json").stdout)["agent"]["id"], "ops")
+        self.assertEqual(self.bb("agents", "show", "nobody").returncode, 2)
+
+    def test_2_ask_prints_the_answer_and_memory_is_kept(self):
+        self.eng.script([{"tool_calls": [{"name": "remember", "arguments": {
+            "fact": "the owner asked about disks on monday", "type": "project", "source": "the owner said", "name": "asked-disks"}}]},
+            {"content": "Both disks are fine."}])
+        r = self.bb("agents", "ask", "ops", "how are the disks?")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "Both disks are fine.\n")
+        self.assertIn("remember", r.stderr)                         # the tool call, as it happened
+        r = self.bb("agents", "memory", "ops")
+        self.assertIn("asked-disks", r.stdout)
+        self.assertIn("the owner asked about disks on monday", r.stdout)
+        r = self.bb("agents", "memory", "ops", "add", "reports go out before 07:30", "--type", "feedback", "--name", "report-time")
+        self.assertIn("remembered as report-time", r.stderr)
+        self.assertIn("report-time", self.bb("agents", "memory", "ops").stdout)
+        self.assertIn("forgot asked-disks", self.bb("agents", "memory", "ops", "forget", "asked-disks").stderr)
+        self.assertNotIn("asked-disks", self.bb("agents", "memory", "ops").stdout)
+        self.assertEqual(self.bb("agents", "memory", "ops", "forget", "asked-disks").returncode, 2)
+        r = self.bb("agents", "inbox", "ops")
+        self.assertIn("how are the disks?", r.stdout)
+        self.assertIn("done", r.stdout)
+
+    def test_3_piped_input_is_the_ask_and_an_ask_to_nobody_goes_to_the_concierge(self):
+        self.eng.script([{"content": "Summarized."}])
+        r = self.bb("agents", "ask", "ops", "summarize this", stdin="line one\nline two\n")
+        self.assertEqual(r.stdout, "Summarized.\n")
+        sent = [q["body"] for q in self.eng.requests if q["path"].endswith("/chat/completions")][-1]
+        self.assertIn("summarize this\n\nline one\nline two", sent["messages"][-1]["content"])
+        self.eng.script([{"content": "It is Monday."}])
+        r = self.bb("agents", "ask", "what day is it?")
+        self.assertEqual((r.returncode, r.stdout), (0, "It is Monday.\n"))
+        self.assertIn("concierge", self.bb("agents", "ls").stdout)
+        # an option between the words: bb agents ask ops --chat "…"
+        self.eng.script([{"content": "In one turn."}])
+        r = self.bb("agents", "ask", "ops", "--chat", "answer in one turn")
+        self.assertEqual((r.returncode, r.stdout), (0, "In one turn.\n"), r.stderr)
+
+    @unittest.skipIf(os.name == "nt", "a socket as standard input is a POSIX thing")
+    def test_3a_standard_input_that_never_ends_does_not_hold_an_ask(self):
+        """A scheduler or another program can start bb with a socket as its standard input that stays
+        open and says nothing. The ask goes ahead with its words; what did arrive rides along."""
+        import socket
+        for sent, want in ((b"", "is anyone there?"), (b"a line that arrived\n", "is anyone there?\n\na line that arrived")):
+            ours, theirs = socket.socketpair()
+            try:
+                if sent:
+                    ours.sendall(sent)
+                self.eng.script([{"content": "Here."}])
+                t0 = time.time()
+                r = subprocess.run([sys.executable, os.path.join(ROOT, "bb.py"), "agents", "ask", "ops", "--chat", "is anyone there?"],
+                                   stdin=theirs.fileno(), capture_output=True, text=True, timeout=60, env=bb_env(self.data))
+                self.assertEqual((r.returncode, r.stdout), (0, "Here.\n"), r.stderr)
+                self.assertLess(time.time() - t0, 30)
+                body = [q["body"] for q in self.eng.requests if q["path"].endswith("/chat/completions")][-1]
+                # (an agent's ask carries its date and time on its first line)
+                self.assertEqual(re.sub(r"^\[[^\]\n]* local time\]\n", "", body["messages"][-1]["content"]), want)
+            finally:
+                ours.close()
+                theirs.close()
+        # bb ask, the same
+        ours, theirs = socket.socketpair()
+        try:
+            self.eng.script([{"content": "Yes."}])
+            r = subprocess.run([sys.executable, os.path.join(ROOT, "bb.py"), "ask", "--no-tools", "still there?"],
+                               stdin=theirs.fileno(), capture_output=True, text=True, timeout=60, env=bb_env(self.data))
+            self.assertEqual((r.returncode, r.stdout), (0, "Yes.\n"), r.stderr)
+        finally:
+            ours.close()
+            theirs.close()
+
+    def test_3c_an_ask_that_fails_says_why_once(self):
+        self.eng.script([{"status": 500, "error": "the engine fell over"}] * 6)
+        r = self.bb("agents", "ask", "ops", "--chat", "will this work?")
+        self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+        self.assertEqual(r.stderr.count("the engine fell over"), 1, r.stderr)       # said, and not twice
+        self.eng.clear()
+
+    def test_3b_options_go_anywhere_among_an_agents_commands_words(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import bb
+        p = bb.parser()
+        first = lambda *argv: bb.options_first(p, list(argv))
+        self.assertEqual(first("agents", "ask", "ops", "--chat", "hello there"), ["agents", "--chat", "ask", "ops", "hello there"])
+        self.assertEqual(first("agents", "inbox", "ops", "-n", "5"), ["agents", "-n", "5", "inbox", "ops"])
+        self.assertEqual(first("agents", "memory", "ops", "add", "--type=feedback", "be brief", "--name", "brief"),
+                         ["agents", "--type=feedback", "--name", "brief", "memory", "ops", "add", "be brief"])
+        self.assertEqual(first("agents", "new", "ops", "--pur", "Keeps the rack serving."),
+                         ["agents", "--pur", "Keeps the rack serving.", "new", "ops"])
+        # what argparse reads as a word stays where it is: a dash with a space, a number, anything after --
+        self.assertEqual(first("agents", "ask", "ops", "-v means verbose?"), ["agents", "ask", "ops", "-v means verbose?"])
+        self.assertEqual(first("agents", "ask", "ops", "-5"), ["agents", "ask", "ops", "-5"])
+        self.assertEqual(first("agents", "ask", "ops", "--", "--chat"), ["agents", "ask", "ops", "--", "--chat"])
+        self.assertEqual(first("agents", "ask", "ops", "--nope", "x"), ["agents", "ask", "ops", "--nope", "x"])   # argparse says so
+        a = p.parse_args(first("agents", "ask", "ops", "--goal", "research this"))
+        self.assertEqual((a.goal, a.shape), (["ask", "ops", "research this"], "goal"))
+
+    def test_4_rules_and_budget_are_shown_and_set(self):
+        r = self.bb("agents", "rules", "ops")
+        self.assertRegex(r.stdout, r"outward\s+ask\s+a message to any channel")
+        self.assertRegex(r.stdout, r"spend\s+deny")
+        r = self.bb("agents", "rules", "ops", "rack=deny", "egress=+developer.nvidia.com,docs.vllm.ai", "runs_day=20", "quiet=22:00-06:00")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("developer.nvidia.com, docs.vllm.ai", r.stdout)
+        self.assertIn("20 runs a day", r.stdout)
+        self.assertIn("quiet 22:00-06:00", r.stdout)
+        agent = json.loads(self.bb("agents", "show", "ops", "--json").stdout)["agent"]
+        self.assertEqual((agent["rules"]["rack"], agent["budget"]["runs_day"]), ("deny", 20))
+        r = self.bb("agents", "rules", "ops", "egress=-docs.vllm.ai", "rack=sometimes")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("rules.rack is allow, ask or deny", r.stderr)
+        # the list is all its court reaches; any is a * the shell does not expand; none empties it
+        self.assertIn("egress  developer.nvidia.com, docs.vllm.ai (and nothing else)", self.bb("agents", "rules", "ops").stdout)
+        r = self.bb("agents", "rules", "ops", "egress=any")
+        self.assertIn("egress  any public site (your own network is refused)", r.stdout)
+        self.assertEqual(json.loads(self.bb("agents", "show", "ops", "--json").stdout)["agent"]["rules"]["egress"],
+                         ["developer.nvidia.com", "docs.vllm.ai", "*"])
+        self.assertIn("egress  none (nothing outside is reachable)", self.bb("agents", "rules", "ops", "egress=none").stdout)
+        self.assertIn("egress  docs.vllm.ai (and nothing else)", self.bb("agents", "rules", "ops", "egress=+docs.vllm.ai,-any").stdout)
+
+    def test_5_off_on_router_and_rm(self):
+        self.assertIn("ops is off", self.bb("agents", "off", "ops").stderr)
+        self.assertIn("off", self.bb("agents", "ls").stdout)
+        self.bb("agents", "on", "ops")
+        r = self.bb("agents", "router")
+        self.assertIn("glm-5.3-flash", r.stdout)
+        self.assertIn("auto, a goal:", r.stdout)
+        r = self.bb("agents", "rm", "ops", "--yes")
+        self.assertIn("its folder is kept at", r.stderr)
+        self.assertNotIn("ops  ", self.bb("agents", "ls").stdout)
 
 
 class CommandTableTest(unittest.TestCase):

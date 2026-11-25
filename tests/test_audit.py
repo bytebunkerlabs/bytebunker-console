@@ -115,6 +115,26 @@ class WhatCounts(unittest.TestCase):
         self.assertEqual(a("DELETE", "/api/sessions", None, {"id": ["s-9"]}), ("data", "session.delete", "s-9", {}))
         self.assertEqual(a("POST", "/api/runs/r-1/cancel", {}, {})[:3], ("runs", "run.cancel", "r-1"))
 
+    def test_an_agent_or_a_chat_is_named(self):
+        """A line about an agent or a Telegram chat says which one, also when the request carries it inside."""
+        home = tempfile.mkdtemp()
+        os.environ.setdefault("BYTEBUNKER_DATA", os.path.join(home, "data"))
+        os.environ.setdefault("BYTEBUNKER_CONFIG", os.path.join(home, "config.json"))
+        import server
+        a = server.audit_action
+        self.assertEqual(a("POST", "/api/agents/agent", {"action": "create", "agent": {"id": "ops", "purpose": "x"}}, {})[:3],
+                         ("agents", "agents.agent.create", "ops"))
+        self.assertEqual(a("POST", "/api/agents/agent", {"action": "save", "agent": {"id": "ops", "rules": {}}}, {})[:3],
+                         ("agents", "agents.agent.save", "ops"))
+        self.assertEqual(a("POST", "/api/agents/agent", {"action": "remember", "id": "ops", "fact": "f"}, {})[2], "ops")
+        self.assertIsNone(a("POST", "/api/agents/agent", {"action": "create", "agent": "ops"}, {})[2])
+        self.assertIsNone(a("POST", "/api/agents/agent", {"action": "ask", "id": "ops", "text": "hi"}, {}))
+        bind = a("POST", "/api/channels", {"action": "telegram_bind", "chat": 4242, "agent": "ops"}, {})
+        self.assertEqual(bind[1:3], ("channels.telegram_bind", "4242"))
+        self.assertEqual(bind[3].get("agent"), "ops")
+        self.assertEqual(a("POST", "/api/channels", {"action": "mail_remove", "name": "default"}, {})[2], "default")
+        self.assertIsNone(a("POST", "/api/channels", {"action": "telegram_connect", "token": "t"}, {})[2])
+
 
 class Commands(unittest.TestCase):
     """Every terminal command outside the sandbox, run or refused, is a line."""

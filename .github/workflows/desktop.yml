@@ -13,6 +13,7 @@ on:
       - "desktop/**"
       - "public/**"
       - "*.py"
+      - "channels/**"
       - "skills/**"
       - "plugins/**"
       - "tests/**"

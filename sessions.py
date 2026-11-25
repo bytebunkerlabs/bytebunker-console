@@ -22,6 +22,7 @@ import json
 import os
 import re
 import threading
+import weakref
 import time
 
 _ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -60,7 +61,7 @@ class SessionStore:
         self.legacy = legacy_path
         self.index_path = os.path.join(dir_path, "index.json")
         self._lock = threading.Lock()           # the index
-        self._locks = {}                        # per session
+        self._locks = weakref.WeakValueDictionary()   # per session; one nobody holds is let go (an agent's wake has its own id)
         os.makedirs(dir_path, exist_ok=True)
         self.index = self._load_index()
         self.migrated = self._migrate()
@@ -73,7 +74,10 @@ class SessionStore:
 
     def _slock(self, sid):
         with self._lock:
-            return self._locks.setdefault(sid, threading.Lock())
+            lock = self._locks.get(sid)
+            if lock is None:
+                lock = self._locks[sid] = threading.Lock()
+            return lock
 
     @staticmethod
     def summarize(sess):

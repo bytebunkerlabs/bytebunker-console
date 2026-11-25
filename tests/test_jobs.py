@@ -73,6 +73,42 @@ class StoreTest(unittest.TestCase):
         self.store.record_run(j["id"], {"ts": time.time(), "ok": True, "output": "late"})   # a run that ended after
         self.assertFalse(os.path.exists(path))
 
+    def test_a_job_that_names_an_agent_keeps_it_through_an_edit_and_needs_a_prompt(self):
+        sched = {"kind": "cron", "cron": "0 7 * * 1-5"}
+        j = self.store.upsert({"id": "agent-ops-w0", "name": "Ops: morning", "prompt": "Morning report.", "schedule": sched,
+                               "agent": "ops", "kind": "chat"})
+        self.assertEqual((j["agent"], j["kind"]), ("ops", "agent"))            # it wakes the agent, whatever kind was said
+        # the Jobs form knows nothing of agents: its edit keeps the job the agent's
+        j2 = self.store.upsert({"id": "agent-ops-w0", "name": "Ops: earlier", "prompt": "Morning report.", "kind": "chat",
+                                "schedule": {"kind": "cron", "cron": "30 6 * * 1-5"}})
+        self.assertEqual((j2["agent"], j2["kind"], j2["schedule"]["cron"]), ("ops", "agent", "30 6 * * 1-5"))
+        with self.assertRaises(ValueError):
+            self.store.upsert({"name": "x", "workflow": "review", "agent": "ops", "schedule": sched})
+        t = time.time()
+        self.store.mark_fired("agent-ops-w0", t)                              # fired: the schedule moves on, no run yet
+        got = self.store.get("agent-ops-w0")
+        self.assertEqual((got["last_run"], got["runs"]), (t, 0))
+
+    def test_a_weekday_morning_schedule_fires_five_times_in_a_week_and_never_in_quiet_hours(self):
+        # the brief's first agent: "0 7 * * 1-5" with quiet hours until 07:00. A whole week, looked at every 20 seconds
+        # as the scheduler does, starting on a Monday at midnight (local time, as cron is read)
+        import rules
+        self.store.upsert({"id": "agent-ops-w0", "name": "Ops: morning", "prompt": "Morning report.", "agent": "ops",
+                           "schedule": {"kind": "cron", "cron": "0 7 * * 1-5"}})
+        fired = []
+        sched = jobs.Scheduler(self.store, lambda job, trigger="schedule": fired.append((job["id"], clock[0])))
+        monday = time.mktime((2026, 11, 9, 0, 0, 0, 0, 0, -1))
+        clock = [monday]
+        while clock[0] < monday + 7 * 86400:
+            sched.tick(clock[0])
+            clock[0] += 20
+        when = [time.localtime(t) for _, t in fired]
+        self.assertEqual([(t.tm_wday, t.tm_hour, t.tm_min) for t in when], [(d, 7, 0) for d in range(5)])   # Mon to Fri, once each
+        self.assertTrue(all(t.tm_sec < 20 for t in when))                    # at the minute's first look
+        for _, t in fired:
+            self.assertFalse(rules.in_quiet("23:00-07:00", t))               # quiet hours end as it fires: it is not held back
+            self.assertTrue(rules.in_quiet("23:00-07:00", t - 60))
+
     def test_job_ids_are_safe_file_names(self):
         with self.assertRaises(ValueError):
             self.store.upsert({"id": "../../x", "name": "c", "prompt": "p",

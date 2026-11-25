@@ -153,10 +153,18 @@
     </section>
 
     <section class="screen" id="screen-agents">
-      <header><h1>Agents</h1><span class="sub">A master agent and its sandboxed workers · <span id="agents-sub">—</span></span><div class="grow"></div><button type="button" class="ghost-btn" id="agents-how" style="font-size:12px" title="On bytebunkerlabs.ai: how agents run, their sandbox and their access to your data">How agents run ↗</button></header>
-      <div class="chat-tabs sub-tabs" id="agents-tabs"><button class="on" data-atab="master">Master</button><button data-atab="settings">Settings</button></div>
+      <header><h1>Agents</h1><span class="sub">Agents that persist, and a court of sandboxed workers · <span id="agents-sub">—</span></span><div class="grow"></div><button type="button" class="ghost-btn" id="agents-how" style="font-size:12px" title="On bytebunkerlabs.ai: how agents run, their sandbox and their access to your data">How agents run ↗</button></header>
+      <div class="chat-tabs sub-tabs" id="agents-tabs"><button class="on" data-atab="agents">Agents</button><button data-atab="master">Master</button><button data-atab="settings">Settings</button></div>
       <div class="scroll agents-grid">
         <div class="agents-left">
+        <div class="card" id="pa-box" data-apane="agents">
+          <div class="skill-head"><div class="skill-id"><b>Your agents</b><span class="src" id="pa-sub">each has a purpose, rules, a budget and a memory</span></div>
+            <span style="display:flex;gap:8px"><button class="ghost-btn" id="pa-ask-any" type="button" title="An ask to no agent in particular: the concierge answers, or hands it to the agent whose purpose fits">Ask anyone</button><button class="solid-btn" id="pa-new" type="button">New agent</button></span></div>
+          <div id="pa-form"></div>
+          <div id="pa-list" class="cards-col"></div>
+        </div>
+        <div class="card" id="pa-models" data-apane="agents"></div>
+        <div class="card" id="pa-channels" data-apane="agents"></div>
         <div class="card" id="agents-summary" data-apane="master"></div>
         <div id="agents-topology" class="card" data-apane="settings"></div>
         <div class="card" id="agents-master" data-apane="settings">

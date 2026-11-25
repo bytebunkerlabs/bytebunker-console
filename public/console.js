@@ -306,10 +306,13 @@
   // prompt size, in one of two phrasings. The newer one says "at least N"
   // because its tokenizer stops at N = window - max_tokens + 1: a floor, not
   // the prompt's length. `bound` says which kind of number `prompt` is.
+  // llama.cpp refuses the prompt alone and names both numbers.
   function parseCtxError(text) {
+    let m = /^\s*request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)/.exec(text);
+    if (m && +m[1] > +m[2] && +m[2] >= 1024) return { win: +m[2], prompt: +m[1], bound: false };
     const win = /maximum context length is (\d+)/.exec(text);
     if (!win) return null;
-    let m = /prompt contains (at least )?(\d+) input tokens/.exec(text);
+    m = /prompt contains (at least )?(\d+) input tokens/.exec(text);
     if (m) return { win: +win[1], prompt: +m[2], bound: !!m[1] };
     m = /\((\d+) in the messages/.exec(text);
     return m ? { win: +win[1], prompt: +m[1], bound: false } : null;
@@ -1042,6 +1045,14 @@
     if (atts.some((a) => a.kind === "image") && !capsFor(state.model).vision) {
       if (!confirm("The selected model is not marked as accepting images. Send anyway?")) return;
     }
+    const at = /^@([a-z][a-z0-9-]{0,31})\s+([\s\S]+)$/.exec(text);
+    if (at && (state.pa.list || []).some((x) => x.id === at[1])) {
+      // an agent by name: it answers here, with its own memory, rules and models
+      if (!state.session) state.session = "s-" + Date.now().toString(36);
+      $("input").value = ""; autosizeInput();
+      await askAgentInChat(at[1], at[2], text);
+      return;
+    }
     if (serverRunner()) { await sendViaServer(text, atts); return; }
     await hydrateImages(state.messages);
     if (/^\/compress\b/i.test(text)) { await compress("manual"); return; }
@@ -1687,6 +1698,7 @@
                 hops: m.hops || null };
     if (m.kind) { o.kind = m.kind; o.archive = m.archive || ""; o.count = m.count || 0; }
     if (m.turn) o.turn = m.turn;
+    if (m.stamp) o.stamp = m.stamp;       // when an agent's ask was made: the model reads it with the ask
     if (m.traces) o.traces = m.traces;
     if (m.rating) o.rating = m.rating;
     if (m.skills && m.skills.length) o.skills = m.skills;
@@ -1815,7 +1827,7 @@
   function onLive(topic, fn) { (live.handlers[topic] = live.handlers[topic] || []).push(fn); }
   function startLive() {
     if (live.es || typeof EventSource === "undefined") return;
-    const topics = ["jobs", "sessions", "runs", "usage", "config", "models", "approvals", "audit"];
+    const topics = ["jobs", "sessions", "runs", "usage", "config", "models", "approvals", "audit", "agents", "inbox", "channels"];
     const es = new EventSource("/api/events?topics=" + topics.join(","));
     live.es = es;
     const fire = (topic, evt) => { for (const fn of live.handlers[topic] || []) { try { fn(evt); } catch (e) { console.error(e); } } };
@@ -3050,7 +3062,7 @@
       const head = document.createElement("div"); head.className = "skill-head";
       head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div><span class="src mono" style="text-align:right"></span>';
       head.querySelector("b").textContent = (j.enabled ? "" : "\u23f8 ") + j.name;
-      head.querySelectorAll(".src")[0].textContent = j.kind + " \u00b7 " + j.schedule_text + (j.model && j.kind === "chat" ? " \u00b7 " + j.model : "") + (j.created_by && j.created_by !== "you" ? " \u00b7 filed by " + j.created_by : "");
+      head.querySelectorAll(".src")[0].textContent = (j.agent ? "wakes " + j.agent : j.kind) + " \u00b7 " + j.schedule_text + (j.model && j.kind === "chat" ? " \u00b7 " + j.model : "") + (j.created_by && j.created_by !== "you" && !j.agent ? " \u00b7 filed by " + j.created_by : "");
       head.querySelectorAll(".src")[1].textContent = (j.enabled && j.next_run ? "next " + fmtWhen(j.next_run) : "paused") + (running[j.id] ? " \u00b7 " + (running[j.id].state === "queued" ? "QUEUED" : "RUNNING") : "");
       const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = j.prompt.length > 220 ? j.prompt.slice(0, 220) + "\u2026" : j.prompt;
       const last = document.createElement("div"); last.className = "skill-tags mono";
@@ -3062,7 +3074,10 @@
       mk(j.enabled ? "Pause" : "Resume", "ghost-btn", () => post({ action: "toggle", id: j.id }));
       mk("Edit", "ghost-btn", () => { jobsDetail = "edit"; const pane = $("jobs-detail"); pane.textContent = ""; pane.appendChild(jobForm(j)); });
       mk("Delete", "ghost-btn danger", () => { if (confirm("Delete job \"" + j.name + "\" and its history?")) post({ action: "delete", id: j.id }); });
-      card.appendChild(head); card.appendChild(desc); card.appendChild(last); card.appendChild(acts);
+      card.appendChild(head); card.appendChild(desc);
+      // a job that was filed switched off says why (an agent filed it while working on a mail, a feed or a file)
+      if (!j.enabled && j.reason) { const why = document.createElement("div"); why.className = "hint job-why"; why.textContent = j.reason; card.appendChild(why); }
+      card.appendChild(last); card.appendChild(acts);
       card.onclick = () => { jobsSelected = j.id; showJobRuns(j); };
       left.appendChild(card);
     }
@@ -3335,9 +3350,12 @@
       const outside = a.kind === "outside";
       if (outside) c.classList.add("outside");
       const h = document.createElement("div"); h.innerHTML = outside ? "<b>Run outside the sandbox?</b> <span class='hint'></span>" : "<b></b> asks before it runs<span class='hint'></span>";
-      if (!outside) h.querySelector("b").textContent = a.tool;
-      h.querySelector(".hint").textContent = outside ? ((a.args || {}).why || "") + " \u00b7 as you, with your files, keys and network" : (a.session ? " · session " + a.session : "");
-      const pre = document.createElement("pre"); pre.textContent = outside ? String((a.args || {}).command || "") : prettyJson(JSON.stringify(a.args || {}));
+      // an agent's request says who asks and for what ("Ops wants to remember"), then the thing itself in words
+      if (!outside && a.title) { h.innerHTML = "<b></b><span class='hint'></span>"; h.querySelector("b").textContent = a.title; }
+      else if (!outside) h.querySelector("b").textContent = a.tool;
+      h.querySelector(".hint").textContent = outside ? ((a.args || {}).why || "") + " \u00b7 as you, with your files, keys and network"
+        : a.title ? (a.run ? " \u00b7 run " + a.run : "") : (a.session ? " · session " + a.session : "");
+      const pre = document.createElement("pre"); pre.textContent = outside ? String((a.args || {}).command || "") : (a.title && a.words) ? a.words : prettyJson(JSON.stringify(a.args || {}));
       const acts = document.createElement("div"); acts.className = "acts";
       const choices = outside
         ? [["Allow once", "allow", "solid-btn"], ["Allow every time in this chat", "always", "ghost-btn"], ["Don't allow", "deny", "ghost-btn danger"]]
@@ -4702,8 +4720,642 @@
     return box;
   }
 
-  // Agents has two tabs: Master (run goals, watch them) and Settings (where agents work, the master's setup)
-  try { state.agentsTab = localStorage.getItem("bb.agentsTab") || "master"; } catch (e) { state.agentsTab = "master"; }
+  /* ---------------- persistent agents ---------------- */
+  // An agent is a folder on this computer: a purpose, rules, a budget and a memory. An ask, a schedule,
+  // a channel or another agent wakes it; the dispatcher gives it one run and sends the answer back where
+  // the ask came from. The Agents tab lists them; the pane on the right is the one that is open.
+  state.pa = { list: [], info: {}, open: null, tab: "ask", waiting: null, es: null };
+  const paPost = async (body) => {
+    const res = await fetch("/api/agents/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.error) throw new Error(d.error || ("HTTP " + res.status));
+    return d;
+  };
+  const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const mkBtn = (label, cls, fn) => { const b = mk("button", cls || "ghost-btn", label); b.type = "button"; b.onclick = fn; return b; };
+  const mkSel = (opts, val) => {
+    const s = mk("select", "text-input");
+    for (const o of opts) { const [v, l] = Array.isArray(o) ? o : [o, o]; const op = mk("option", null, l); op.value = v; s.appendChild(op); }
+    s.value = val == null ? "" : val;
+    return s;
+  };
+  const paWhen = (ts) => ts ? relTime(ts * 1000) : "";
+  function paStateOf(r) {
+    if (r.enabled === false) return ["off", ""];
+    if (r.run || r.running) return ["working", "ok"];
+    if (r.parked) return ["parked", "bad"];
+    if (r.waiting) return [r.waiting + " waiting", ""];
+    return [r.quiet_now ? "quiet hours" : "idle", ""];
+  }
+  function paWakeText(w) {
+    if (w.kind === "cron") return "cron " + w.cron;
+    if (w.kind === "interval") return "every " + w.every_min + " min";
+    if (w.kind === "rack") return "the rack: " + (w.events || []).join(", ");
+    if (w.kind === "mail") return "mail from " + (w.from || []).join(", ");
+    if (w.kind === "poller") return w.what + (w.url ? " " + w.url : w.repo ? " " + w.repo : "");
+    if (w.kind === "folder") return "files in " + w.path;
+    return w.kind;
+  }
+  function paRow(r) {
+    const b = mk("button", "pa-row" + (state.pa.open === r.id ? " on" : "")); b.type = "button"; b.dataset.agent = r.id;
+    const top = mk("div", "top");
+    top.appendChild(mk("b", null, r.name));
+    const [txt, cls] = paStateOf(r);
+    const pill = mk("span", "pill " + cls, txt); top.appendChild(pill);
+    if (r.builtin) top.appendChild(mk("span", "pill", "built in"));
+    b.appendChild(top);
+    b.appendChild(mk("div", "purpose", r.purpose));
+    const u = r.usage || {}, bud = r.budget || {};
+    const bits = [r.facts + " fact" + (r.facts === 1 ? "" : "s"), "runs today " + (u.runs || 0) + "/" + (bud.runs_day || 0)];
+    if (r.last && (r.last.ended || r.last.started)) bits.push("last run " + paWhen(r.last.ended || r.last.started));
+    for (const w of (r.wake || []).slice(0, 2)) bits.push("wakes on " + paWakeText(w));
+    for (const c of r.channels || []) bits.push(c.kind + " " + (c.chat || c.to || ""));
+    const meta = mk("div", "meta");
+    bits.forEach((t, i) => { if (i) meta.appendChild(document.createTextNode("  \u00b7  ")); meta.appendChild(mk("span", null, t)); });
+    b.appendChild(meta);
+    b.onclick = () => openPA(r.id);
+    return b;
+  }
+  let paTimer = 0;
+  const paSoon = () => { clearTimeout(paTimer); paTimer = setTimeout(() => { if (state.screen === "agents") renderPA(true); }, 250); };
+  async function renderPA(listOnly) {
+    let d = { agents: [] };
+    try { d = await (await fetch("/api/agents/list")).json(); } catch (e) {}
+    state.pa.list = d.agents || []; state.pa.info = d;
+    const box = $("pa-list");
+    if (!box) return;
+    box.textContent = "";
+    const n = state.pa.list.length;
+    $("pa-sub").textContent = n ? n + " agent" + (n === 1 ? "" : "s") + " · each has a purpose, rules, a budget and a memory" : "each has a purpose, rules, a budget and a memory";
+    if (!n) {
+      const e = mk("div", "empty-state");
+      e.appendChild(mk("b", null, "No agents yet"));
+      e.appendChild(mk("span", null, "An agent keeps working between your visits: it remembers, wakes on a schedule or an ask, and answers where you asked. Start with one that watches something you check by hand today."));
+      box.appendChild(e);
+    }
+    for (const r of state.pa.list) box.appendChild(paRow(r));
+    if (n && d.goals && d.court_agent === false) {
+      // the worker runs their goals, but its harness is older than this: say what is missing and where to fix it
+      const old = mk("div", "hint"); old.id = "pa-old-worker";
+      old.textContent = "The worker's harness predates agents that persist. Their goals still run, with what they remember written into the instructions, but the court cannot remember or forget, ask another agent, keep a home or use a browser. Update it: Settings \u2192 Agent plane \u2192 Work here.";
+      box.appendChild(old);
+    }
+    $("pa-ask-any").hidden = !n;
+    if (!listOnly) { renderPAModels(); renderPAChannels(); }
+  }
+  // Where an agent can be reached from outside the app, and what it watches. Everything here pulls:
+  // nothing listens on a port.
+  const chPost = async (body) => {
+    const res = await fetch("/api/channels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.error) throw new Error(d.error || ("HTTP " + res.status));
+    return d;
+  };
+  async function renderPAChannels() {
+    const box = $("pa-channels");
+    if (!box || box.querySelector("input:focus, select:focus")) return;       // never under a form someone is typing in
+    let d = null;
+    try { d = await (await fetch("/api/channels")).json(); } catch (e) {}
+    box.textContent = "";
+    box.appendChild(mk("div", "glabel", "Channels"));
+    if (!d || !d.telegram) { box.appendChild(mk("div", "hint", "Could not read the channels.")); return; }
+    box.appendChild(mk("div", "hint", "Where your agents can be reached from outside this app, and what they watch. Every one of them asks out; nothing here listens for connections."));
+    const note = mk("span", "hint");
+    const fail = (e) => { note.textContent = e.message; note.style.color = "var(--err)"; };
+    // ---- Telegram
+    const tg = d.telegram;
+    const th = mk("div", "pa-line");
+    th.appendChild(mk("b", null, "Telegram")); th.querySelector("b").style.fontSize = "13px";
+    if (tg.connected) {
+      th.appendChild(mk("span", "pill " + (tg.error ? "bad" : "ok"), tg.error ? tg.error : (tg.bot && tg.bot.username ? "@" + tg.bot.username : "connecting…")));
+      th.appendChild(mkBtn("Disconnect", "linky", async () => { if (!confirm("Disconnect the bot? Its token is removed from this app.")) return; try { await chPost({ action: "telegram_disconnect" }); } catch (e) { fail(e); } renderPAChannels(); }));
+    }
+    box.appendChild(th);
+    if (!tg.connected) {
+      const tok = inputEl("the bot token BotFather gave you"); tok.type = "password"; tok.style.flex = "1"; tok.id = "tg-token"; tok.autocomplete = "off";
+      const line = mk("div", "pa-line"); line.appendChild(tok);
+      line.appendChild(mkBtn("Connect", "solid-btn", async () => { try { await chPost({ action: "telegram_connect", token: tok.value.trim() }); renderPAChannels(); } catch (e) { fail(e); } }));
+      box.appendChild(line);
+      box.appendChild(mk("div", "hint", "In Telegram, write to @BotFather, send /newbot, and paste the token it gives you. The token is kept in this app's vault, never in its config. Then send /start to your bot from the chat you want to use: it shows up here to bind to an agent."));
+    } else {
+      for (const c of tg.chats) {
+        const row = mk("div", "pa-line");
+        row.appendChild(mk("span", "mono", c.chat)); if (c.title) row.appendChild(mk("span", "hint", c.title));
+        row.appendChild(mk("span", "hint", "→ " + c.agent));
+        row.appendChild(mkBtn("unbind", "linky", async () => { try { await chPost({ action: "telegram_unbind", chat: c.chat }); } catch (e) { fail(e); } renderPAChannels(); renderPA(true); }));
+        box.appendChild(row);
+      }
+      for (const p of tg.pending) {
+        const row = mk("div", "pa-line"); row.dataset.pending = p.chat;
+        row.appendChild(mk("span", "mono", p.chat));
+        row.appendChild(mk("span", "hint", (p.title || p.from || "") + (p.text ? ": “" + p.text + "”" : "") + (p.count > 1 ? "  (" + p.count + " messages)" : "")));
+        const pick = mkSel(state.pa.list.filter((a) => a.id !== "concierge").map((a) => [a.id, a.name]).concat([["concierge", "the concierge (asks to no one in particular)"]]), (state.pa.list[0] || {}).id || "concierge");
+        pick.style.width = "170px";
+        row.appendChild(pick);
+        row.appendChild(mkBtn("Bind", "ghost-btn", async () => { try { await chPost({ action: "telegram_bind", chat: p.chat, agent: pick.value }); } catch (e) { fail(e); } renderPAChannels(); renderPA(true); }));
+        row.appendChild(mkBtn("forget", "linky", async () => { try { await chPost({ action: "telegram_forget", chat: p.chat }); } catch (e) {} renderPAChannels(); }));
+        box.appendChild(row);
+      }
+      if (!tg.chats.length && !tg.pending.length) box.appendChild(mk("div", "hint", "No chat yet. Send /start to your bot from the chat you want to use; it shows up here to bind to an agent. A chat that is not bound is ignored."));
+    }
+    // ---- Mail
+    const mh = mk("div", "pa-line"); mh.appendChild(mk("b", null, "Mail")); mh.querySelector("b").style.fontSize = "13px";
+    box.appendChild(mh);
+    for (const a of d.mail.accounts) {
+      const row = mk("div", "pa-line");
+      row.appendChild(mk("span", "mono", a.name)); row.appendChild(mk("span", "hint", a.user + " on " + a.host + ", " + (a.folder || "INBOX") + (a.smtp_host ? "  ·  replies through " + a.smtp_host : "")));
+      row.appendChild(mk("span", "pill " + (a.error ? "bad" : "ok"), a.error || "ok"));
+      row.appendChild(mkBtn("remove", "linky", async () => { if (!confirm("Remove this mailbox from the app?")) return; try { await chPost({ action: "mail_remove", name: a.name }); } catch (e) { fail(e); } renderPAChannels(); }));
+      box.appendChild(row);
+    }
+    const mform = mk("details"); const sum = mk("summary", "hint", d.mail.accounts.length ? "Add or change a mailbox" : "Add a mailbox"); sum.style.cursor = "pointer"; mform.appendChild(sum);
+    const host = inputEl("imap.example.com"), user = inputEl("you@example.com"), pass = inputEl("an app password"), folder = inputEl("INBOX"), smtp = inputEl("smtp.example.com (optional: to answer by mail)");
+    pass.type = "password"; pass.autocomplete = "new-password";
+    const g1 = mk("div", "pa-two"); g1.appendChild(formRow("IMAP host", host)); g1.appendChild(formRow("user", user));
+    const g2 = mk("div", "pa-two"); g2.appendChild(formRow("password (kept in the vault)", pass)); g2.appendChild(formRow("folder", folder));
+    const inner = mk("div"); inner.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:8px";
+    inner.appendChild(g1); inner.appendChild(g2); inner.appendChild(formRow("SMTP host", smtp));
+    inner.appendChild(mkBtn("Save mailbox", "ghost-btn", async () => {
+      try { const r = await chPost({ action: "mail_save", name: "default", password: pass.value, account: { host: host.value.trim(), user: user.value.trim(), folder: folder.value.trim() || "INBOX", smtp_host: smtp.value.trim() || undefined } }); note.style.color = ""; note.textContent = "saved: " + r.messages + " messages in the folder. Give an agent a mail wake in its Setup, with who may wake it."; renderPAChannels(); }
+      catch (e) { fail(e); }
+    }));
+    inner.appendChild(mk("div", "hint", "The mailbox is only read: nothing in it is marked or moved. A mail wakes an agent only when its sender is on that agent's list, and its text reaches the agent as data, never as an instruction."));
+    mform.appendChild(inner); box.appendChild(mform);
+    // ---- what is watched
+    if (d.watched.length) {
+      const wh = mk("div", "pa-line"); wh.appendChild(mk("b", null, "Watching")); wh.querySelector("b").style.fontSize = "13px"; box.appendChild(wh);
+      for (const w of d.watched) box.appendChild(mk("div", "hint", w.agent + "  ·  " + (w.what || w.kind) + "  ·  " + w.where));
+    }
+    const errs = Object.values(d.errors || {}).concat(d.rack && d.rack.error ? ["rack monitor: " + d.rack.error] : []);
+    for (const e of errs) { const x = mk("div", "hint", e); x.style.color = "var(--err)"; box.appendChild(x); }
+    box.appendChild(note);
+  }
+  async function renderPAModels() {
+    const box = $("pa-models");
+    if (!box) return;
+    let d = null;
+    try { d = await (await fetch("/api/agents/router")).json(); } catch (e) {}
+    box.textContent = "";
+    box.appendChild(mk("div", "glabel", "Models, picked by the router"));
+    if (!d || !d.cards) { box.appendChild(mk("div", "hint", "No model server answers yet. Add one on the Gateways screen.")); return; }
+    const say = mk("div", "hint");
+    say.textContent = "A role left on auto gets the live model that fits it best, each time a run starts. When a model is down, a chat ask settles for a smaller one and says so; a scheduled goal waits for it to come back.";
+    box.appendChild(say);
+    for (const shape of ["chat", "goal"]) {
+      const p = d.plans[shape];
+      const l = mk("div", "skill-tags mono"); l.style.whiteSpace = "pre-wrap"; l.style.lineHeight = "1.6";
+      l.textContent = (shape === "chat" ? "a chat ask now\n" : "a goal now\n") + (p.lines || []).map((x) => "  " + x).join("\n");
+      box.appendChild(l);
+    }
+    const grid = mk("div"); grid.style.cssText = "display:grid;grid-template-columns:1fr auto auto auto;gap:6px 12px;align-items:center;font-size:12.5px";
+    for (const c of d.cards) {
+      const live = d.live.includes(c.model);
+      const name = mk("span", "mono", c.model); name.style.cssText = "overflow-wrap:anywhere;" + (live ? "" : "color:var(--faint)");
+      grid.appendChild(name);
+      grid.appendChild(mk("span", "pill " + (live ? "ok" : ""), live ? "live" : "not served"));
+      grid.appendChild(mk("span", "hint", [c.speed + (c.tok_s ? " (" + c.tok_s + " tok/s)" : ""), c.tools ? "tools" : "no tools", c.thinking ? "thinking" : null, c.vision ? "vision" : null, c.ctx ? Math.round(c.ctx / 1000) + "k" : null].filter(Boolean).join(" · ")));
+      const tier = mkSel([["big", "big"], ["medium", "medium"], ["small", "small"]], c.tier);
+      tier.title = "How capable this model is. The router guessed it from its name and its recipe; change it if the guess is wrong.";
+      tier.style.width = "96px";
+      tier.onchange = async () => { try { await paPost({ action: "card", model: c.model, fields: { tier: tier.value } }); } catch (e) { alert(e.message); } renderPAModels(); if (state.pa.open) openPA(state.pa.open, state.pa.tab); };
+      grid.appendChild(tier);
+    }
+    box.appendChild(grid);
+  }
+
+  function paNewForm() {
+    const host = $("pa-form"); host.textContent = "";
+    const f = mk("div", "pa-form"); f.id = "pa-new-form";
+    const id = inputEl("ops"), name = inputEl("Ops"), purpose = textareaEl("What it is for, in a sentence or two. e.g. Keeps the rack serving. Reports what changed and what it did about it.", 3);
+    const cron = inputEl("0 7 * * 1-5  (optional: when it wakes by itself)"), prompt = inputEl("Morning report: what served overnight, what failed, disk on both nodes.");
+    const two = mk("div", "pa-two"); two.appendChild(formRow("id (lower-case, used in bb and @mentions)", id)); two.appendChild(formRow("name", name));
+    f.appendChild(two); f.appendChild(formRow("purpose", purpose));
+    const two2 = mk("div", "pa-two"); two2.appendChild(formRow("wakes on a schedule (cron, optional)", cron)); two2.appendChild(formRow("and does this each time", prompt));
+    f.appendChild(two2);
+    const note = mk("span", "hint", "It starts with the default rules: anything that reaches outward asks you first.");
+    const line = mk("div", "pa-line");
+    line.appendChild(mkBtn("Create", "solid-btn", async () => {
+      const agent = { id: id.value.trim().toLowerCase(), name: name.value.trim(), purpose: purpose.value.trim() };
+      if (cron.value.trim()) agent.wake = [{ kind: "cron", cron: cron.value.trim(), prompt: prompt.value.trim() }];
+      try { const r = await paPost({ action: "create", agent }); host.textContent = ""; await renderPA(); openPA(r.agent.id, "ask"); }
+      catch (e) { note.textContent = e.message; note.style.color = "var(--err)"; }
+    }));
+    line.appendChild(mkBtn("Cancel", "ghost-btn", () => { host.textContent = ""; }));
+    line.appendChild(note); f.appendChild(line);
+    host.appendChild(f); id.focus();
+  }
+  function paAskAnyForm() {
+    const host = $("pa-form"); host.textContent = "";
+    const f = mk("div", "pa-form");
+    const ta = textareaEl("Ask without naming an agent. The concierge answers a short question itself, or hands it to the agent whose purpose fits.", 2);
+    const note = mk("span", "hint");
+    const line = mk("div", "pa-line");
+    line.appendChild(mkBtn("Ask", "solid-btn", async () => {
+      if (!ta.value.trim()) return;
+      try { const r = await paPost({ action: "ask", text: ta.value.trim() }); host.textContent = ""; await renderPA(true); await openPA(r.agent, "ask"); paWatch(r); }
+      catch (e) { note.textContent = e.message; note.style.color = "var(--err)"; }
+    }));
+    line.appendChild(mkBtn("Cancel", "ghost-btn", () => { host.textContent = ""; }));
+    line.appendChild(note); f.appendChild(ta); f.appendChild(line); host.appendChild(f); ta.focus();
+  }
+  if ($("pa-new")) $("pa-new").onclick = paNewForm;
+  if ($("pa-ask-any")) $("pa-ask-any").onclick = paAskAnyForm;
+
+  // ---- one agent, in the pane on the right
+  const PA_TABS = [["ask", "Ask"], ["inbox", "Inbox"], ["memory", "Memory"], ["rules", "Rules"], ["setup", "Setup"]];
+  async function openPA(id, tab) {
+    state.pa.open = id; state.pa.tab = tab || state.pa.tab || "ask";
+    state.agentDetail = { kind: "agent", id };
+    for (const b of document.querySelectorAll("#pa-list .pa-row")) b.classList.toggle("on", b.dataset.agent === id);
+    let d = null;
+    try { const res = await fetch("/api/agents/agent?id=" + encodeURIComponent(id)); d = await res.json(); if (!res.ok) d = null; } catch (e) {}
+    if (state.pa.open !== id) return;
+    if (!d) { const box = detailPane(id, "gone"); box.appendChild(mk("div", "hint", "This agent is no longer here.")); state.pa.open = null; return; }
+    state.pa.detail = d;
+    const a = d.agent, s = d.summary;
+    const box = detailPane(a.name, a.id + "  ·  " + paStateOf(Object.assign({}, s, { run: (s.running || {}).run }))[0]);
+    box.querySelector(".skill-head button").addEventListener("click", () => { state.pa.open = null; renderPA(true); });
+    box.appendChild(mk("div", "skill-desc", a.purpose));
+    const tabs = mk("div", "pa-tabs");
+    for (const [key, label] of PA_TABS) {
+      const n = key === "memory" ? d.memory.length : key === "inbox" ? d.inbox.filter((w) => ["new", "deferred", "parked", "running"].includes(w.state)).length : 0;
+      const b = mkBtn(label + (n ? " " + n : ""), key === state.pa.tab ? "on" : "", () => openPA(id, key)); b.dataset.patab = key;
+      tabs.appendChild(b);
+    }
+    box.appendChild(tabs);
+    const body = mk("div"); body.style.cssText = "display:flex;flex-direction:column;gap:12px"; body.id = "pa-body";
+    box.appendChild(body);
+    ({ ask: paAskTab, inbox: paInboxTab, memory: paMemoryTab, rules: paRulesTab, setup: paSetupTab }[state.pa.tab] || paAskTab)(body, d);
+  }
+
+  function paShowAnswer(host, w, agent) {
+    host.textContent = "";
+    if (!w) return;
+    const open = ["new", "deferred", "parked"].includes(w.state);
+    const card = mk("div", "pa-answer" + (w.state === "error" ? " err" : ""));
+    const q = mk("div", "hint"); q.textContent = "“" + (w.text || "").slice(0, 300) + "”  ·  " + (w.source || "") + "  ·  " + paWhen(w.ts);
+    card.appendChild(q);
+    if (open) card.appendChild(mk("div", "hint", (w.state === "new" ? "next in line" : w.state) + (w.why ? ": " + w.why : "")));
+    else if (w.state === "running") card.appendChild(mk("div", "hint live-dot", "◆ working"));
+    else if (w.answer) {
+      const b = helpDom(w.answer); b.classList.add("answer-body"); card.appendChild(b);
+      card.appendChild(mkBtn("Copy", "ghost-btn", async (e) => { try { await navigator.clipboard.writeText(w.answer); } catch (x) {} }));
+    } else card.appendChild(mk("div", "hint", w.state + (w.why ? ": " + w.why : "")));
+    host.appendChild(card);
+  }
+  function paAskTab(body, d) {
+    const a = d.agent;
+    const ta = textareaEl("Ask " + a.name + "…", 3); ta.id = "pa-ask-text";
+    const opts = [["", "Auto"], ["chat", "Answer in one turn"]];
+    if (state.pa.info.goals) opts.push(["goal", "Hand to the court"]);
+    const shape = mkSel(opts, ""); shape.style.width = "170px"; shape.title = "Auto: it answers itself and hands big work to the court when the ask needs it";
+    const note = mk("span", "hint"); note.id = "pa-ask-note";
+    const pre = mk("pre", "skill-body"); pre.id = "pa-stream"; pre.hidden = true; pre.style.maxHeight = "320px";
+    const ans = mk("div"); ans.id = "pa-answer";
+    const go = mkBtn("Ask", "solid-btn", async () => {
+      const text = ta.value.trim();
+      if (!text) return;
+      go.disabled = true; note.style.color = ""; note.textContent = "asking…";
+      try { const r = await paPost({ action: "ask", id: a.id, text, shape: shape.value || undefined }); ta.value = ""; paWatch(r); }
+      catch (e) { note.textContent = e.message; note.style.color = "var(--err)"; }
+      go.disabled = false;
+    });
+    go.id = "pa-ask-go";
+    ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) go.click(); });
+    const line = mk("div", "pa-line"); line.appendChild(go); line.appendChild(shape);
+    line.appendChild(mkBtn("New thread", "linky", async () => { try { await paPost({ action: "new_thread", id: a.id }); note.textContent = "started over: its memory stays, this conversation does not"; } catch (e) { note.textContent = e.message; } }));
+    line.appendChild(note);
+    body.appendChild(ta); body.appendChild(line); body.appendChild(pre); body.appendChild(ans);
+    // what it is doing now, or its last answer
+    const live = d.inbox.find((w) => w.state === "running" && w.run);
+    const last = d.inbox.find((w) => ["done", "error"].includes(w.state) && w.run) || d.inbox[0];
+    if (live) paFollow(a.id, live.id, live.run);
+    else if (last) fetch("/api/agents/wake?id=" + a.id + "&wake=" + last.id).then((r) => r.json()).then((x) => { if (state.pa.open === a.id && $("pa-answer") === ans && !ans.childNodes.length) paShowAnswer(ans, x.wake, a); }).catch(() => {});
+  }
+  // an ask was accepted: follow its run when it has one, else say why it waits (and follow it when it starts)
+  function paWatch(r) {
+    const note = $("pa-ask-note");
+    if (r.run) { if (note) note.textContent = ""; paFollow(r.agent, r.wake, r.run); return; }
+    state.pa.waiting = { agent: r.agent, wake: r.wake };
+    if (note) note.textContent = r.state === "new" ? "next in line: it starts when its current run ends" : (r.state || "waiting") + (r.why ? ": " + r.why : "");
+  }
+  function paFollow(aid, wid, rid) {
+    const pre = $("pa-stream"), ans = $("pa-answer");
+    if (!pre || state.pa.open !== aid) return;
+    if (state.pa.es) { try { state.pa.es.close(); } catch (e) {} }
+    state.pa.waiting = null;
+    pre.hidden = false; pre.textContent = ""; ans.textContent = "";
+    const draw = runPane(pre);
+    state.pa.es = followRun(rid, (e) => {
+      if (!document.body.contains(pre)) return;
+      draw(e);
+      if (e.topic === "runs" && e.type === "finished") {
+        state.pa.es = null;
+        fetch("/api/agents/wake?id=" + aid + "&wake=" + wid).then((r) => r.json()).then((x) => {
+          if (state.pa.open !== aid || !document.body.contains(ans)) return;
+          if ((x.wake || {}).answer) pre.hidden = true;
+          paShowAnswer(ans, x.wake);
+          renderPA(true);
+        }).catch(() => {});
+      }
+    });
+  }
+
+  function paInboxTab(body, d) {
+    const a = d.agent;
+    if (!d.inbox.length) { body.appendChild(mk("div", "hint", "Nothing has woken it yet. Ask it something, or give it a schedule in Setup.")); return; }
+    const list = mk("div");
+    for (const w of d.inbox) {
+      const row = mk("div", "pa-wake");
+      row.appendChild(mk("div", "when", paWhen(w.ts) + "\n" + (w.source || "")));
+      const mid = mk("div");
+      const t = mk("div", "txt", (w.text || "").slice(0, 400)); mid.appendChild(t);
+      const why = mk("div", "why", w.state + (w.why ? ": " + w.why : "") + (w.not_before && ["deferred", "parked"].includes(w.state) ? "  ·  again " + paWhen(w.not_before).replace(" ago", "") : ""));
+      mid.appendChild(why);
+      const ansBox = mk("div"); mid.appendChild(ansBox);
+      t.onclick = async () => {
+        if (ansBox.childNodes.length) { ansBox.textContent = ""; return; }
+        try { const x = await (await fetch("/api/agents/wake?id=" + a.id + "&wake=" + w.id)).json(); paShowAnswer(ansBox, x.wake); } catch (e) {}
+      };
+      row.appendChild(mid);
+      if (["new", "deferred", "parked", "running"].includes(w.state)) {
+        row.appendChild(mkBtn(w.state === "running" ? "stop" : "drop", "rate-btn bad", async () => { try { await paPost({ action: "cancel_wake", id: a.id, wake: w.id }); } catch (e) { alert(e.message); } openPA(a.id, "inbox"); }));
+      } else row.appendChild(mk("span"));
+      list.appendChild(row);
+    }
+    body.appendChild(list);
+  }
+
+  function paMemoryTab(body, d) {
+    const a = d.agent;
+    const fact = textareaEl("One fact it should keep, e.g. Reports go out before 07:30, under ten lines.", 2);
+    const type = mkSel([["user", "about you"], ["feedback", "how to work"], ["project", "state of the work"], ["reference", "where things are"]], "feedback");
+    type.style.width = "170px";
+    const src = inputEl("the owner said"); src.style.flex = "1";
+    const note = mk("span", "hint");
+    const line = mk("div", "pa-line");
+    line.appendChild(type); line.appendChild(src);
+    line.appendChild(mkBtn("Remember", "solid-btn", async () => {
+      if (!fact.value.trim()) return;
+      try { await paPost({ action: "remember", id: a.id, fact: fact.value.trim(), type: type.value, source: src.value.trim() }); openPA(a.id, "memory"); }
+      catch (e) { note.textContent = e.message; note.style.color = "var(--err)"; }
+    }));
+    line.appendChild(mkBtn("Tidy", "ghost-btn", async () => {
+      try { const r = await paPost({ action: "tidy", id: a.id }); await openPA(a.id, "memory"); const n2 = $("pa-mem-note"); if (n2) n2.textContent = r.merged.length + " merged" + (r.review.length ? "  ·  read from untrusted content, for your review: " + r.review.join(", ") : ""); }
+      catch (e) { note.textContent = e.message; }
+    }));
+    body.appendChild(fact); body.appendChild(line); note.id = "pa-mem-note"; body.appendChild(note);
+    const hint = mk("div", "hint"); hint.textContent = "One file per fact, yours to edit: " + d.folder + "/memory"; hint.style.overflowWrap = "anywhere";
+    body.appendChild(hint);
+    if (!d.memory.length) body.appendChild(mk("div", "hint", "Nothing remembered yet. It writes facts itself as it works, each with its source."));
+    for (const f of d.memory) {
+      const c = mk("div", "pa-fact");
+      const hd = mk("div", "hd");
+      hd.appendChild(mk("b", null, f.name)); hd.appendChild(mk("span", "pill", f.type));
+      if (f.trust === "untrusted") hd.appendChild(mk("span", "pill bad", "from untrusted content"));
+      const grow = mk("span"); grow.style.flex = "1"; hd.appendChild(grow);
+      hd.appendChild(mkBtn("forget", "linky", async () => { try { await paPost({ action: "forget", id: a.id, name: f.name }); } catch (e) {} openPA(a.id, "memory"); }));
+      c.appendChild(hd); c.appendChild(mk("div", "txt", f.fact));
+      c.appendChild(mk("div", "srcl", "source: " + f.source + (f.created ? "  ·  " + f.created : "")));
+      body.appendChild(c);
+    }
+  }
+
+  function paRulesTab(body, d) {
+    const a = d.agent, info = state.pa.info, rules = a.rules || {}, bud = a.budget || {};
+    body.appendChild(mk("div", "hint", "What it may do alone, what asks you first, and what it may never do. These sit outside the model: it cannot talk itself out of them. An ask shows where the request came from, here and in bb; ten minutes of silence is a no."));
+    const grid = mk("div", "pa-grid");
+    const sels = {};
+    for (const cls of Object.keys(d.rules)) {
+      grid.appendChild(mk("b", null, cls));
+      sels[cls] = mkSel(["allow", "ask", "deny"], d.rules[cls]); sels[cls].dataset.cls = cls;
+      grid.appendChild(sels[cls]);
+      grid.appendChild(mk("span", "hint", (info.classes || {})[cls] || ""));
+    }
+    body.appendChild(grid);
+    const egress = inputEl("example.com, *.github.com   (empty: nothing outside; * alone: any public site)"); egress.value = (rules.egress || []).join(", "); egress.id = "pa-egress";
+    body.appendChild(formRow("egress: the only domains its court, its browser and its fetch tools may reach", egress));
+    body.appendChild(mk("div", "hint", "A role's network flag opens this list, never the whole network. With nothing listed, no role of this agent reaches the internet. Your own network is refused whatever is listed."));
+    const un = mk("label", "hint"); un.style.cssText = "display:flex;gap:8px;align-items:center";
+    const unBox = mk("input"); unBox.type = "checkbox"; unBox.checked = rules.untrusted_ask !== false;
+    un.appendChild(unBox); un.appendChild(document.createTextNode("A wake from mail, the web or a file always asks before anything outward, whatever is set above"));
+    body.appendChild(un);
+    body.appendChild(mk("div", "glabel", "Budget"));
+    const u = d.summary.usage || {};
+    const meter = (used, cap, label) => {
+      const w = mk("div"); w.style.cssText = "display:flex;flex-direction:column;gap:4px";
+      w.appendChild(mk("span", "hint", label + ": " + (used || 0).toLocaleString() + " of " + (cap || 0).toLocaleString() + " today"));
+      const m = mk("div", "pa-meter"); const bar = mk("b", cap && used / cap > 0.85 ? "hot" : ""); bar.style.width = Math.min(100, cap ? 100 * used / cap : 0) + "%"; m.appendChild(bar); w.appendChild(m);
+      return w;
+    };
+    const two = mk("div", "pa-two"); two.appendChild(meter(u.tokens, bud.tokens_day, "tokens")); two.appendChild(meter(u.runs, bud.runs_day, "runs"));
+    body.appendChild(two);
+    const num = (v) => { const i = inputEl(""); i.type = "number"; i.value = v; return i; };
+    const tok = num(bud.tokens_day), runs = num(bud.runs_day), mins = num(bud.minutes_run), quiet = inputEl("23:00-07:00  (empty: never)"); quiet.value = bud.quiet || "";
+    const b2 = mk("div", "pa-two"); b2.appendChild(formRow("tokens a day", tok)); b2.appendChild(formRow("runs a day (what it starts itself)", runs));
+    const b3 = mk("div", "pa-two"); b3.appendChild(formRow("minutes a run", mins)); b3.appendChild(formRow("quiet hours (held back: what it starts itself)", quiet));
+    body.appendChild(b2); body.appendChild(b3);
+    const note = mk("span", "hint");
+    const line = mk("div", "pa-line");
+    line.appendChild(mkBtn("Save", "solid-btn", async () => {
+      const r = { egress: egress.value.split(/[,\s]+/).filter(Boolean), tools: rules.tools || {}, on_missing: rules.on_missing };
+      for (const cls of Object.keys(sels)) r[cls] = sels[cls].value;
+      if (!unBox.checked) r.untrusted_ask = false;
+      try { await paPost({ action: "save", agent: { id: a.id, rules: r, budget: { tokens_day: tok.value, runs_day: runs.value, minutes_run: mins.value, quiet: quiet.value.trim() } } }); note.style.color = ""; note.textContent = "saved"; renderPA(true); }
+      catch (e) { note.textContent = e.message; note.style.color = "var(--err)"; }
+    }));
+    line.appendChild(note); body.appendChild(line);
+    // what "Always" on a request left behind, each with a way to take it back
+    const named = Object.keys(rules.tools || {});
+    if (named.length) {
+      const al = mk("div", "pa-line hint"); al.id = "pa-always";
+      al.appendChild(document.createTextNode("Always allowed for this agent (you answered “Always” on a request):"));
+      for (const n of named) {
+        const one = mk("span", "mono", n + " ");
+        one.appendChild(mkBtn("take back", "linky", async () => {
+          const tools = Object.assign({}, rules.tools); delete tools[n];
+          try { await paPost({ action: "save", agent: { id: a.id, rules: Object.assign({}, rules, { tools }) } }); await renderPA(true); openPA(a.id, "rules"); }
+          catch (e) { alert(e.message); }
+        }));
+        al.appendChild(one);
+      }
+      body.appendChild(al);
+    }
+  }
+
+  function paSetupTab(body, d) {
+    const a = d.agent;
+    const name = inputEl("name"); name.value = a.name;
+    const purpose = textareaEl("purpose", 3); purpose.value = a.purpose;
+    const instr = textareaEl("Standing instructions (optional): how it should work, what a report looks like.", 3); instr.value = a.instructions || "";
+    const shape = mkSel([["auto", "Auto: answers itself, hands big work to the court"], ["chat", "Always one turn"], ["goal", "Always the court"]], a.shape || "auto");
+    body.appendChild(formRow("name", name)); body.appendChild(formRow("purpose", purpose)); body.appendChild(formRow("standing instructions", instr));
+    body.appendChild(formRow("how it works on an ask", shape));
+    // models: auto, or one set by hand; the router says what auto picks now
+    body.appendChild(mk("div", "glabel", "Models"));
+    const models = [["auto", "auto"]].concat((state.models || []).map((id) => [id, id]));
+    const roleSel = {};
+    const rg = mk("div", "pa-grid");
+    for (const [role, label] of [["master", "master"], ["thinking", "thinking"], ["fast", "fast"]]) {
+      rg.appendChild(mk("b", null, label));
+      const cur = (a.roles || {})[role] || "auto";
+      roleSel[role] = mkSel(models.some((m) => m[0] === cur) ? models : models.concat([[cur, cur + " (not served)"]]), cur);
+      rg.appendChild(roleSel[role]);
+      const r = ((d.routing || {}).roles || {})[role];
+      rg.appendChild(mk("span", "hint", r ? (r.model ? "now: " + r.model + " — " + (r.why || "") : (r.why || "")) : (role === "master" ? ((d.routing || {}).why || (d.routing || {}).error || "") : "used when it hands work to the court")));
+    }
+    body.appendChild(rg);
+    const needs = inputEl('{"master": {"tools": true, "ctx_min": 32000, "tier": "big"}}'); needs.value = Object.keys(a.needs || {}).length ? JSON.stringify(a.needs) : "";
+    body.appendChild(formRow("needs (optional, JSON): what a role must have when it is on auto", needs));
+    const skills = inputEl("names from the Skills screen, comma-separated"); skills.value = (a.skills || []).join(", ");
+    const servers = inputEl("names from the MCP screen, comma-separated"); servers.value = ((a.access || {}).mcp_servers || []).join(", ");
+    const two = mk("div", "pa-two"); two.appendChild(formRow("skills", skills)); two.appendChild(formRow("tools: MCP servers it may use", servers));
+    body.appendChild(two);
+    // where it reports, and what wakes it
+    body.appendChild(mk("div", "glabel", "Channels and wakes"));
+    const chans = inputEl("telegram:123456789, mail:you@example.com   (empty: the app)"); chans.value = (a.channels || []).filter((c) => c.kind !== "app").map((c) => c.kind + ":" + (c.chat || c.to || "")).join(", ");
+    body.appendChild(formRow("channels: where it reports when nobody asked", chans));
+    const wakes = mk("div"); wakes.style.cssText = "display:flex;flex-direction:column;gap:8px";
+    const KINDS = [["cron", "cron"], ["interval", "every N minutes"], ["rack", "the rack"], ["mail", "mail"], ["poller", "a feed"], ["folder", "a folder"]];
+    const specOf = (w) => w.kind === "cron" ? w.cron : w.kind === "interval" ? String(w.every_min) : w.kind === "rack" ? (w.events || []).join(", ")
+      : w.kind === "mail" ? (w.from || []).join(", ") : w.kind === "poller" ? (w.what + " " + (w.url || w.repo || "")).trim() : w.kind === "folder" ? w.path : "";
+    const hintOf = { cron: "0 7 * * 1-5", interval: "240", rack: "engine_down, model_switched, disk_high", mail: "you@example.com (who may wake it)", poller: "rss https://example.com/feed.xml  |  github  |  ci owner/repo", folder: "~/Drop/ops" };
+    const addWake = (w) => {
+      const row = mk("div", "pa-line pa-wakerow");
+      const kind = mkSel(KINDS, w.kind || "cron"); kind.style.width = "150px"; kind.dataset.f = "kind";
+      const spec = inputEl(hintOf[w.kind || "cron"]); spec.value = specOf(w) || ""; spec.style.flex = "1"; spec.dataset.f = "spec";
+      const prompt = inputEl("what to do each time"); prompt.value = w.prompt || ""; prompt.style.flex = "1 1 100%"; prompt.dataset.f = "prompt";
+      kind.onchange = () => { spec.placeholder = hintOf[kind.value]; };
+      row.appendChild(kind); row.appendChild(spec);
+      row.appendChild(mkBtn("remove", "linky", () => row.remove()));
+      row.appendChild(prompt);        // a sentence: the whole second line
+      row.dataset.orig = JSON.stringify(w);
+      wakes.appendChild(row);
+    };
+    for (const w of a.wake || []) addWake(w);
+    body.appendChild(wakes);
+    body.appendChild(mkBtn("Add a wake", "ghost-btn", () => addWake({ kind: "cron" })));
+    const readWakes = () => [...wakes.children].map((row) => {
+      const kind = row.querySelector('[data-f="kind"]').value, spec = row.querySelector('[data-f="spec"]').value.trim(), prompt = row.querySelector('[data-f="prompt"]').value.trim();
+      // what this form does not show (a mail wake's folder, account and reply, a rack wake's recipe and
+      // threshold, a feed's interval) stays as it was; a wake changed to another kind starts clean
+      const orig = JSON.parse(row.dataset.orig || "{}");
+      const w = orig.kind === kind ? Object.assign({}, orig) : { kind };
+      if (kind === "cron") w.cron = spec;
+      else if (kind === "interval") w.every_min = parseInt(spec, 10) || 0;
+      else if (kind === "rack") w.events = spec.split(/[,\s]+/).filter(Boolean);
+      else if (kind === "mail") w.from = spec.split(/[,\s]+/).filter(Boolean);
+      else if (kind === "poller") { const [what, ...rest] = spec.split(/\s+/); const arg = rest.join(" "); w.what = what; delete w.url; delete w.repo; if (what === "ci") w.repo = arg; else if (arg) w.url = arg; }
+      else if (kind === "folder") w.path = spec;
+      if (prompt) w.prompt = prompt; else delete w.prompt;
+      return w;
+    });
+    const note = mk("span", "hint");
+    const line = mk("div", "pa-line");
+    line.appendChild(mkBtn("Save", "solid-btn", async () => {
+      let n = {};
+      try { n = needs.value.trim() ? JSON.parse(needs.value) : {}; } catch (e) { note.textContent = "needs is not valid JSON"; note.style.color = "var(--err)"; return; }
+      const split = (v) => v.split(/[,\s]+/).filter(Boolean);
+      const agent = {
+        id: a.id, name: name.value.trim(), purpose: purpose.value.trim(), instructions: instr.value.trim(), shape: shape.value,
+        roles: { master: roleSel.master.value, thinking: roleSel.thinking.value, fast: roleSel.fast.value }, needs: n,
+        skills: split(skills.value), access: Object.assign({}, a.access || {}, { mcp_servers: split(servers.value) }),
+        channels: split(chans.value).map((c) => { const i = c.indexOf(":"); const kind = i < 0 ? c : c.slice(0, i), where = i < 0 ? "" : c.slice(i + 1); return kind === "telegram" ? { kind, chat: where } : kind === "mail" ? { kind, to: where } : { kind }; }),
+        wake: readWakes(),
+      };
+      try { await paPost({ action: "save", agent }); note.style.color = ""; note.textContent = "saved"; await renderPA(true); openPA(a.id, "setup"); }
+      catch (e) { note.textContent = e.message; note.style.color = "var(--err)"; }
+    }));
+    line.appendChild(mkBtn(a.enabled === false ? "Switch on" : "Switch off", "ghost-btn", async () => { try { await paPost({ action: a.enabled === false ? "enable" : "disable", id: a.id }); } catch (e) { alert(e.message); } await renderPA(true); openPA(a.id, "setup"); }));
+    if (!a.builtin) line.appendChild(mkBtn("Delete", "ghost-btn danger", async () => {
+      if (!confirm("Remove " + a.name + "? Its folder, memory and all, moves to the agents folder's .trash.")) return;
+      try { await paPost({ action: "delete", id: a.id }); } catch (e) { alert(e.message); return; }
+      state.pa.open = null; $("agents-detail").innerHTML = "<div class='empty-state'><b>Nothing open</b><span>Click an agent on the left to open it here.</span></div>"; renderPA();
+    }));
+    line.appendChild(note); body.appendChild(line);
+    const where = mk("div", "hint"); where.style.overflowWrap = "anywhere";
+    where.textContent = "Its folder: " + d.folder + (d.jobs.length ? "  \u00b7  " + d.jobs.length + " job" + (d.jobs.length === 1 ? "" : "s") + " on the Jobs screen" : "");
+    body.appendChild(where);
+    // its own computer: a folder on the worker that outlives a run (notes, downloads, its browser's profile)
+    if (state.pa.info.goals) {
+      const home = mk("div", "pa-line"); home.id = "pa-home";
+      const txt = mk("span", "hint", "Its home on the worker: " + d.home + "  \u00b7  \u2026");
+      home.appendChild(txt); body.appendChild(home);
+      fetch("/api/agents/home?id=" + a.id).then((r) => r.json()).then((h) => {
+        if (!document.body.contains(home)) return;
+        txt.textContent = "Its home on the worker: " + d.home + "  \u00b7  " + (!h.ok ? (h.error || "could not ask the worker") : !h.exists ? "empty: nothing kept yet" : h.files + " file" + (h.files === 1 ? "" : "s") + ", " + fmtBytes(h.bytes));
+        if (h.ok && h.exists) home.appendChild(mkBtn("Reset home", "linky", async () => {
+          if (!confirm("Empty " + a.name + "'s home on the worker? Its files and its browser's logins go. Its memory stays.")) return;
+          try { await paPost({ action: "reset_home", id: a.id }); } catch (e) { alert(e.message); }
+          openPA(a.id, "setup");
+        }));
+      }).catch(() => {});
+    }
+  }
+
+  // live: the list follows every change; the open agent follows what happens to it
+  onLive("agents", () => paSoon());
+  onLive("channels", () => { if (state.screen === "agents") renderPAChannels(); });
+  onLive("inbox", (e) => {
+    const d = e.data || {};
+    paSoon();
+    const w = state.pa.waiting;
+    if (w && d.agent === w.agent && d.id === w.wake && e.type === "state") {
+      if (d.run && d.state === "running") paFollow(w.agent, w.wake, d.run);
+      else { const note = $("pa-ask-note"); if (note && d.state !== "new") note.textContent = d.state + (d.why ? ": " + d.why : ""); }
+    }
+    if (state.screen === "agents" && state.pa.open === d.agent && state.pa.tab === "inbox" && e.type === "state") openPA(d.agent, "inbox");
+  });
+
+  // "@ops what served overnight?" in the Playground: the agent answers in this chat
+  async function askAgentInChat(aid, ask, raw) {
+    const agent = state.pa.list.find((x) => x.id === aid);
+    state.messages.push({ role: "user", content: raw }, { role: "bot", content: "", reasoning: "", meta: "", model: "@" + aid, thinkOpen: true });
+    const bot = state.messages[state.messages.length - 1];
+    state.streaming = true; $("send-btn").classList.add("stop"); renderMessages();
+    const finish = (err) => {
+      if (err) bot.error = err;
+      bot.status = null; state.streaming = false; state.turnRun = null; $("send-btn").classList.remove("stop");
+      bot.meta = (agent ? agent.name : aid) + " · agent"; renderMessages(); saveSession();
+    };
+    let r;
+    try { r = await paPost({ action: "ask", id: aid, text: ask, thread: "pg" }); } catch (e) { finish("could not ask " + aid + ": " + e.message); return; }
+    const follow = (rid) => {
+      state.turnRun = rid;
+      followRun(rid, (e) => {
+        const d = e.data || {};
+        if (e.type === "delta" && d.content) bot.content = (bot.content || "") + d.content;
+        else if (e.type === "hop") bot.content = "";
+        else if (e.type === "tool_call") bot.toolUse = (bot.toolUse || []).concat([{ name: d.name, args: d.args || "{}", result: "", error: false }]);
+        else if (e.type === "out" && d.line != null) bot.status = { text: String(d.line).slice(0, 160), slow: false };
+        else if (e.type === "approval") bot.status = { text: "waiting: " + d.tool + " asks before it runs", slow: false };
+        else if (e.topic === "runs" && e.type === "finished") {
+          fetch("/api/agents/wake?id=" + aid + "&wake=" + r.wake).then((x) => x.json()).then((x) => {
+            const w = x.wake || {};
+            if (w.answer) bot.content = w.answer;
+            finish(w.state === "error" && !w.answer ? (w.why || "it did not finish") : null);
+          }).catch(() => finish(null));
+          return;
+        } else return;
+        renderMessages(true);
+      });
+    };
+    if (r.run) { follow(r.run); return; }
+    bot.status = { text: r.state === "new" ? (agent ? agent.name : aid) + " is busy; your ask is next in line" : (r.state || "waiting") + (r.why ? ": " + r.why : ""), slow: false };
+    renderMessages(true);
+    const t0 = Date.now();
+    const poll = setInterval(async () => {
+      try {
+        const w = (await (await fetch("/api/agents/wake?id=" + aid + "&wake=" + r.wake)).json()).wake || {};
+        if (w.run) { clearInterval(poll); follow(w.run); }
+        else if (["deferred", "parked", "dropped"].includes(w.state) || Date.now() - t0 > 900000) { clearInterval(poll); bot.content = (agent ? agent.name : aid) + " will answer later: " + (w.why || w.state) + ". The answer will be in its inbox, on the Agents screen."; finish(null); }
+      } catch (e) {}
+    }, 1500);
+  }
+
+  // Agents has three tabs: Agents (the ones that persist), Master (run a goal through the court, watch it)
+  // and Settings (where agents work, the master's setup)
+  try { state.agentsTab = localStorage.getItem("bb.agentsTab") || "agents"; } catch (e) { state.agentsTab = "agents"; }
   function agentsTab(tab) {
     state.agentsTab = tab;
     try { localStorage.setItem("bb.agentsTab", tab); } catch (e) {}
@@ -4733,6 +5385,8 @@
     el.appendChild(line);
   }
   async function renderAgents() {
+    renderPA();
+    if (state.pa.open && state.pa.tab !== "rules" && state.pa.tab !== "setup") openPA(state.pa.open, state.pa.tab);
     let d = {};
     try { d = await (await fetch("/api/agents")).json(); } catch (e) {}
     agentsSummary(d);
@@ -5926,11 +6580,32 @@
     "skills.create": "Created a skill", "skills.delete": "Deleted a skill", "plugins.add": "Added a plugin", "plugins.remove": "Removed a plugin",
     "jobs.save": "Saved a job", "jobs.delete": "Deleted a job", "jobs.run_now": "Ran a job", "jobs.toggle": "Paused or resumed a job",
     "projects.save": "Saved a project", "projects.delete": "Deleted a project",
+    "agents.agent.create": "Made an agent", "agents.agent.save": "Changed an agent", "agents.agent.delete": "Deleted an agent",
+    "agents.agent.enable": "Switched an agent on", "agents.agent.disable": "Switched an agent off",
+    "agents.agent.remember": "Told an agent a fact", "agents.agent.forget": "Removed a fact from an agent",
+    "agents.agent.tidy": "Tidied an agent's memory", "agents.agent.cancel_wake": "Dropped an ask",
+    "agents.agent.new_thread": "Started an agent's thread over", "agents.agent.reset_home": "Emptied an agent's home",
+    "agents.agent.card": "Corrected a model's card",
+    "agent.run": "Agent run", "agent.action": "Agent action", "agent.ask": "Asked another agent", "agent.handoff": "Handed an ask to another agent",
+    "agent.budget": "Held back by its budget", "agent.wake.dropped": "Dropped a wake", "agent.reply.blocked": "Held back an agent's reply",
+    "agent.tool.blocked": "Blocked an agent's tool call", "agent.rack.switch.asked": "Agent asked to switch the rack",
+    "agent.rack.switch": "Agent switched the rack", "agent.rules.always_allow": "Always allowed a tool for an agent",
+    "agent.job.held": "Agent filed a job, switched off",
+    "agent.memory.tidy": "Tidied an agent's memory", "agent.delete": "Deleted an agent", "agent.reset_home": "Emptied an agent's home",
+    "channels.telegram_connect": "Connected a Telegram bot", "channels.telegram_disconnect": "Disconnected the Telegram bot",
+    "channels.telegram_bind": "Bound a Telegram chat to an agent", "channels.telegram_unbind": "Unbound a Telegram chat",
+    "channels.telegram_forget": "Forgot a waiting Telegram chat", "channels.mail_save": "Saved a mailbox",
+    "channels.mail_remove": "Removed a mailbox", "channels.telegram.ignored": "Ignored a Telegram chat that is not bound",
+    "channels.mail.ignored": "Ignored mail from a sender not on a list",
   };
+  const AUDIT_DECISIONS = { allow: "allowed once", always: "always allowed", deny: "refused" };
   function auditWhat(e) {
     const d = e.detail || {};
     let label = AUDIT_LABELS[e.action] || e.action;
     if (e.action === "sessions.access" && d.access) label += " to " + d.access;
+    if (e.action === "agent.run" && d.source) label += ", from " + d.source;
+    if (e.action === "agent.action" && d.tool) label = "Agent action: " + d.tool + (d.decision ? ", " + (AUDIT_DECISIONS[d.decision] || d.decision) : "");
+    if (e.action === "channels.telegram_bind" && d.agent) label = "Bound a Telegram chat to " + d.agent;
     return { label, cmd: e.action === "command.outside_sandbox" ? (d.command || "") + " · " + (d.how || "") : "" };
   }
   function auditRow(e) {
@@ -6568,6 +7243,7 @@
     pollCluster();
     setInterval(pollCluster, 5000);
     startLive();
+    renderPA(true);            // the agents by name, so "@ops ..." works in the Playground from the start
     renderApprovals();
     addHelpButtons();
     updateNotices();

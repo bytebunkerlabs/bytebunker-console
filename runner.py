@@ -33,6 +33,7 @@ import time
 import uuid
 
 import approvals
+import rules as rulesmod
 import upstream
 from traces import StreamCapture
 
@@ -45,6 +46,10 @@ KEEP_RECENT = 2              # user turns compression keeps verbatim
 SUMMARY_TOKENS = 8192        # output budget for a summary
 TOOL_TEXT_TO_MODEL = 20000   # characters of a tool result the model sees
 TOOL_TEXT_STORED = 65536     # characters of it the session keeps
+CALIB_KEEP = 256             # sessions whose last prompt count is remembered: an agent's wake has a session of its own
+LOOP_LOOK = 1500             # characters of new reply between two looks for a reply going round in circles
+LOOP_KEEP = 60000            # characters of a reply's end that are looked at: a round of up to 20,000 can be seen
+LOOP_SPAN = 1500             # the least stretch of exact repeats that counts, past the block's first writing
 CAPS_FALLBACK = {"tools": True, "effort": [], "ctk": {}, "strip_reasoning": True, "ctx": 131072}
 
 COMPRESS_SYS = (
@@ -132,8 +137,12 @@ def strip_think(s):
 
 
 def parse_ctx_error(text):
-    """vLLM's refusal of prompt + max_tokens > window: {win, prompt, bound}.
-    bound: the newer phrasing's "at least N" is a floor, not the prompt."""
+    """An engine's refusal of a prompt that does not fit its window: {win, prompt, bound}.
+    vLLM refuses prompt + max_tokens > window; bound: its newer phrasing's "at least N" is a
+    floor, not the prompt. llama.cpp refuses the prompt alone and names both numbers."""
+    m = re.match(r"\s*request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)", text or "")
+    if m and int(m.group(1)) > int(m.group(2)) >= 1024:      # (not a line some text quoted, and not a window of nine)
+        return {"win": int(m.group(2)), "prompt": int(m.group(1)), "bound": False}
     win = re.search(r"maximum context length is (\d+)", text or "")
     if not win:
         return None
@@ -197,6 +206,74 @@ def effort_for(effort, caps):
     nearest = {"off": ("none", "minimal"), "low": ("minimal",), "medium": ("low", "high"),
                "high": ("xhigh", "medium"), "max": ("xhigh", "max", "high")}.get(effort, ())
     return next((lv for lv in nearest if lv in levels), None)
+
+
+def circling(text):
+    """How many characters at the end of some thinking are one block said again and again; 0
+    when it is not going round in circles. It is when some stretch at its END is the same block
+    three times or more in a row, to the letter, and LOOP_SPAN characters or more of it are
+    repeats: a small model can think like this for an hour and never answer. A line that comes
+    back among other text (a verdict per ticket, a function drafted five times) is not that.
+    Every block length is seen, a short one inside a long one too: the prefix function of the
+    reversed end names, for each stretch that ends the text, the shortest block it is made of.
+    The count leaves the block's first writing out."""
+    r = text[-LOOP_KEEP:][::-1]
+    n = len(r)
+    if n < LOOP_SPAN:
+        return 0
+    fail = [0] * n                    # fail[i]: how much of the start of r[:i + 1] is also its end
+    k = best = 0
+    for i in range(1, n):
+        c = r[i]
+        while k and c != r[k]:
+            k = fail[k - 1]
+        if c == r[k]:
+            k += 1
+        fail[i] = k
+        p = i + 1 - k                 # the shortest block the last i + 1 characters are made of
+        if 3 * p <= i + 1 and i + 1 - p >= LOOP_SPAN:
+            best = i + 1 - p
+    return best
+
+
+EFFORT_RANK = {"off": 0, "none": 0, "minimal": 1, "low": 2, "medium": 3, "on": 4, "high": 4, "xhigh": 5, "max": 6}
+
+
+def think_less(body, caps):
+    """Change a request so the model thinks less than it was asked to: to its "low" when it has
+    one below what was asked, else to the least it has below that; or its thinking switch off.
+    False when there is nothing to turn down. A request that names no level leaves it to the
+    model: then only a level up to medium is taken, since the model's own may be no higher."""
+    now = body.get("reasoning_effort")
+    under = EFFORT_RANK[now] if now in EFFORT_RANK else EFFORT_RANK["medium"] + 1
+    lower = [lv for lv in (caps.get("effort") or []) if lv in EFFORT_RANK and EFFORT_RANK[lv] < under]
+    if lower:
+        body["reasoning_effort"] = "low" if "low" in lower else min(lower, key=EFFORT_RANK.get)
+        return True
+    if caps.get("thinking_switch"):
+        before = json.dumps(body, sort_keys=True)
+        apply_thinking_switch(body, caps, "off")
+        return json.dumps(body, sort_keys=True) != before
+    return False
+
+
+def said(text):
+    """What a reply says beyond its thinking: whole <think> blocks go, one that never closes,
+    and (when the chat template opened the block itself) what comes before a bare closing tag.
+    The tags in any case. A reply that has words in it and says nothing was all thinking."""
+    t = re.sub(r"(?i)<think>[\s\S]*?</think>", "", text or "")
+    closes = list(re.finditer(r"(?i)</think>", t))
+    if closes:
+        t = t[closes[-1].end():]
+    return re.sub(r"(?i)<think>[\s\S]*\Z", "", t).strip()
+
+
+def in_think(text):
+    """Is this reply still inside the thinking it began with? An engine with no reasoning
+    parser sends the model's thinking in the answer: the reply begins with <think>. A reply
+    that mentions the tag further on is an answer about it."""
+    t = text.lstrip()
+    return t[:7].lower() == "<think>" and "</think>" not in t.lower()
 
 
 def apply_thinking_switch(body, caps, effort):
@@ -288,7 +365,17 @@ def build_msgs(messages, caps, system):
             if answer:
                 msgs.append({"role": "assistant", "content": answer})
         else:
-            msgs.append({"role": "user", "content": user_content(m)})
+            content = user_content(m)
+            if m.get("stamp"):
+                # when it was said rides on the message itself, never in the system prompt: what the
+                # engine has read of a conversation stays the same text, so it is not read again
+                head = "[%s]\n" % m["stamp"]
+                if isinstance(content, list):
+                    content = [dict(p, text=head + p["text"]) if i == 0 and p.get("type") == "text" else p
+                               for i, p in enumerate(content)]
+                else:
+                    content = head + (content or "")
+            msgs.append({"role": "user", "content": content})
     return msgs
 
 
@@ -301,7 +388,7 @@ def serialize_msg(m):
          "hops": m.get("hops") or None}
     if m.get("kind"):
         o.update(kind=m["kind"], archive=m.get("archive") or "", count=m.get("count") or 0)
-    for k in ("turn", "traces", "rating", "notice"):
+    for k in ("turn", "traces", "rating", "notice", "stamp"):
         if m.get(k):
             o[k] = m[k]
     if m.get("skills"):
@@ -328,11 +415,22 @@ class Runner:
     sessions, on_session(summary), skill_bodies(names) -> {name: body},
     write_archive, uploads_root(), engine_stats(), default_model(),
     approvals (approvals.Approvals), client_results (ClientResults),
-    tool_policy() -> {pattern: policy}, always_allow(name)."""
+    tool_policy() -> {pattern: policy}, always_allow(name, agent=None);
+    optional: guard(action) -> (allow | block | flag, why), asked for an
+    agent's tool calls (req["agent"])."""
 
     def __init__(self, deps):
         self.d = deps
         self.calib = {}              # session id -> {model, tokens, chars}: the engine's count of its last prompt
+        self._calib_lock = threading.Lock()
+
+    def _calibrate(self, sid, rec):
+        """The newest counts stay; the oldest go, so a session that is never seen again is not kept for ever."""
+        with self._calib_lock:
+            self.calib.pop(sid, None)
+            self.calib[sid] = rec
+            while len(self.calib) > CALIB_KEEP:
+                self.calib.pop(next(iter(self.calib)))
 
     # ------------------------------------------------------------ pieces
     def caps(self, model):
@@ -378,9 +476,19 @@ class Runner:
                     a["dataURL"] = "data:%s;base64,%s" % (mime, base64.b64encode(f.read()).decode("ascii"))
 
     # ------------------------------------------------------------ one request
-    def stream_turn(self, run, emit, sid, msgs, bot, body0, purpose="chat"):
+    def stream_turn(self, run, emit, sid, msgs, bot, body0, purpose="chat", reply_cap=None, watch=False):
         """One model request, streamed into bot. Returns what the hop needs:
-        calls, broken_calls, usage, finish_reason, chunks, ttft, span."""
+        calls, broken_calls, usage, finish_reason, chunks, ttft, span; and
+        circled when the reply was stopped here because its thinking was
+        going round in circles, with cut_chars (what it had written) and
+        est_prompt (the prompt's tokens as the app counts them: the engine
+        gives no count for a reply that was cut). watch: look at the reply's
+        thinking for circles as it comes (its reasoning, or a reply that
+        began with <think> and is still in it). An answer is never looked
+        at: it may be a thousand equal lines that were asked for.
+        reply_cap is the caller's own bound on the reply's tokens, not the
+        person's Max tokens: it is fitted to the room without a word, and
+        left out for an engine that refuses the request."""
         t0 = time.time()
         st = {"phase": "connect", "first": None, "last": None, "kind": "text", "tool_chars": 0,
               "tool_name": "", "shown": ""}
@@ -451,6 +559,11 @@ class Runner:
                 self._notice(emit, bot, "Max tokens clamped to %s for this hop — the prompt already uses ~%s "
                              "of %s context tokens." % (format(room, ","), format(est["tokens"], ","),
                                                         format(ctx_win, ",")))
+            capped = False
+            if reply_cap:
+                bound = max(int(reply_cap), int(caps.get("min_max_tokens") or 0))    # a model that thinks first keeps its room
+                if not body1.get("max_tokens") or body1["max_tokens"] > bound:
+                    body1["max_tokens"], capped = min(bound, room), True
             trace_id = self.d.trace.new_id()
             who = {"id": trace_id, "session": sid, "turn": bot.get("turn"), "purpose": purpose}
             started = time.time()
@@ -460,14 +573,14 @@ class Runner:
                     raise Cancelled()
                 try:
                     payload = json.loads(json.dumps(body1))      # the proxy's view: its own copy, changed in place
-                    resp, gw = upstream.open_chat(self.d.registry, payload)
+                    resp, gw = self._open(run, payload)
                     who["gateway"] = gw["name"] if gw else None
                     break
                 except upstream.UpstreamError as e:
                     who["gateway"] = e.gateway["name"] if e.gateway else None
                     self.d.trace.log("chat", status=e.status, request=upstream.trace_safe(payload), response=None,
                                      error=e.message[:1000], ms=int((time.time() - started) * 1000), **who)
-                    err = e.message[:800]
+                    err, refused = e.message[:800], e.status in (400, 422)
                 over = parse_ctx_error(err)
                 if over:
                     # the engine names the window it really serves: believe it
@@ -488,9 +601,10 @@ class Runner:
                                             "over " if over["bound"] else "", format(over["prompt"], ","),
                                             format(over["win"], ",")))
                     body1["max_tokens"] = min(body1.get("max_tokens") or fit, fit)
-                    self._notice(emit, bot, "Max tokens clamped to %s — the prompt is %s%s of %s context "
-                                 "tokens." % (format(fit, ","), "over " if over["bound"] else "",
-                                              format(over["prompt"], ","), format(over["win"], ",")))
+                    if not capped:
+                        self._notice(emit, bot, "Max tokens clamped to %s — the prompt is %s%s of %s context "
+                                     "tokens." % (format(fit, ","), "over " if over["bound"] else "",
+                                                  format(over["prompt"], ","), format(over["win"], ",")))
                     attempt += 1
                     who["id"] = trace_id = self.d.trace.new_id()
                     continue
@@ -503,15 +617,27 @@ class Runner:
                     attempt += 1               # every retry counts, as the Playground's loop counts them
                     who["id"] = trace_id = self.d.trace.new_id()
                     continue
+                # an engine that refuses a request carrying the caller's bound (its models write less, it calls
+                # the field something else, it adds it to the prompt and finds the sum too large) is asked once
+                # more without it: the bound is the app's own caution, and an answer matters more
+                if capped and refused and "max_tokens" in body1:
+                    body1.pop("max_tokens", None)
+                    capped = False
+                    attempt += 1
+                    who["id"] = trace_id = self.d.trace.new_id()
+                    continue
                 raise TurnError(err[:400])
             st["phase"] = "stream"
             bot["traces"] = (bot.get("traces") or []) + [trace_id]
             cap = StreamCapture()
             buf = b""
+            # the end of this reply's own words, looked at as they come: a reply that goes round in circles is
+            # stopped here instead of running to the end of the window (an hour of the engine, and no answer)
+            tail, wrote, looked, circled = {"thinking": "", "answer": ""}, {"thinking": 0, "answer": 0}, {}, False
             cancel_watch = threading.Thread(target=self._close_on_cancel, args=(run, resp, done), daemon=True)
             cancel_watch.start()
             try:
-                while True:
+                while not circled:
                     chunk = resp.read1(65536)
                     if not chunk:
                         break
@@ -579,9 +705,25 @@ class Runner:
                                 bot["content"] = (bot.get("content") or "") + delta["content"]
                                 out["content"] = delta["content"]
                             emit("delta", out)
+                            for part, new, key in (("thinking", r, "reasoning"), ("answer", delta.get("content") or "", "content")):
+                                if not new:
+                                    continue
+                                wrote[part] += len(new)
+                                if not watch:
+                                    continue
+                                tail[part] = (tail[part] + new)[-LOOP_KEEP:]
+                                if wrote[part] - looked.get(part, 0) >= LOOP_LOOK:
+                                    looked[part] = wrote[part]
+                                    if (part == "thinking" or in_think(bot[key])) and circling(tail[part]):
+                                        circled = True
+                                        break
+                        if circled:
+                            break
                 if run.cancelled:
                     raise Cancelled()
-                if not cap.error and cap.finish is None and not cap.done:
+                if circled:                     # (the turn puts this reply aside whole and asks again: nothing of it is used)
+                    cap.error = "stopped by the app: the reply's thinking was going round in circles"
+                elif not cap.error and cap.finish is None and not cap.done:
                     cap.error = ("the model server closed the stream before the reply finished (%d chunks "
                                  "received)" % cap.chunks)
                     raise TurnError(cap.error)
@@ -603,9 +745,10 @@ class Runner:
                 (ok_calls if _parses(c["args"] or "{}") else broken).append(c)
             # the engine counted this prompt: that count calibrates the next estimate
             if usage and (usage.get("prompt_tokens") or 0) > 0:
-                self.calib[sid] = {"model": mid, "tokens": usage["prompt_tokens"],
-                                   "chars": _js_len(_js_json({"m": msgs, "t": body0.get("tools") or None}))}
+                self._calibrate(sid, {"model": mid, "tokens": usage["prompt_tokens"],
+                                      "chars": _js_len(_js_json({"m": msgs, "t": body0.get("tools") or None}))})
             return {"calls": ok_calls, "broken_calls": broken, "usage": usage, "finish_reason": finish,
+                    "circled": circled, "cut_chars": wrote["thinking"] + wrote["answer"], "est_prompt": est["tokens"],
                     "chunks": chunks, "ttft": (st["first"] - t0) if st["first"] else None,
                     "span": (st["last"] - st["first"]) if st["first"] and st["last"] and st["last"] > st["first"] else None}
         finally:
@@ -616,6 +759,33 @@ class Runner:
                     resp.close()
                 except Exception:   # noqa: BLE001
                     pass
+
+    def _open(self, run, payload):
+        """upstream.open_chat, but Stop does not wait for the engine's first
+        byte: a model reading a long prompt can sit on the request for a
+        minute before it answers at all. The request is made on a helper
+        thread; a cancelled turn leaves it there (it closes what comes back)."""
+        box, done, left = {}, threading.Event(), threading.Event()
+
+        def work():
+            try:
+                box["ok"] = upstream.open_chat(self.d.registry, payload)
+            except BaseException as e:   # noqa: BLE001 - handed to the turn's own thread
+                box["err"] = e
+            done.set()
+            if left.is_set() and box.get("ok"):
+                try:
+                    box["ok"][0].close()
+                except Exception:   # noqa: BLE001
+                    pass
+        threading.Thread(target=work, name="open-" + run.id, daemon=True).start()
+        while not done.wait(0.2):
+            if run.cancelled:
+                left.set()
+                raise Cancelled()
+        if "err" in box:
+            raise box["err"]
+        return box["ok"]
 
     @staticmethod
     def _close_on_cancel(run, resp, done):
@@ -686,6 +856,8 @@ class Runner:
                     break
                 messages = sess["messages"]
         user = {"role": "user", "content": text, "attachments": atts}
+        if req.get("stamp"):
+            user["stamp"] = str(req["stamp"])[:120]
         bot = {"role": "bot", "content": "", "reasoning": "", "meta": "", "model": model,
                "effort": req.get("effort"), "turn": new_turn_id(), "skills": list(req.get("skills") or [])}
         messages.extend([user, bot])
@@ -717,30 +889,69 @@ class Runner:
             body["tool_choice"] = "auto"
 
         usage, finish, ttft, span, chunks = None, None, None, None, 0
-        tot_toks = tot_rtoks = 0
+        tot_toks = tot_rtoks = tot_prompt = 0
+        cut_toks = 0                     # what replies stopped here had written: the engine gives no count for those
         approval_needed = False
         max_hops = max(1, int(req.get("max_hops") or 40))
+        reply_cap = max_tokens_of(req.get("reply_cap"))     # the caller's bound on one reply, for a turn nobody watches
         last_sig, repeats = "", 0
+        rethought = False                # a second ask was made in this turn (one a turn)
+        asked_twice = False              # and the turn ended in that reply: nothing came after it
+
+        alone = bool(req.get("agent") or req.get("unattended"))      # nobody is watching this turn
+        bound = bool(reply_cap) and max_tok is None                  # the limit on a reply is the caller's, not a person's
+
+        def count(r):
+            nonlocal usage, finish, ttft, span, chunks, tot_toks, tot_rtoks, tot_prompt, cut_toks
+            if r["circled"]:                                     # stopped here: the engine gives no count for it
+                cut_toks += r["cut_chars"] // 4 + 1              # about four characters a token
+                tot_prompt += r["est_prompt"]
+            else:
+                usage = r["usage"] or usage
+                if r["usage"]:
+                    tot_prompt += r["usage"].get("prompt_tokens") or 0     # every hop reads the prompt again
+                    tot_toks += r["usage"].get("completion_tokens") or 0
+                    tot_rtoks += (r["usage"].get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+                chunks += r["chunks"]
+                finish = r["finish_reason"]
+            ttft = r["ttft"] if ttft is None else ttft
+            if r["span"]:
+                span = (span or 0) + r["span"]
+
         try:
             for hop in range(max_hops):
                 r_len = len(bot["reasoning"])
-                r = self.stream_turn(run, emit, sid, msgs, bot, body)
-                usage = r["usage"] or usage
-                if r["usage"]:
-                    tot_toks += r["usage"].get("completion_tokens") or 0
-                    tot_rtoks += (r["usage"].get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
-                finish = r["finish_reason"]
-                chunks += r["chunks"]
-                if ttft is None:
-                    ttft = r["ttft"]
-                if r["span"]:
-                    span = (span or 0) + r["span"]
+                # Nobody is watching: a reply that is all thinking can be asked for once more with less of it,
+                # the one thing that can be changed, here and now (it is no tool hop). Its thinking is watched
+                # for circles only then: a stop always leads to that second ask, never to a failure of its own.
+                # (A person in the Playground sees what happens and decides.)
+                less = dict(body)                # the same request, thinking turned down, if that can be done
+                again = alone and not rethought and think_less(less, self.caps(model))
+                twice = False
+                r = self.stream_turn(run, emit, sid, msgs, bot, body, reply_cap=reply_cap, watch=again)
+                count(r)
+                # All thinking: it was stopped for going round in circles (such a reply is put aside whole), or
+                # it ran to its limit and left no answer and no whole tool call.
+                thought = len(bot["reasoning"]) > r_len or bool(bot["content"].strip())
+                if again and (r["circled"] or (r["finish_reason"] == "length" and thought and not r["calls"]
+                                               and not said(bot["content"]))):
+                    rethought = twice = True
+                    body = less                  # and it stays turned down for the rest of the turn
+                    bot["reasoning"], bot["content"] = bot["reasoning"][:r_len], ""    # what led nowhere is not kept
+                    self._notice(emit, bot, ("The model was going round in circles while thinking and was stopped. "
+                                             if r["circled"] else "The model used the whole of one reply thinking. ")
+                                 + "Asked again with less thinking.")
+                    finish = None                # the turn ends as the second reply ends, also when that is cut short
+                    r = self.stream_turn(run, emit, sid, msgs, bot, body, reply_cap=reply_cap)
+                    count(r)
+                asked_twice = twice and not r["calls"]       # (a tool it then called is work done, whatever follows)
                 if r["broken_calls"]:
                     b = r["broken_calls"][0]
                     self._notice(emit, bot, "Dropped a truncated tool call — %s arrived with %s chars of "
                                  "arguments and no closing brace. %s" % (
                                      b["name"] or "unnamed", format(len(b["args"] or ""), ","),
-                                     "It hit the Max tokens ceiling: raise Max tokens and ask again."
+                                     ("It reached the limit of one reply." if bound else
+                                      "It hit the Max tokens ceiling: raise Max tokens and ask again.")
                                      if r["finish_reason"] == "length" else "The stream was cut mid-call: just ask again."))
                 if not r["calls"]:
                     break
@@ -801,8 +1012,8 @@ class Runner:
         except Exception as e:   # noqa: BLE001 - a turn's failure is part of its record
             bot["error"] = "upstream error: " + str(e)[:400]
 
-        exact = tot_toks > 0
-        toks = tot_toks if exact else chunks
+        exact = tot_toks > 0 and not cut_toks
+        toks = (tot_toks if tot_toks > 0 else chunks) + cut_toks
         approx = "" if exact else "~"
         decode = (toks - 1) / span if span and toks > 1 else None
         rtok = tot_rtoks or ((usage or {}).get("completion_tokens_details") or {}).get("reasoning_tokens")
@@ -816,7 +1027,8 @@ class Runner:
             bits.append("%d skill%s: %s" % (len(bot["skills"]), "s" if len(bot["skills"]) > 1 else "",
                                              ", ".join(bot["skills"])))
         if finish == "length":
-            bits.append("⚠ stopped at Max tokens — thinking shares the budget; raise it in the panel")
+            bits.append("⚠ stopped at the limit of one reply" if bound else
+                        "⚠ stopped at Max tokens — thinking shares the budget; raise it in the panel")
         bot["meta"] = "  ·  ".join(b for b in bits if b)
         if out is not None:
             out["message"] = bot
@@ -825,12 +1037,18 @@ class Runner:
         self.d.record_usage({"model": model, "prompt_tokens": (usage or {}).get("prompt_tokens"),
                              "completion_tokens": toks, "ttft_s": ttft, "decode_tok_s": decode,
                              "estimated": not exact}, source=req.get("source") or "app", session=sid,
-                            job=req.get("job"), workflow=req.get("workflow"))
+                            job=req.get("job"), workflow=req.get("workflow"), agent=req.get("agent"))
+        learn = getattr(self.d, "learn_outcome", None)
+        if learn and not run.cancelled:
+            # the router ranks a model by how often its requests fail: a gateway or engine error counts, a
+            # refused approval or a stopped turn does not
+            learn(model, not str(bot.get("error") or "").startswith("upstream error"))
         stored = serialize_msg(bot)
         emit("done", {"message": stored, "meta": bot["meta"], "usage": usage})
         return {"ok": not bot.get("error"), "error": bot.get("error") or None, "session": sid,
-                "turn": bot["turn"], "cancelled": run.cancelled, "tokens": toks,
-                "approval_needed": approval_needed}
+                "turn": bot["turn"], "cancelled": run.cancelled, "tokens": toks, "prompt_tokens": tot_prompt,
+                "decode_tok_s": decode if exact else None, "model": model,
+                "approval_needed": approval_needed, "finish": finish, "asked_twice": asked_twice}
 
     def call_tool(self, run, emit, sid, bot, call, args, req):
         """Run one tool call where it lives: the client's own tools (bb's
@@ -840,6 +1058,14 @@ class Runner:
         name = call["name"]
         client = set(t["function"]["name"] for t in req.get("client_tools") or [])
         where = "client" if name in client else "server"
+        offered = req.get("tools")
+        if where == "server" and (offered is False or isinstance(offered, list) and name not in offered):
+            # a model can name a tool it was never shown (text it read can supply the name): a turn that
+            # was given a list of tools runs those and no other, whatever the app's own policy for it is
+            text = "there is no tool named %s in this turn" % name
+            self.d.trace.log("tool", session=sid, turn=bot.get("turn"), name=name, arguments=args, where=where,
+                             result=text, is_error=True, ms=0)
+            return text, True
         if where == "client":
             text, is_err = self.client_call(run, emit, call, args)
         else:
@@ -857,8 +1083,25 @@ class Runner:
                     self.d.trace.log("tool", session=sid, turn=bot.get("turn"), name=name, arguments=args,
                                      where=where, result=denied[0], is_error=True, ms=int((time.time() - t0) * 1000))
                     return denied
+            # (an agent's turn hands these over as functions: its rules as they are at this call)
+            own = req.get("tool_policy")
             pol = approvals.policy_for(name, self._annotations(name),
-                                       [self.d.tool_policy(), req.get("tool_policy") or {}])
+                                       [self.d.tool_policy(), (own() if callable(own) else own) or {}])
+            reach = req.get("reach") if req.get("agent") else None
+            reach, off = (reach() if callable(reach) else reach), []
+            if reach is not None and (self._annotations(name) or {}).get("openWorldHint") is not False \
+                    and name not in self.d.terminal_tools():
+                # an agent's call to a tool that may reach outside this computer (one that does not say is
+                # taken to, as MCP reads a missing hint): an address that is not on its egress list makes
+                # the call an outward action, whatever the tool says of itself. (The built-in terminal is
+                # not read this way: a command line is no list of addresses, and its sandbox has no network.)
+                pol, off = rulesmod.reach_policy(pol, args, reach.get("egress"), reach.get("outward") or "ask")
+            guard = getattr(self.d, "guard", None)
+            if guard and req.get("agent"):
+                # an agent's tool call passes the guard before anything else, judged on the call itself
+                verdict, why = guard({"kind": "tool", "agent": req["agent"], "name": name, "args": args, "run": run.id})
+                if verdict == "block":
+                    pol = "guard"
             if pol == "ask" and req.get("yes"):
                 pol = "allow"
             if pol == "ask" and req.get("unattended"):
@@ -866,15 +1109,37 @@ class Runner:
             if pol == "ask":
                 if not req.get("interactive", True):
                     raise ApprovalNeeded(name)
-                decision = self.d.approvals.ask(run, name, args, session=sid)
+                meta = dict(req.get("approval_meta") or {})
+                if meta:
+                    # an agent asks: the request names it and shows in the channel the ask came from
+                    meta.setdefault("title", ("%s wants to reach %s%s with %s (%s)" % (
+                        meta.get("agent") or "an agent", ", ".join(off[:3]),
+                        " and %d more" % (len(off) - 3) if len(off) > 3 else "", name,
+                        "not on its egress list" if any(rulesmod.listable(h) for h in off) else
+                        "an address its egress list cannot hold: it asks each time")) if off else
+                        "%s wants to use %s" % (meta.get("agent") or "an agent", name))
+                    decision = self.d.approvals.ask(run, name, args, session=sid, meta=meta)
+                else:
+                    decision = self.d.approvals.ask(run, name, args, session=sid)
                 if decision == "always":
-                    self.d.always_allow(name)
+                    if req.get("agent"):
+                        # for this agent only; the addresses the request named (the first three, as its
+                        # title showed them) go on its egress list
+                        lists = bool(off) and (reach or {}).get("always_lists", True)
+                        self.d.always_allow(name, agent=req["agent"], hosts=off[:3] if lists else ())
+                    else:
+                        self.d.always_allow(name)
                 pol = "allow" if decision in ("allow", "always") else "denied"
-            if pol == "allow":
+            if pol == "guard":
+                text, is_err = "blocked by the guard: %s" % (why or "not allowed"), True
+            elif pol == "allow":
                 try:
                     text, is_err = self.d.mcp().call(name, args)
                 except Exception as e:   # noqa: BLE001
                     text, is_err = "console could not reach the tool: %s" % e, True
+            elif pol == "deny" and off:
+                text, is_err = ("not allowed: %s is not on this agent's egress list, and its rules deny outward "
+                                "actions. Say so; do not try another way around." % ", ".join(off[:3])), True
             elif pol == "deny":
                 text, is_err = "this tool is turned off here (its policy is deny)", True
             elif pol == "unattended":

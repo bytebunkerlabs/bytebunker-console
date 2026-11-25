@@ -129,7 +129,10 @@ def open_chat(registry, payload, timeout=600):
             if e.code == 400 and any(k in detail for k in RETRY_STRIP):
                 for k in RETRY_STRIP:
                     payload.pop(k, None)
-                return attempt(payload), gw
+                try:
+                    return attempt(payload), gw
+                except urllib.error.HTTPError as e2:        # refused again, for another reason: its status, its words
+                    raise UpstreamError(e2.code, message(e2.read().decode("utf-8", "replace"))[:1000], gw)
             raise UpstreamError(e.code, message(detail)[:1000], gw)
     except UpstreamError:
         raise

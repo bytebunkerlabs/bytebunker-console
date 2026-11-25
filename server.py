@@ -28,6 +28,10 @@ API:
   GET  /api/skills           skill catalog  |  GET /api/skills/<name>  full body
   GET  /api/plugins          installed plugins  |  POST enable/disable/rescan
   GET  /api/agents           harness status + recent runs  |  POST run a goal (SSE)
+  GET  /api/agents/list      your agents  |  /api/agents/agent?id=  one in full (memory, inbox, runs)
+  POST /api/agents/agent     save, delete, ask, remember, forget, tidy (action in the body)
+  GET  /api/agents/router    capability cards, what is live, what "auto" picks now
+  GET  /api/channels         Telegram, mail and what is watched  |  POST connect, bind, add a mailbox
   POST /api/usage-event      client-reported completion stats -> usage.jsonl
   GET  /api/usage            14-day aggregates for the Usage screen
   POST /api/video            multipart passthrough -> H3 /v1/videos (job id)
@@ -75,6 +79,12 @@ import approvals as approvalsmod
 import audit as auditmod
 import changelog
 import updater as updatemod
+import agentstore as storemod
+import dispatch as dispatchmod
+import router as routermod
+import rules as rulesmod
+import channels as channelsmod
+from channels import telegram as tgmod, mail as mailmod, pollers as pollmod, folder as foldermod, rack as rackmod
 from version import VERSION
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -96,6 +106,9 @@ BUS = eventsmod.EventBus(runs_dir=os.path.join(DATA, "runs"))
 AUDIT = auditmod.AuditLog(DATA, BUS)
 RUNS = runsmod.RunRegistry(BUS, os.path.join(DATA, "runs", "index.jsonl"))
 SESSIONS = sessmod.SessionStore(os.path.join(DATA, "sessions"), legacy_path=os.path.join(DATA, "sessions.json"))
+# Persistent agents: a folder each (who it is, what it may do, what it remembers,
+# what woke it). This server is the only writer; the worker never holds them.
+AGENTS = storemod.AgentStore(os.path.join(DATA, "agents"), BUS)
 
 DEFAULT_CONFIG = {
     "bind": "127.0.0.1",
@@ -198,6 +211,8 @@ def caps_for(model_id):
         for k in ("tools", "vision"):
             if sv.get(k) is not None:
                 merged[k] = bool(sv[k])
+        if sv.get("reasoning"):
+            merged["reasoning"] = True          # served with a reasoning parser: the model thinks (the router's card)
         dia = sv.get("dialect") or {}
         if str(dia.get("strip_reasoning")) in ("1", "true", "True"):
             merged["strip_reasoning"] = True
@@ -890,6 +905,7 @@ def agent_plane_setup(run, emit, target):
         shlex_quote(d) if not d.startswith("~/") else '"$HOME"/' + shlex_quote(d[2:]), rt["name"])), 3600)
     if code != 0:
         return done(False, "the sandbox image did not build (exit %s): the log above says why" % code)
+    res = None
     if not local:
         res = agentmod.test_worker(target, d, "uv run")
         if not res.get("ok"):
@@ -897,6 +913,11 @@ def agent_plane_setup(run, emit, target):
                 k for k, v in (res.get("checks") or {}).items() if not v)))
     a.update(enabled=True, ssh="" if local else target, dir=d, python="uv run")
     a.setdefault("script", "scripts/run_master.py")
+    # the harness there was just brought up to date: what it understands now replaces what was known
+    if res and res.get("harness"):
+        a["harness"] = res["harness"]
+    else:
+        a.pop("harness", None)
     save_config()
     BUS.publish("config", "agents", {"plane": target})
     say("agents work on %s now" % ("this computer" if local else target))
@@ -1075,6 +1096,8 @@ def uploads_root():
 def save_upload(session, name, data):
     sess = _SAFE_NAME.sub("_", str(session or "nosession"))[:48] or "nosession"
     base = _SAFE_NAME.sub("_", os.path.basename(str(name or "file")))[:120] or "file"
+    if base.split(".", 1)[0].lower() in storemod.DEVICES:
+        base = "file-" + base                   # CON, NUL.txt: names Windows keeps for devices
     d = os.path.join(uploads_root(), sess)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, base)
@@ -1120,7 +1143,27 @@ def last_used_model():
     return ""
 
 
-AGENT_SLOT = threading.Lock()   # one goal at a time: the harness keys a goal's state by its directory
+# Goals at once on the worker. It was one: the harness keyed a goal's state by its
+# directory. Since the goal id is the console's run id, two goals share nothing there
+# (each is its own process, with its own sockets, task folders and trajectories/<id>/),
+# so the limit is only how much the engines can take: agents.parallel_goals, 2 by default.
+_GOAL_SLOTS = [None, 0]
+
+
+def goal_slots():
+    n = max(1, min(8, _int((CFG.get("agents") or {}).get("parallel_goals"), 2)))
+    if _GOAL_SLOTS[0] is None or _GOAL_SLOTS[1] != n:
+        _GOAL_SLOTS[0], _GOAL_SLOTS[1] = threading.BoundedSemaphore(n), n
+    return _GOAL_SLOTS[0]
+
+
+def goal_slot_free():
+    """Whether one more goal can start now (the dispatcher looks before it starts an agent's)."""
+    slots = goal_slots()
+    if slots.acquire(blocking=False):
+        slots.release()
+        return True
+    return False
 
 
 AUDIT_SKIP = ("/api/chat", "/api/handoff", "/api/tool-call", "/api/usage-event", "/api/rate", "/api/upload", "/api/video",
@@ -1130,7 +1173,7 @@ AUDIT_CATEGORY = {"settings": "settings", "profiles": "settings", "update": "set
                   "gateways": "serving", "monitors": "serving", "racks": "serving", "rack": "serving",
                   "recipes": "serving", "machines": "serving", "engine": "serving",
                   "agents": "agents", "jobs": "runs", "workflows": "runs", "runs": "runs",
-                  "approvals": "access", "terminal": "access",
+                  "approvals": "access", "terminal": "access", "channels": "access",
                   "sessions": "data", "projects": "data", "archive": "data", "export": "data"}
 
 
@@ -1152,6 +1195,8 @@ def audit_action(method, path, body, query):
         return None                                  # reading what a machine serves changes nothing
     if path in ("/api/gateways", "/api/monitors") and act == "refresh":
         return None
+    if path == "/api/agents/agent" and act == "ask":
+        return None                                  # an ask is traffic; its run gets the audit line
     if path == "/api/git" and act == "probe":
         return None                                  # probing a URL changes nothing
     parts = [p for p in path.split("/")[2:] if p]
@@ -1174,6 +1219,10 @@ def audit_action(method, path, body, query):
         act = "add"
     action = ".".join(parts).replace("-", "_") + ("." + act if act else "")
     target = next((str(body[k]) for k in ("id", "name", "target", "rack", "ssh", "session", "host") if body.get(k)), None) or q1("id")
+    if not target and path == "/api/agents/agent" and isinstance(body.get("agent"), dict):
+        target = str(body["agent"].get("id") or "")[:80] or None       # create and save carry the agent whole
+    if not target and path == "/api/channels" and body.get("chat"):
+        target = str(body["chat"])[:80]                                 # a Telegram chat; a mailbox has a name
     # secrets (token, key, password...) are masked to *** by audit.py's SECRET filter
     detail = {k: v for k, v in body.items() if k not in ("action", "messages", "data", "content")}
     return cat, action, target, detail
@@ -1203,19 +1252,29 @@ def audit_from_trace(evt):
 TRACE.on_log = audit_from_trace
 
 
-def agents_spec():
+def agents_spec(models=None, agent=None, court=None, key=""):
     """This run's models for the harness (--spec): master, thinking and fast,
     from the Agents screen's choices, else the app's roles (big, thinking,
     fast); each with its gateway's address and key. An engine on this
     machine's loopback is left to a remote worker's own config (it cannot
     reach it) but given to agents on this computer, which can; a gateway can
-    name the address agents use (agents_url)."""
+    name the address agents use (agents_url).
+
+    For a persistent agent's goal: models is what the router chose
+    ({role: {"model", "pool"?}}), agent its identity and memory (for a
+    harness that takes them), court its own court over the app's.
+
+    key: this run's own key, for a harness that signs its protocol lines
+    with one (the same harness that knows agents)."""
     a = CFG.get("agents") or {}
     remote = bool((a.get("ssh") or "").strip())
     roles = CFG.get("roles") or {}
     pick = {"master": a.get("master_model") or roles.get("big"),
             "thinking": a.get("thinking_model") or roles.get("thinking"),
             "fast": a.get("slave_model") or roles.get("fast")}
+    for role, m in (models or {}).items():
+        if role in pick and isinstance(m, dict) and m.get("model"):
+            pick[role] = m["model"]
     out = {}
     for role, model in pick.items():
         if not model:
@@ -1236,20 +1295,31 @@ def agents_spec():
         if role == "master" and a.get("master_plan_effort") and (a.get("harness") or {}).get("plan"):
             r["plan_effort"] = a["master_plan_effort"]       # how hard it thinks while planning and spawning
         out[role] = r
-    pool = minion_pool(a, pick.get("fast"), remote)
+    routed = ((models or {}).get("fast") or {}).get("pool")
+    if routed:
+        # the router's pool for this run: every live engine that can do a fast role's work
+        pool = minion_pool({"minion_slots": routed[0].get("slots") or a.get("minion_slots"),
+                            "minion_pool": [{"model": e["model"], "slots": e.get("slots")} for e in routed[1:]]},
+                           routed[0]["model"], remote)
+    else:
+        pool = minion_pool(a, pick.get("fast"), remote)
     if pool and len(pool) > 1 and (a.get("harness") or {}).get("pool"):
         # the router: the minions spread over these engines (the harness's engine_pool)
         fast = {"pool": pool}
         if out.get("fast", {}).get("effort"):
             fast["effort"] = out["fast"]["effort"]
         out["fast"] = fast
-    court = (CFG.get("agents") or {}).get("court") or {}
+    court = court if court is not None else ((CFG.get("agents") or {}).get("court") or {})
     spec = {"version": 1}
     if out:
         spec["roles"] = out
     caps = a.get("harness") or {}
     if (court.get("roles") or court.get("concurrency") or court.get("access")) and caps.get("court"):
         spec["court"] = agentmod.court_for_run(court, caps, CFG.get("mcp_servers") or {})
+    if agent and caps.get("agent"):
+        spec["agent"] = agent
+    if key and caps.get("agent"):
+        spec["proto_key"] = key
     return spec if len(spec) > 1 else None
 
 
@@ -1301,12 +1371,53 @@ def unserved_worker_defaults(a=None):
     return [(who[r], defaults[r]) for r in left if defaults.get(r) and not model_served(defaults[r])]
 
 
-def agents_ready(goal):
+def _caps_only(caps):
+    return {k: v for k, v in (caps or {}).items() if k != "checked"}
+
+
+def agents_caps():
+    """What the worker's harness understands, kept in config when it is new or has changed. A
+    harness on this computer is read each time; a worker over ssh is asked again when what is
+    known is over an hour old, so one updated there by hand is noticed without pressing Test."""
+    before = dict((CFG.get("agents") or {}).get("harness") or {})
+    caps = agentmod.harness_caps(CFG)
+    if caps and (not before or _caps_only(caps) != _caps_only(before)):
+        save_config()
+        if before:
+            TRACE.log("agents", action="harness", gained=sorted(k for k, v in _caps_only(caps).items() if v and not before.get(k)),
+                      lost=sorted(k for k, v in _caps_only(before).items() if v and not caps.get(k)))
+    return caps
+
+
+def keep_worker_caps(res, ssh, d):
+    """A worker was just tested: what its harness understands is known for certain now. Kept when
+    it is the worker in use."""
+    a = CFG.setdefault("agents", {})
+    if (res.get("harness") and (res.get("checks") or {}).get("harness")
+            and (a.get("ssh") or "") == ssh and (a.get("dir") or "") == d):
+        if _caps_only(res["harness"]) != _caps_only(a.get("harness")):
+            a["harness"] = res["harness"]
+            save_config()
+        else:
+            a["harness"] = res["harness"]
+
+
+def agents_ready(goal, models=None):
     """AgentConfigError unless a goal can start: agents set up, and every chosen
     model served somewhere now (a goal that starts anyway spends its workers on one
-    error; measured: six on an HTTP 404)."""
+    error; measured: six on an HTTP 404). models: one run's own choices
+    ({role: model}), over the Agents screen's."""
     agentmod.build_command(CFG, goal)
-    missing = unserved_roles() + unserved_worker_defaults()
+    agents_caps()                                        # what its harness takes decides which models are checked
+    a = None
+    if models:
+        a = dict(CFG.get("agents") or {})
+        for role, key in (("master", "master_model"), ("thinking", "thinking_model"), ("fast", "slave_model")):
+            if models.get(role):
+                a[key] = models[role]
+        if models.get("pool"):
+            a["minion_pool"] = [{"model": m} for m in models["pool"]]
+    missing = unserved_roles(a) + unserved_worker_defaults(a)
     if missing:
         raise agentmod.AgentConfigError(
             "not started: " + "; ".join("%s' model %s is not served anywhere right now" % (w, m) for w, m in missing)
@@ -1352,17 +1463,41 @@ def minion_pool(a, first, remote):
     return out
 
 
-def agent_goal(run, emit, goal, via="app"):
+def agent_goal(run, emit, goal, via="app", agent=None):
     """One goal on the agents worker, its lines streamed through emit. Shared
-    by the Agents screen and agent-kind jobs. Returns (result, lines)."""
-    agents_ready(goal)                                   # AgentConfigError when not set up
-    known = bool((CFG.get("agents") or {}).get("harness"))
-    caps = agentmod.harness_caps(CFG)
-    if caps and not known:
-        save_config()                                     # asked once, remembered
+    by the Agents screen, agent-kind jobs and persistent agents. Returns
+    (result, lines); the result carries the answer and the tokens spent when
+    the harness reports them.
+
+    agent (a persistent agent's goal): {"ctx": its identity and memory for
+    the harness, "models": the router's choice per role, "court": its own
+    court, "name", "timeout_s", "hooks": {"memory": fn(op), "ask": fn(to,
+    text), "job": fn(spec, file), "job_hold", "job_held": fn(job)} for what
+    the master does}."""
+    ag = agent or {}
+    models = ag.get("models") or None
+    flat = {r: m["model"] for r, m in (models or {}).items() if isinstance(m, dict) and m.get("model")}
+    if (flat and (models.get("fast") or {}).get("pool")):
+        flat["pool"] = [e["model"] for e in models["fast"]["pool"][1:]]
+    agents_ready(goal, flat or None)                     # AgentConfigError when not set up
+    caps = agents_caps()
     st = agentmod.status(CFG)
     cwd = None if st["mode"] == "ssh" else os.path.expanduser((CFG.get("agents") or {}).get("dir") or ".")
-    spec = json.dumps(agents_spec()) if caps.get("spec") and agents_spec() else ""
+    if ag.get("ctx") and not (caps.get("agent") and caps.get("spec")):
+        # a harness from before agents cannot be given this agent's egress list, its memory tools or its
+        # home: its workers would reach whatever the worker reaches. The dispatcher answers in one turn
+        # instead (agents_court_ready); this is for a harness that changed between its look and now
+        raise AgentConfigError("not started: the worker's harness predates agents that persist. Update it there "
+                               "(Agents, Settings: Work here updates it).")
+    # a harness that knows agents signs every protocol line with a key made up for this run (it goes
+    # in the spec, a 0600 file or the worker's stdin, and into no prompt). With one, a line that only
+    # looks like the harness's own (in a model's answer, a page it quoted, a file's name) is text.
+    key = secrets.token_hex(16) if caps.get("agent") and caps.get("spec") else ""
+    spec_obj = agents_spec(models, ag.get("ctx"), ag.get("court"), key=key) if caps.get("spec") else None
+    spec = json.dumps(spec_obj) if spec_obj else ""
+    if key and not (spec_obj or {}).get("proto_key"):
+        key = ""
+    timeout_s = int(ag.get("timeout_s") or agent_run_timeout(CFG))
     spec_path = None
     if spec and st["mode"] != "ssh":
         import tempfile
@@ -1377,74 +1512,147 @@ def agent_goal(run, emit, goal, via="app"):
         import tempfile
         fd, wrap_file = tempfile.mkstemp(prefix="bb-wrap-")
         os.close(fd)
-    cmd = agentmod.build_command(CFG, goal, run_id=run.id, caps=caps,
-                                 spec_len=len(spec.encode("utf-8")) if st["mode"] == "ssh" else 0,
-                                 spec_path=spec_path, wrap_file=wrap_file)
-    if not AGENT_SLOT.acquire(blocking=False):
-        if spec_path:
-            os.remove(spec_path)
-        msg = "another agents goal is running; they run one at a time"
+    cmd = agentmod.build_command(
+        CFG, goal, run_id=run.id, caps=caps,
+        spec_len=len(spec.encode("utf-8")) if st["mode"] == "ssh" else 0,
+        spec_path=spec_path, wrap_file=wrap_file,
+        # an agent's memory and standing instructions go in the spec's agent block (a 0600 file, never a command line)
+        master_name=ag.get("name") if ag else None, timeout_s=timeout_s if ag else None,
+        models=None if spec else (flat or None))
+    slots = goal_slots()
+    if not slots.acquire(blocking=False):
+        for path in (spec_path, wrap_file):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        msg = "%d goals are running already; this worker takes that many at once" % _GOAL_SLOTS[1] \
+            if _GOAL_SLOTS[1] > 1 else "another agents goal is running; they run one at a time"
         emit({"error": msg})
         emit({"phase": "done", "exit": None, "killed": "busy"})
-        return {"ok": False, "error": msg}, []
+        return {"ok": False, "error": msg, "busy": True}, []
     started = time.time()
     captured = []   # full master output, stored so a past run can be reopened
     end = {}        # protocol 2: run_end says how the goal ended
+    told = {"answer": "", "tokens": 0}
+    hooks = ag.get("hooks") or {}
+
+    def memory_line(op):
+        """remember / forget, printed by the master: applied to the agent's folder here, the only writer."""
+        if not hooks.get("memory") or not isinstance(op, dict):
+            return
+        try:
+            out, is_err = hooks["memory"](op)
+        except Exception as e:   # noqa: BLE001
+            out, is_err = str(e)[:160], True
+        emit({"line": "console: memory: %s" % out})
+
+    def ask_line(msg):
+        if not hooks.get("ask") or not isinstance(msg, dict):
+            return
+        try:
+            out, is_err = hooks["ask"](msg.get("to"), msg.get("text"))
+        except Exception as e:   # noqa: BLE001
+            out, is_err = str(e)[:160], True
+        emit({"line": "console: %s" % out})
     try:
         emit({"phase": "start", "id": run.id, "host": st["host"], "mode": st["mode"], "isolated": st["isolated"]})
+
+        def job_line(spec):
+            """A job the master files. An agent's goes through its rules first, as schedule_job does in a turn."""
+            if not hooks.get("job"):
+                return file_job(spec)
+            try:
+                got = hooks["job"](spec, lambda: file_job(spec))
+            except Exception as e:   # noqa: BLE001
+                got = (str(e)[:160], True)
+            if isinstance(got, tuple) and got and got[0]:
+                emit({"line": "console: job: %s" % got[0]})
 
         def file_job(spec):
             try:
                 spec = dict(spec)
+                spec.pop("id", None)                    # a job the master files is a new job: it names no other's
                 spec["created_by"] = "agents:" + str(spec.get("created_by") or "master")[:30]
+                if ag.get("id"):
+                    # recurring work an agent files wakes that agent again, with its memory
+                    spec.update(agent=ag["id"], created_by="agents:" + ag["id"])
+                    agent_job_room(ag["id"])
+                held = hooks.get("job_hold")
+                if held:
+                    # this run began with content nobody vouches for: the job waits, switched off, for the owner
+                    spec.update(enabled=False, reason=held)
                 job = JOBS.upsert(spec)
+                held = bool(held) and not job.get("enabled", True)
                 TRACE.log("job", action="filed_by_agent", id=job["id"], name=job["name"], run=run.id,
                           schedule=job["schedule"], job_kind=job["kind"], by=spec["created_by"])
                 BUS.publish("jobs", "saved", {"id": job["id"], "by": spec["created_by"]})
                 emit({"job": {"id": job["id"], "name": job["name"], "schedule": job["schedule"], "kind": job["kind"]}})
-                emit({"line": "%s> \U0001f5d3 filed job \"%s\" (%s) \u2014 see the Jobs screen" % (
-                    (CFG.get("agents") or {}).get("master_name") or "Master", job["name"], jobmod.describe_schedule(job))})
+                emit({"line": "%s> \U0001f5d3 filed job \"%s\" (%s) \u2014 %s" % (
+                    (CFG.get("agents") or {}).get("master_name") or "Master", job["name"], jobmod.describe_schedule(job),
+                    "switched off until you switch it on in Jobs" if held else "see the Jobs screen")})
+                if held and hooks.get("job_held"):
+                    hooks["job_held"](job)
             except (ValueError, KeyError, TypeError) as e:
                 emit({"line": "console: could not file the job the master asked for: %s" % str(e)[:160]})
+
+        evt_head, run_head = ("BB_EVENT %s " % key, "BB_RUN %s " % key) if key else ("BB_EVENT ", "BB_RUN ")
+        seen = {"signed": 0, "unsigned": 0}
 
         def on_line(text):
             if text.startswith("BB_PROTO "):
                 return
-            if text.startswith("BB_EVENT "):
+            if key and (text.startswith(evt_head) or text.startswith(run_head)):
+                seen["signed"] += 1
+            elif key and (text.startswith("BB_EVENT ") or text.startswith("BB_RUN ")):
+                seen["unsigned"] += 1           # a line of the protocol without this run's key: text, and counted
+            if text.startswith(evt_head):
                 # protocol 2: what happens, as data; the human lines carry on alongside
                 try:
-                    evt = json.loads(text[9:])
+                    evt = json.loads(text[len(evt_head):])
                 except ValueError:
                     return
                 if not isinstance(evt, dict):
                     return
                 RUNS.emit(run, "agent_event", evt)
                 if evt.get("type") == "job_filed" and isinstance(evt.get("job"), dict):
-                    file_job(evt["job"])
+                    job_line(evt["job"])
                 elif evt.get("type") == "master_round":
                     # where the master is: the Master tab's progress line
                     run.meta["progress"] = {k: evt.get(k) for k in ("round", "elapsed_s", "deadline_s", "spawned",
                                                                    "done", "running", "wrapping")}
                 elif evt.get("type") == "wrap_up":
                     run.meta.setdefault("progress", {})["wrapping"] = True
+                elif evt.get("type") == "memory":
+                    memory_line(evt.get("memory"))
+                elif evt.get("type") == "agent_ask":
+                    ask_line(evt.get("ask"))
+                elif evt.get("type") == "final_answer" and evt.get("text"):
+                    told["answer"] = str(evt["text"])
+                elif evt.get("type") == "usage":
+                    told["tokens"] += int(evt.get("prompt_tokens") or 0) + int(evt.get("completion_tokens") or 0)
                 elif evt.get("type") == "run_end":
                     end.update(outcome=evt.get("outcome"), exit_code=evt.get("exit_code"), reason=evt.get("reason"))
+                    if evt.get("answer") and not told["answer"]:
+                        told["answer"] = str(evt["answer"])
+                    if evt.get("tokens"):
+                        told["tokens"] = max(told["tokens"], int(evt["tokens"]))
                 return
-            if text.startswith("BB_RUN "):
+            if text.startswith(run_head):
                 # the harness names the goal it started (its directory on the worker)
                 try:
-                    run.meta["goal_id"] = str(json.loads(text[7:]).get("goal_id") or "")[:80]
+                    run.meta["goal_id"] = str(json.loads(text[len(run_head):]).get("goal_id") or "")[:80]
                 except (ValueError, AttributeError):
                     pass
                 return
             if len(captured) < 4000:
                 captured.append(text)
-            # The master files recurring work by printing one structured line;
-            # the agent plane has no other way to reach the console, by design.
-            if text.startswith("BB_JOB "):
-                # protocol 1: the master files recurring work as one structured line
+            if not key and text.startswith("BB_JOB "):
+                # a harness from before keys (protocol 1) files recurring work as one line of text. One
+                # that has a key says everything in events, and no line of text is ever acted on
                 try:
-                    file_job(json.loads(text[7:]))
+                    job_line(json.loads(text[7:]))
                 except ValueError as e:
                     emit({"line": "console: could not file the job the master asked for: %s" % str(e)[:160]})
                 return
@@ -1452,7 +1660,7 @@ def agent_goal(run, emit, goal, via="app"):
 
         try:
             code, killed = agentmod.run_streaming(cmd, cwd, on_line, run.cancel_event,
-                                                  timeout_s=agent_run_timeout(CFG),
+                                                  timeout_s=timeout_s,
                                                   stdin_first=spec if st["mode"] == "ssh" else "",
                                                   wrap_event=run.wrap_event, wrap_file=wrap_file)
         except FileNotFoundError as e:
@@ -1468,16 +1676,24 @@ def agent_goal(run, emit, goal, via="app"):
                 " (%s)" % end["reason"] if end.get("reason") else "")})
         emit({"phase": "done", "exit": code, "killed": killed})
         TRACE.log("agent_run", id=run.id, goal=goal[:8000], host=st["host"], mode=st["mode"],
-                  isolated=st["isolated"], exit=code, killed=killed or False, via=via,
+                  isolated=st["isolated"], exit=code, killed=killed or False, via=via, agent=ag.get("id"),
                   lines=len(captured), output=captured, ms=int((time.time() - started) * 1000))
         ok = code == 0 if not end else end.get("outcome") == "answered"
         error = None if ok else (
             "the goal ended %s%s" % (end.get("outcome"), ": " + end["reason"] if end.get("reason") else "") if end
             else "the harness exited %s%s" % (code, " (%s)" % killed if killed else ""))
+        if key and seen["unsigned"] and not seen["signed"]:
+            # it took the run's key and put it on none of its lines: nothing it reported was acted on (no fact,
+            # no job, no answer), and that is a failure to say, not a goal that went well
+            ok, error = False, ("the worker's harness did not sign what it reported with this run's key, so none of it was "
+                                "acted on. It was updated in part, or is not the version this app expects: update it on "
+                                "the worker (Agents, Settings).")
+            emit({"error": error})
         return ({"ok": ok, "exit": code, "killed": killed or False, "lines": len(captured), "error": error,
-                 "outcome": end.get("outcome")}, captured)
+                 "outcome": end.get("outcome"), "answer": told["answer"], "tokens": told["tokens"],
+                 "keyed": bool(key)}, captured)
     finally:
-        AGENT_SLOT.release()
+        slots.release()
         for path in (spec_path, wrap_file):
             if path:
                 try:
@@ -1518,6 +1734,12 @@ def run_job(job, run):
     msg = out.get("message") or {}
     if msg.get("error"):
         raise RuntimeError(msg["error"])
+    if not runnermod.said(msg.get("content")) and (res.get("finish") == "length" or res.get("asked_twice")):
+        # its last reply ran to its limit, or had been asked for a second time, and wrote nothing: that is a job
+        # that failed, not one that had nothing to say (a job whose tools did the work and whose last reply is
+        # empty stays done)
+        why = " ".join(str(msg.get("notice") or "").split()).split(". ")[0].rstrip(".")
+        raise RuntimeError("the model gave no answer (%s)" % (why or "it reached the limit of one reply without answering"))
     model = msg.get("model") or ""
     return {"output": msg.get("content") or "", "hops": len(msg.get("hops") or []) + 1, "tokens": res.get("tokens"),
             "model": model, "gateway": GW.model_map.get(model)}
@@ -1538,7 +1760,13 @@ def job_slots():
 
 def launch_job(job, trigger):
     """Start one run of a job and return it at once. A job whose last run is
-    still going is not started again: runsmod.Busy."""
+    still going is not started again: runsmod.Busy. A job that names an agent
+    starts no run of its own: it writes a line in that agent's inbox, and the
+    dispatcher runs it (None is returned)."""
+    if job.get("agent"):
+        wake_from_job(job, trigger)
+        return None
+
     def target(run):
         RUNS.set_state(run, "queued")
         slots = job_slots()
@@ -2091,6 +2319,30 @@ def terminal_tools():
     return out
 
 
+def own_servers():
+    """The names of the app's own MCP servers (the terminal, jobs): they run on this computer as
+    the owner, so no agent's court is handed one, whatever a court names."""
+    from mcp import BUILTIN_SCRIPTS
+    out = set()
+    for n, sv in (CFG.get("mcp_servers") or {}).items():
+        words = [sv.get("command") or ""] + [a for a in (sv.get("args") or []) if isinstance(a, str)]
+        if any(os.path.basename(w) in BUILTIN_SCRIPTS for w in words):
+            out.add(n)
+    return out
+
+
+def jobs_servers():
+    """The names of the app's own jobs server. It files, runs and switches on jobs as the owner,
+    so it is the owner's alone: no agent gets it, in a turn or in its court."""
+    out = set()
+    for n, sv in (CFG.get("mcp_servers") or {}).items():
+        # (by its script, wherever it stands on the command line: after an interpreter's own flags too)
+        words = [sv.get("command") or ""] + [a for a in (sv.get("args") or []) if isinstance(a, str)]
+        if any(os.path.basename(w) == "mcp_jobs.py" for w in words):
+            out.add(n)
+    return out
+
+
 class _CallRun:
     """A Playground tool call has no server run; an approval still needs one to wait on."""
     def __init__(self):
@@ -2151,8 +2403,13 @@ def terminal_call(args, sid, access, ask):
     return None, args
 
 
-def always_allow(name):
-    """"Always allow": the tool runs without asking from now on (config tool_policy)."""
+def always_allow(name, agent=None, hosts=()):
+    """"Always allow": the tool runs without asking from now on (config tool_policy);
+    answered for an agent's request, it is allowed for that agent only (its rules), and a
+    public address the request named goes on that agent's egress list."""
+    if agent:
+        agent_always_allow(agent, name, hosts)
+        return
     config_fresh()
     CFG.setdefault("tool_policy", {})[name] = "allow"
     save_config()
@@ -2163,6 +2420,8 @@ def record_usage(body, **extra):
     if evt:
         evt.update({k: v for k, v in extra.items() if v})
         append_usage(evt)
+        if evt.get("decode_tok_s") and not evt.get("estimated"):
+            FACTS.learn_speed(evt["model"], evt["decode_tok_s"])     # the router ranks fast roles by it
 
 
 def install_cli():
@@ -2468,12 +2727,13 @@ def runner():
         _RUNNER.append(runnermod.Runner(types.SimpleNamespace(
             registry=GW, caps_for=caps_for, facts=FACTS, mcp=mcp_host, trace=TRACE,
             record_usage=record_usage, sessions=SESSIONS,
+            learn_outcome=FACTS.learn_outcome,          # the router's card: how often a model's requests fail
             on_session=lambda summary: BUS.publish("sessions", "updated", summary),
             skill_bodies=lambda names: skill_catalog().bodies(names),
             write_archive=write_archive, uploads_root=uploads_root, engine_stats=engine_stats,
             default_model=default_model, approvals=APPROVALS, client_results=CLIENT_RESULTS,
             tool_policy=lambda: CFG.get("tool_policy") or {}, always_allow=always_allow,
-            terminal_tools=terminal_tools, terminal_call=terminal_call)))
+            terminal_tools=terminal_tools, terminal_call=terminal_call, guard=rulesmod.guard)))
     return _RUNNER[0]
 
 
@@ -2488,6 +2748,644 @@ def new_session_id():
 def uuid_hex(n):
     import uuid
     return uuid.uuid4().hex[:n]
+
+
+# ------------------------------------------------------- persistent agents --
+# An agent is a folder (agentstore.py) with a purpose, rules, a budget and a
+# memory. What wakes it becomes a line in its inbox; the dispatcher
+# (dispatch.py) turns the line into one run with models the router (router.py)
+# picks from what is live, and sends the answer back where the ask came from.
+DISPATCH = None
+CHANNELS = {}                    # kind -> channel (channels/): how a reply leaves the app
+_RECIPES = {"at": 0, "list": []}
+
+
+def live_models():
+    """[{id, gateway, served}]: what the gateways list, with a router's dead routes marked,
+    and a model whose engine a monitor says is not answering (a gate can go on listing a
+    model whose engine died behind it)."""
+    GW.refresh(force=time.time() - GW.at > 10)
+    serving = MON.serving()
+    dead = set()
+    for n in (MON.latest(120) or {}).get("nodes") or []:
+        sv = n.get("serving") if isinstance(n.get("serving"), dict) else None
+        if not sv or n.get("ok") is False or isinstance(n.get("starting"), dict) and n["starting"].get("state") == "loading":
+            continue
+        engines = [e for e in n.get("engines") or [] if e.get("kind") != "openai"]
+        if not any(e.get("ok", True) for e in engines):
+            dead.update(x for x in (sv.get("gateway_name"), sv.get("served_name")) if x)
+    out = []
+    for m in GW.models:
+        base = m.get("base_id") or m["id"]
+        served = base not in dead
+        if served and serving:
+            served = base in serving or (GW.status.get(m["gateway"]) or {}).get("kind") not in ("litellm",)
+        out.append({"id": m["id"], "gateway": m["gateway"], "served": served})
+    return out
+
+
+def router_cards():
+    """A capability card per model this app knows: the live ones, and the ones seen before."""
+    serving = MON.serving()
+    live = live_models()
+    FACTS.seen_live([m["id"] for m in live if m["served"]])
+    for name, sv in serving.items():
+        if sv.get("recipe"):
+            FACTS.note_serving(sv["recipe"], [sv.get("gateway_name"), sv.get("served_name")],
+                               rack=(racks() or [{}])[0].get("name"))
+    ids = [m["id"] for m in live] + [k for k, v in FACTS.facts.items()
+                                     if not k.startswith("@") and isinstance(v.get("card"), dict)]
+    cards = {}
+    for mid in ids:
+        if mid in cards:
+            continue
+        base = mid.rsplit("@", 1)[0]
+        sv = serving.get(mid) or serving.get(base) or {}
+        cards[mid] = routermod.card(mid, caps_for(mid), FACTS.card(mid), roles=sv.get("roles") or (),
+                                    served_by=[m["gateway"] for m in live if m["id"] == mid])
+    return cards
+
+
+def router_live(recipes=False):
+    """What answers now, what is loading, how busy each model is, and (asked
+    only when a role has no model: it sshes) the recipes a rack could serve."""
+    live = live_models()
+    now = time.time()
+    starting = []
+    for s in MON.starting():
+        s = dict(s)
+        if s.get("started_at"):
+            try:
+                s["minutes"] = max(0.0, (now - float(s["started_at"])) / 60.0)
+            except (TypeError, ValueError):
+                pass
+        starting.append(s)
+    load = {}
+    for r in RUNS.active():
+        for mid in set(filter(None, [r.meta.get("model")] + list((r.meta.get("models") or {}).values()))):
+            load.setdefault(mid, {"running": 0, "waiting": 0})["running"] += 1
+    out = {"models": live, "starting": starting, "load": load, "recipes": [], "last_recipe": FACTS.last_serving()}
+    if recipes and racks():
+        if now - _RECIPES["at"] > 600:
+            found = []
+            for r in racks():
+                ov = rack_overview(r["name"], max_age=600)
+                for x in ov.get("recipes") or []:
+                    found.append({"name": x.get("name"), "rack": r["name"], "roles": x.get("roles") or [],
+                                  "fits": x.get("fits"), "model": x.get("model")})
+            _RECIPES.update(at=now, list=found)
+        out["recipes"] = list(_RECIPES["list"])
+    return out
+
+
+def monitors_fresh():
+    """The monitors' serving and starting blocks, asked again when they are older than ten seconds."""
+    if MON.list():
+        try:
+            MON.cluster(0, max_age=10)
+        except Exception:   # noqa: BLE001 - a monitor that is away is a rack we know less about
+            pass
+
+
+def agent_plan(agent, wake=None, shape="chat"):
+    """The router's plan for one run of this agent: a model per role, or the move when one is missing."""
+    monitors_fresh()
+    roles = ("master",) if shape == "chat" else routermod.ROLES
+    pins = {r: v for r, v in (agent.get("roles") or {}).items() if v and v != "auto"}
+    needs = {r: dict(n) for r, n in (agent.get("needs") or {}).items()}
+    if any((a or {}).get("kind") == "image" for a in (wake or {}).get("attachments") or []):
+        needs.setdefault("master", {})["vision"] = True     # the ask carries a picture
+    order = ((agent.get("rules") or {}).get("on_missing") or {}).get(shape)
+    if order is None and shape == "chat" and str((wake or {}).get("source") or "app").split(":", 1)[0] in (
+            "schedule", "mail", "poller", "folder"):
+        order = routermod.ORDER["background"]       # nobody is waiting: a model that is loading is worth the wait
+    a = CFG.get("agents") or {}
+    slots = {e["model"]: e.get("slots") for e in (a.get("minion_pool") or []) if isinstance(e, dict) and e.get("model")}
+    cards = router_cards()
+    plan = routermod.route(roles, needs, cards, router_live(), shape=shape, order=order, pins=pins, slots=slots)
+    if not plan["ok"] and plan.get("move") == "park" and "ask" in (order or routermod.ORDER[shape]) and racks():
+        # nothing live fits: is there a recipe that would? (this asks the rack, so only now)
+        plan = routermod.route(roles, needs, cards, router_live(recipes=True), shape=shape, order=order, pins=pins,
+                               slots=slots)
+    return plan
+
+
+def agent_chat(run, emit, sid, req):
+    """One chat turn for an agent on the runner: (result, the finished message)."""
+    out = {}
+    res = runner().turn(run, emit, sid, dict(req), out=out)
+    return res, out.get("message") or {}
+
+
+def _agent_court(agent):
+    """The court for an agent's goal: its own when it has one, else the app's roles and limits
+    with this agent's own grants; its folders go to the keeper of the treasury unless its
+    court says who reads them."""
+    own = agent.get("court")
+    base = own or (CFG.get("agents") or {}).get("court") or {}
+    court = json.loads(json.dumps(base)) if base else {}
+    access = agent.get("access") or {}
+    folders = dict(access.get("folders") or {})
+    servers = [s for s in access.get("mcp_servers") or [] if s not in jobs_servers()]
+    if not own:
+        # the app's court gives this agent its roles and limits, never its grants: an agent's workers read
+        # the folders and use the MCP servers the agent was given, not the ones set for the owner's own goals
+        court["access"] = {"folders": {}, "mcp_servers": servers}
+        for r in (court.get("roles") or {}).values():
+            if isinstance(r, dict):
+                # (a role names tools as server__tool or server__*: what counts is whose server it is)
+                for key, ok in (("data", lambda x: x in folders), ("mcp", lambda x: str(x).split("__", 1)[0] in servers),
+                                ("write_tools", lambda x: str(x).split("__", 1)[0] in servers)):
+                    if r.get(key):
+                        r[key] = [x for x in r[key] if ok(x)]
+    if folders:
+        acc = court.setdefault("access", {"folders": {}, "mcp_servers": []})
+        acc.setdefault("folders", {}).update(folders)
+        roles = court.setdefault("roles", {})
+        if not any((r or {}).get("data") for r in roles.values()):
+            roles.setdefault("khazin", {})["data"] = sorted(folders)
+    # the app's own servers (jobs, the terminal) act as the owner on this computer: out of any agent's
+    # court, also one the agent was given as its own
+    mine = own_servers()
+    acc = court.get("access")
+    if mine and isinstance(acc, dict) and acc.get("mcp_servers"):
+        acc["mcp_servers"] = [s for s in acc["mcp_servers"] if s not in mine]
+    for r in (court.get("roles") or {}).values():
+        if mine and isinstance(r, dict):
+            for key in ("mcp", "write_tools"):
+                if r.get(key):
+                    r[key] = [x for x in r[key] if str(x).split("__", 1)[0] not in mine]
+    return court
+
+
+def agent_goal_for(run, emit, agent, wake, plan, text, hooks, memory=""):
+    """A persistent agent's goal through the court: (result, answer)."""
+    aid = agent["id"]
+    peers = [{"id": a["id"], "name": a["name"], "purpose": a["purpose"][:300]} for a in AGENTS.list()
+             if a["id"] != aid and a.get("enabled", True) and a["id"] != dispatchmod.CONCIERGE]
+    ctx = {"id": aid, "name": agent["name"], "purpose": agent["purpose"], "memory": memory,
+           "instructions": (agent.get("instructions") or "").strip(), "skills": list(agent.get("skills") or []),
+           "peers": peers, "hop": int(wake.get("hop") or 0), "source": dispatchmod.describe_source(wake),
+           "home": AGENTS.home_volume(aid), "egress": list((agent.get("rules") or {}).get("egress") or [])}
+    minutes = rulesmod.minutes_run(agent.get("budget"))
+    res, lines = agent_goal(run, emit, text, via="agent:" + aid, agent={
+        "id": aid, "ctx": ctx, "models": plan.get("roles") or {}, "court": _agent_court(agent),
+        "name": agent["name"], "timeout_s": max(300, minutes * 60), "hooks": hooks})
+    answer = res.get("answer") or ""
+    if not answer and res.get("ok"):
+        if res.get("keyed"):
+            # a harness that signs says its answer as an event. Its other lines are a log (what its models
+            # wrote, among other things): never shown as the answer. A goal with none is a failure that says so
+            res = dict(res, ok=False, error="the goal ended without an answer")
+        else:
+            answer = "\n".join(lines[-40:])             # a harness from before events
+    return res, answer
+
+
+def agents_rack_status(probe=False):
+    """What the rack serves, for an agent's rack_status tool: the monitors' own numbers."""
+    if probe:
+        return bool(MON.list())
+    if not MON.list():
+        return {"error": "no rack monitor is connected to this app"}
+    d = MON.cluster(0, max_age=10)
+    nodes = []
+    # one engine can run across several nodes; only its head carries the serving block
+    shared = {}
+    for n in d.get("nodes") or []:
+        sv = n.get("serving") if isinstance(n.get("serving"), dict) else {}
+        for other in sv.get("nodes") or []:
+            if other != n.get("name"):
+                shared[other] = {"recipe": sv.get("recipe"), "with": n.get("name"),
+                                 "note": "one engine across these nodes; it answers on %s" % n.get("name")}
+    for n in d.get("nodes") or []:
+        disks = [{"mount": x.get("mount"), "used_pct": round(100.0 * x["used"] / x["total"], 1),
+                  "free_gb": round((x["total"] - x["used"]) / 1e9, 1)}
+                 for x in n.get("disks") or [] if x.get("total")]
+        mem = n.get("mem") or {}
+        sv, st = n.get("serving") or {}, n.get("starting") or {}
+        serving = {k: sv.get(k) for k in ("recipe", "gateway_name", "served_name", "model", "context", "nodes") if sv.get(k)}
+        if sv.get("started_at"):
+            serving["since"] = sv["started_at"]
+        nodes.append({
+            "name": n.get("name"), "role": n.get("role"), "ok": n.get("ok", True), "error": n.get("error"),
+            "serving": serving or shared.get(n.get("name")),
+            "starting": {k: st.get(k) for k in ("state", "recipe", "gateway_name", "started_at", "error") if st.get(k)} or None,
+            "engines": [{"kind": e.get("kind"), "models": e.get("models"), "ok": e.get("ok", True),
+                         "running": e.get("running"), "waiting": e.get("waiting"), "gen_tps": e.get("gen_tps"),
+                         "error": e.get("error")} for e in n.get("engines") or []],
+            "disks": disks, "mem_used_gb": round(mem["used"] / 1e9, 1) if mem.get("used") else None,
+            "mem_total_gb": round(mem["total"] / 1e9, 1) if mem.get("total") else None,
+            "gpu_util": [g.get("util") for g in n.get("gpus") or []],
+            "uptime_h": round((n.get("system") or {}).get("uptime_s") / 3600.0, 1) if (n.get("system") or {}).get("uptime_s") else None})
+    return {"at": time.strftime("%Y-%m-%d %H:%M"), "nodes": nodes,
+            "monitors": [{"name": m.get("name"), "ok": m.get("ok"), "error": m.get("error")} for m in d.get("monitors") or []],
+            "models_live": [m["id"] for m in live_models() if m["served"]]}
+
+
+def agents_can_switch():
+    return bool(racks())
+
+
+def agents_court_ready():
+    """Whether an agent's work can go to the court: a worker is set up and its harness knows
+    agents that persist. One that predates them cannot be given an agent's egress list, its
+    memory tools or its home, so an agent answers in one turn until the worker is updated."""
+    a = CFG.get("agents") or {}
+    if not (agentmod.status(CFG).get("enabled") and a.get("dir")):
+        return False
+    caps = agents_caps_known()
+    return bool(caps.get("agent") and caps.get("spec"))
+
+
+_caps_asking = threading.Event()
+
+
+def agents_caps_known():
+    """What is known of the worker's harness, for the dispatcher: it asks at every goal it looks
+    at, and must not wait on a worker that is slow to answer. A worker over ssh whose answer is
+    old, or that did not answer last time, is asked beside it; only one never asked is asked here."""
+    a = CFG.get("agents") or {}
+    ssh = (a.get("ssh") or "").strip()
+    if not ssh or not (a.get("harness") or agentmod.caps_asked(ssh)):
+        return agents_caps()
+    if agentmod.caps_due(CFG) and not _caps_asking.is_set():
+        _caps_asking.set()
+
+        def ask():
+            try:
+                agents_caps()
+            except Exception:   # noqa: BLE001 - what was known stands
+                pass
+            finally:
+                _caps_asking.clear()
+        threading.Thread(target=ask, name="worker-caps", daemon=True).start()
+    return dict(a.get("harness") or {})
+
+
+def agents_rack_switch(recipe, rack=None, emit=None):
+    """rack switch <recipe> on a rack this app drives, as a run of its own: (ok, the end of its output)."""
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", recipe or ""):
+        return False, "bad recipe name"
+    r = rack_named(rack) if rack else (racks() or [None])[0]
+    if r is None:
+        return False, "this app drives no rack: add one on the Deploy screen"
+    try:
+        argv = rack_cmd(["switch", recipe], r)
+    except (racksmod.PairError, ValueError) as e:
+        return False, str(e)
+    _rack_cache.pop(r["name"], None)
+    done = {}
+
+    def work(run):
+        captured = []
+
+        def on_line(text):
+            text = _ANSI.sub("", text)
+            if len(captured) < 2000:
+                captured.append(text)
+            RUNS.emit(run, "out", {"line": text})
+            if emit:
+                emit({"line": "rack: " + text})
+        RUNS.emit(run, "out", {"phase": "start", "host": r["ssh"], "rack": r["name"], "cmd": "rack switch " + recipe})
+        try:
+            code, killed = agentmod.run_streaming(argv, ROOT, on_line, run.cancel_event, timeout_s=3600)
+        except Exception as e:   # noqa: BLE001
+            captured.append(str(e))
+            code, killed = -1, "error"
+        RUNS.emit(run, "out", {"phase": "done", "exit": code, "killed": killed})
+        TRACE.log("rack", action="switch", recipe=recipe, rack=r["name"], host=r["ssh"], exit=code, run=run.id,
+                  killed=killed or False, output=captured[-200:], by=auditmod.actor())
+        done.update(ok=code == 0, text="\n".join(captured[-12:]))
+        return {"ok": code == 0, "exit": code, "error": None if code == 0 else "rack switch exited %s" % code}
+    try:
+        run = RUNS.start("rack", auditmod.actor(), work, title="rack switch %s on %s" % (recipe, r["name"]),
+                         meta={"action": "switch", "recipe": recipe, "rack": r["name"], "host": r["ssh"]},
+                         key="rack:" + r["ssh"])
+    except runsmod.Busy as e:
+        return False, "the rack is already being changed (%s)" % e.run.id
+    run.done_event.wait(3700)
+    return bool(done.get("ok")), done.get("text") or "no output"
+
+
+def agent_file_job(spec):
+    """A job an agent files for itself (schedule_job in a chat turn): {name, prompt, schedule, agent}."""
+    sched = str(spec.get("schedule") or "").strip()
+    m = re.match(r"^every\s+(\d+)\s*(m|min|minutes?|h|hours?|d|days?)$", sched, re.I)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)[0].lower()
+        schedule = {"kind": "interval", "every_min": max(1, min(10080, n * (1 if unit == "m" else 60 if unit == "h" else 1440)))}
+    elif len(sched.split()) == 5:
+        schedule = {"kind": "cron", "cron": " ".join(sched.split())}
+    else:
+        raise ValueError("schedule must be 5-field cron or 'every N m|h|d'")
+    agent_job_room(spec.get("agent"))
+    job = JOBS.upsert({"name": spec.get("name"), "prompt": spec.get("prompt"), "schedule": schedule, "kind": "agent",
+                       "agent": spec.get("agent"), "created_by": spec.get("created_by") or "agents",
+                       # filed in a run that began with content nobody vouches for: off, with the reason
+                       "enabled": spec.get("enabled", True), "reason": spec.get("reason") or ""})
+    TRACE.log("job", action="filed_by_agent", id=job["id"], name=job["name"], schedule=job["schedule"],
+              job_kind=job["kind"], by=job["created_by"])
+    BUS.publish("jobs", "saved", {"id": job["id"], "by": job["created_by"]})
+    return dict(job, schedule_text=jobmod.describe_schedule(job))
+
+
+AGENT_JOBS_MAX = 20
+
+
+def agent_job_room(aid):
+    """An agent files a bounded number of jobs for itself (one run cannot fill the Jobs screen and
+    its own inbox with a job a minute): ValueError past it."""
+    n = sum(1 for j in JOBS.jobs if j.get("created_by") == "agents:%s" % aid and not _agent_job_ids(aid or "").match(j["id"]))
+    if n >= AGENT_JOBS_MAX:
+        raise ValueError("it has filed %d jobs already, which is the most it may: delete one on the Jobs screen first" % n)
+
+
+def sync_agent_jobs(agent):
+    """An agent's cron and interval wakes are jobs (the scheduler fires them; firing writes an
+    inbox line). One job per entry of its wake list, named by its place in it."""
+    aid = agent["id"]
+    want = {}
+    for i, w in enumerate(agent.get("wake") or []):
+        if w.get("kind") not in ("cron", "interval"):
+            continue
+        prompt = str(w.get("prompt") or "")
+        sched = {"kind": "cron", "cron": w.get("cron")} if w["kind"] == "cron" else {"kind": "interval", "every_min": w.get("every_min")}
+        want["agent-%s-w%d" % (aid, i)] = {
+            "id": "agent-%s-w%d" % (aid, i), "name": "%s: %s" % (agent["name"], " ".join(prompt.split())[:50]),
+            "kind": "agent", "prompt": prompt, "schedule": sched, "agent": aid, "created_by": "agents:" + aid,
+            "enabled": bool(agent.get("enabled", True)) and w.get("enabled") is not False, "goal": w.get("shape") or ""}
+    changed = False
+    mine = _agent_job_ids(aid)
+    for j in list(JOBS.jobs):
+        if mine.match(j["id"]) and j["id"] not in want:
+            JOBS.delete(j["id"])
+            changed = True
+    for jid, spec in want.items():
+        old = JOBS.get(jid)
+        if not old or any(old.get(k) != spec[k] for k in ("name", "prompt", "schedule", "enabled", "goal")):
+            try:
+                JOBS.upsert(spec)
+                changed = True
+            except (ValueError, TypeError) as e:
+                # a schedule written by hand that the scheduler cannot read: said, and the rest goes on
+                TRACE.log("agents", action="agent.schedule.bad", id=aid, job=jid, error=str(e)[:200])
+    if changed:
+        BUS.publish("jobs", "saved", {"by": "agents:" + aid})
+
+
+def _agent_job_ids(aid):
+    """The ids of one agent's own schedule jobs: agent-<id>-w<n>, and no other agent's (agent "ops"
+    must not match the jobs of agent "ops-weekly")."""
+    return re.compile(r"^agent-%s-w\d+$" % re.escape(aid))
+
+
+def drop_agent_jobs(aid):
+    """An agent that is gone wakes no more: its schedule's jobs go, the ones it filed are paused."""
+    mine = _agent_job_ids(aid)
+    for j in list(JOBS.jobs):
+        if mine.match(j["id"]):
+            JOBS.delete(j["id"])
+        elif j.get("agent") == aid:
+            JOBS.set_enabled(j["id"], False)
+    BUS.publish("jobs", "saved", {"by": "agents:" + aid})
+
+
+def wake_from_job(job, trigger):
+    """A job that names an agent fired: one line in that agent's inbox. Returns the wake, or
+    None when its last wake is still waiting (recorded as missed for a cron job)."""
+    agent = AGENTS.get(job.get("agent") or "")
+    now = time.time()
+    if agent is None:
+        JOBS.record_run(job["id"], {"ts": now, "trigger": trigger, "kind": "agent", "ok": False, "ms": 0, "output": "",
+                                    "error": "its agent %r is gone: delete the job, or make the agent again" % job.get("agent")})
+        return None
+    JOBS.mark_fired(job["id"], now)
+    # Run now does what the schedule would, report on the agent's channel included; only its source
+    # differs (you asked, so quiet hours do not hold it back)
+    w = AGENTS.wake(agent["id"], "schedule" if trigger == "schedule" else "app", job.get("prompt") or "",
+                    reply=dispatchmod.default_reply(agent),
+                    trust="owner", dedupe="job:" + job["id"], dedupe_s=0, job=job["id"], trigger=trigger,
+                    shape=job.get("goal") if job.get("goal") in ("chat", "goal") else None, title=job.get("name"))
+    if w is None:
+        if (job.get("schedule") or {}).get("kind") != "interval":
+            JOBS.record_miss(job["id"], {"ts": now, "trigger": trigger, "kind": "agent", "ok": False, "ms": 0,
+                                         "output": "", "error": "missed: its last wake had not run yet"})
+        return None
+    if DISPATCH is not None:
+        DISPATCH.kick()
+    return w
+
+
+def agent_always_allow(aid, name, hosts=()):
+    """"Always allow" on an agent's request: that tool, for that agent, from now on."""
+    a = AGENTS.get(aid)
+    if a is None:
+        return
+    before = list((a.get("rules") or {}).get("egress") or [])
+    r = rulesmod.always(a.get("rules"), name, hosts)
+    AGENTS.save({"id": aid, "rules": r}, create=False)
+    AUDIT.record("agents", "agent.rules.always_allow", aid, True, tool=name,
+                 egress_added=[h for h in r.get("egress") or [] if h not in before])
+
+
+def tool_level(name):
+    """A tool's own policy, before any agent's rules: config tool_policy, else what the tool says of itself."""
+    try:
+        ann = mcp_host().tool_annotations(name)
+    except Exception:   # noqa: BLE001
+        ann = {}
+    return approvalsmod.policy_for(name, ann, [CFG.get("tool_policy") or {}])
+
+
+def dispatcher():
+    """The dispatcher, built on first use (serve() starts its thread)."""
+    global DISPATCH
+    if DISPATCH is None:
+        import types
+        from datetime import datetime
+
+        def now():
+            return datetime.now().strftime("%A, %B %d, %Y, %H:%M") + " local time"
+
+        def mcp_tools():
+            try:
+                return mcp_host().openai_tools()
+            except Exception:   # noqa: BLE001 - no tools is better than no answer
+                return []
+
+        def annotations(name):
+            try:
+                return mcp_host().tool_annotations(name)
+            except Exception:   # noqa: BLE001
+                return {}
+        DISPATCH = dispatchmod.Dispatcher(types.SimpleNamespace(
+            store=AGENTS, runs=RUNS, bus=BUS, audit=AUDIT, trace=TRACE, approvals=APPROVALS,
+            client_results=CLIENT_RESULTS, cfg=lambda: CFG, plan=agent_plan, chat=agent_chat, goal=agent_goal_for,
+            goals_enabled=agents_court_ready, goal_slot_free=goal_slot_free,
+            channels=CHANNELS, mcp_tools=mcp_tools, tool_annotations=annotations, tool_level=tool_level,
+            shell_tools=terminal_tools, owner_servers=jobs_servers,
+            rack_status=agents_rack_status, rack_switch=agents_rack_switch,
+            can_switch=agents_can_switch, file_job=agent_file_job,
+            live_ids=lambda: [m["id"] for m in live_models() if m["served"]],
+            skill_names=lambda: skill_catalog().names(), record_job=JOBS.record_run, now=now))
+    return DISPATCH
+
+
+# ---------------------------------------------------------------- channels --
+# How a wake reaches an agent from outside the app, and how its reply leaves
+# (channels/): Telegram, mail, feed pollers, a drop folder, the rack monitors.
+# Every one of them pulls; nothing here listens on a port.
+TICKER = None
+TELEGRAM = MAIL = POLLERS = FOLDERS = RACKWATCH = None
+
+
+def channel_wake(agent_id, source, text, reply=None, **kw):
+    """A source outside the app wakes an agent: a reply left unsaid goes to its default channel."""
+    agent = AGENTS.get(agent_id)
+    if agent is None:
+        return None
+    w = AGENTS.wake(agent_id, source, text, reply=reply or dispatchmod.default_reply(agent), **kw)
+    if w is not None and DISPATCH is not None:
+        DISPATCH.kick()
+    return w
+
+
+def agent_save_file(agent_id, name, data):
+    """A file that came in for an agent (a chat, a drop folder), kept among the uploads: an attachment."""
+    import mimetypes
+    info = save_upload("ag-" + agent_id, name, data)
+    mime = mimetypes.guess_type(info["name"])[0] or "application/octet-stream"
+    return dict(info, mime=mime, kind="image" if mime.startswith("image/") else "file")
+
+
+def rack_cluster():
+    """The monitors' answer for the rack watch, or None when this app watches no monitor: none
+    is set, or every one is switched off. That is nothing to watch, which is not an outage."""
+    return MON.cluster(0, max_age=10) if any(m.get("enabled", True) for m in MON.list()) else None
+
+
+def mail_accounts():
+    acc = ((CFG.get("channels") or {}).get("mail") or {}).get("accounts") or {}
+    return {n: a for n, a in acc.items() if isinstance(a, dict) and a.get("host") and a.get("user")}
+
+
+def nightly_tidy(now=None):
+    """Once a night: each agent's memory loses its duplicates, and the facts read from
+    mail or the web are listed for the owner's review."""
+    now = now if now is not None else time.time()
+    lt = time.localtime(now)
+    day = time.strftime("%Y-%m-%d", lt)
+    st = channelsmod.State(os.path.join(DATA, "channels"), "tidy")
+    if lt.tm_hour < 3 or st.get("day") == day:
+        return 900
+    for a in AGENTS.list():
+        try:
+            r = AGENTS.tidy(a["id"])
+            with open(os.path.join(AGENTS.dir(a["id"]), "tidy.json"), "w", encoding="utf-8") as f:
+                json.dump(dict(r, at=round(now)), f)
+            if r["merged"] or r["review"]:
+                AUDIT.record("agents", "agent.memory.tidy", a["id"], True, who="agent:" + a["id"],
+                             merged=len(r["merged"]), review=r["review"][:20])
+        except Exception as e:   # noqa: BLE001 - one agent's folder must not stop the others' tidy
+            TRACE.log("dispatch", note="tidy %s: %s" % (a["id"], e))
+    st.set("day", day)
+    return 900
+
+
+def start_channels():
+    """Build the channels and start their threads (serve() calls it once)."""
+    global TICKER, TELEGRAM, MAIL, POLLERS, FOLDERS, RACKWATCH
+    if TICKER is not None:
+        return
+    import types
+    root = os.path.join(DATA, "channels")
+    log = lambda text: TRACE.log("channels", note=str(text)[:400])
+
+    def cancel(agent_id):
+        going = DISPATCH.active(agent_id) if DISPATCH else []
+        for r in going:
+            RUNS.cancel(r.id)
+        return bool(going)
+
+    def new_thread(agent_id, chat):
+        sid = "ag-%s-tg%s" % (agent_id, str(chat).replace("-", "m"))
+        if SESSIONS.get(sid) is not None:
+            SESSIONS.delete(sid)
+            BUS.publish("sessions", "deleted", {"id": sid})
+
+    def remember(agent_id, fact, name):
+        try:
+            AGENTS.remember(agent_id, fact, "project", "the rack monitor", name=name)
+        except storemod.AgentError:
+            pass
+    TELEGRAM = tgmod.Telegram(types.SimpleNamespace(
+        store=AGENTS, state=channelsmod.State(root, "telegram"), bus=BUS, approvals=APPROVALS, audit=AUDIT,
+        token=lambda: VAULT.secret("telegram"), ask=lambda agent_id, text, **kw: dispatcher().ask(agent_id, text, **kw),
+        save_file=agent_save_file, cancel=cancel, new_thread=new_thread, log=log))
+    MAIL = mailmod.Mail(types.SimpleNamespace(
+        store=AGENTS, state=channelsmod.State(root, "mail"), accounts=mail_accounts,
+        password=lambda name: VAULT.secret("mail:" + name), wake=channel_wake, audit=AUDIT, log=log))
+    POLLERS = pollmod.Pollers(types.SimpleNamespace(
+        store=AGENTS, state=channelsmod.State(root, "pollers"), wake=channel_wake, log=log,
+        git_token=lambda host: (VAULT.git_token(host) or {}).get("token")))
+    FOLDERS = foldermod.Folders(types.SimpleNamespace(
+        store=AGENTS, state=channelsmod.State(root, "folders"), wake=channel_wake, save_file=agent_save_file, log=log))
+    RACKWATCH = rackmod.RackWatch(types.SimpleNamespace(
+        store=AGENTS, state=channelsmod.State(root, "rack"), wake=channel_wake, remember=remember, log=log,
+        cluster=rack_cluster,
+        last_recipe=lambda: FACTS.last_serving().get("recipe") or ""))
+    CHANNELS.update(telegram=TELEGRAM, mail=MAIL)
+    cap = _int(os.environ.get("BYTEBUNKER_POLL_CAP_S"), 0)
+    TICKER = channelsmod.Ticker(log=log, step=0.5 if cap else 2.0, cap=cap or None)
+    for name, fn, first in (("mail", MAIL.poll, 5), ("pollers", POLLERS.poll, 7), ("folders", FOLDERS.poll, 3),
+                            ("rack", RACKWATCH.poll, 4), ("tidy", nightly_tidy, 30)):
+        TICKER.add(name, fn, first_in=first)
+    TELEGRAM.start()
+    TICKER.start()
+
+
+def channels_status():
+    """What the Channels card shows: what is connected, what is watched, what went wrong. No secret in it."""
+    tick = TICKER.status() if TICKER else {}
+    accounts = []
+    for n, a in sorted((((CFG.get("channels") or {}).get("mail") or {}).get("accounts") or {}).items()):
+        accounts.append(dict({k: a.get(k) for k in ("host", "port", "user", "folder", "ssl", "smtp_host", "smtp_port", "from")},
+                             name=n, has_password=bool(VAULT.secret("mail:" + n)), error=(MAIL.errors.get(n) if MAIL else None)))
+    watched = []
+    for a in AGENTS.list():
+        for w in a.get("wake") or []:
+            if w.get("kind") in ("mail", "poller", "folder", "rack"):
+                watched.append({"agent": a["id"], "kind": w["kind"], "what": w.get("what") or "",
+                                "where": w.get("url") or w.get("repo") or w.get("path") or ", ".join(w.get("from") or w.get("events") or [])})
+    return {"telegram": TELEGRAM.status() if TELEGRAM else {"connected": False, "chats": [], "pending": []},
+            "mail": {"accounts": accounts}, "watched": watched,
+            "errors": dict(((POLLERS.errors if POLLERS else {}) or {}), **((FOLDERS.errors if FOLDERS else {}) or {})),
+            "rack": {"error": RACKWATCH.error if RACKWATCH else None, "monitors": len(MON.list())},
+            "pollers": {n: {"error": t["error"], "last": t["last"]} for n, t in tick.items()},
+            "github": bool(VAULT.git_token("github.com"))}
+
+
+def goal_runs():
+    """Goals going on the worker now: the Agents screen's, a job's, and the agents' own."""
+    return [r for r in RUNS.active() if r.kind == "agents" or (r.kind == "agent" and r.meta.get("shape") == "goal")]
+
+
+def agent_detail(aid):
+    """Everything the Agents screen shows about one agent."""
+    a = AGENTS.get(aid)
+    if a is None:
+        return None
+    try:
+        plan = agent_plan(a, None, "goal" if a.get("shape") == "goal" else "chat")
+        routing = {"ok": plan["ok"], "roles": plan.get("roles"), "move": plan.get("move"), "why": plan.get("why"),
+                   "degraded": plan.get("degraded"), "lines": routermod.explain(plan)}
+    except Exception as e:   # noqa: BLE001 - the screen still opens when a gateway is away
+        routing = {"ok": False, "error": str(e)[:200], "lines": []}
+    return {"agent": a, "summary": AGENTS.summary(aid), "memory": AGENTS.memory(aid), "inbox": AGENTS.inbox(aid, 60),
+            "runs": AGENTS.runs(aid, 40), "rules": rulesmod.table(a.get("rules")), "routing": routing,
+            "jobs": [j for j in JOBS.list() if j.get("agent") == aid],
+            "home": AGENTS.home_volume(aid), "folder": AGENTS.dir(aid)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2621,6 +3519,8 @@ class Handler(BaseHTTPRequestHandler):
         if not what:
             return
         cat, action, target, detail = what
+        # a request's own "target", "ok" or "who" is detail here, never the audit line's
+        detail = {("req_" + k if k in ("target", "ok", "who", "category", "action") else k): v for k, v in detail.items()}
         ok = self._code < 400
         if not ok and self._audit_reply:
             detail["error"] = str(self._audit_reply.get("error") or "")[:300]
@@ -3369,7 +4269,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/profiles":
             self._json({"profiles": profiles(), "default": CFG.get("default_profile") or "Default"})
         elif path == "/api/approvals":
-            self._json({"pending": APPROVALS.list()})
+            # each with what it is about in words, the same words the phone shows
+            self._json({"pending": [dict(a, words=approvalsmod.words(a)) for a in APPROVALS.list()]})
         elif path == "/api/workflows":
             self._json({"workflows": {n: dict(w, params=workflow_params(w)) for n, w in workflows().items()}})
         elif path == "/api/help":
@@ -3410,6 +4311,8 @@ class Handler(BaseHTTPRequestHandler):
             st["unserved"] = {k: a[k] for k in ("master_model", "thinking_model", "slave_model")
                               if (a.get(k) or "").strip() and not model_served(a[k].strip())}
             st["minion_slots"] = a.get("minion_slots") or 4
+            st["parallel_goals"] = max(1, min(8, _int(a.get("parallel_goals"), 2)))
+            st["agents_parallel"] = max(1, min(16, _int(CFG.get("agents_parallel"), 3)))
             # the engines a run's minions would spread over now, as the run spec would name them
             st["pool_engines"] = [{k: e[k] for k in ("name", "model", "slots")}
                                   for e in minion_pool(a, a.get("slave_model") or (CFG.get("roles") or {}).get("fast"),
@@ -3427,6 +4330,66 @@ class Handler(BaseHTTPRequestHandler):
                                  "lines": e.get("lines"), "host": e.get("host")})
             st["recent"] = runs[-40:][::-1]
             self._json(st)
+        elif path == "/api/agents/list":
+            rows = [AGENTS.summary(a["id"]) for a in AGENTS.list()]
+            live = {r.meta.get("agent"): r.id for r in (DISPATCH.active() if DISPATCH else [])}
+            for r in rows:
+                r["run"] = live.get(r["id"])
+            goals = bool(agentmod.status(CFG).get("enabled"))
+            ac = CFG.get("agents") or {}
+            # known once asked (a goal, Test, Work here); a harness on this computer is read on the spot
+            caps = {} if not goals else (ac.get("harness") or {}) if (ac.get("ssh") or "").strip() or not ac.get("dir") \
+                else agentmod.harness_caps(CFG)
+            self._json({"agents": rows, "classes": rulesmod.CLASS_HELP, "defaults": rulesmod.DEFAULTS,
+                        "budget": rulesmod.DEFAULT_BUDGET, "goals": goals,
+                        # a worker whose harness predates persistent agents still runs their goals, on
+                        # what it is told in its instructions: no memory tools, no home, no browser
+                        "court_agent": bool(caps.get("agent")) if caps else None,
+                        "channels": sorted(CHANNELS), "seq": BUS.seq})
+        elif path == "/api/agents/agent":
+            aid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
+            d = agent_detail(aid) if storemod.ID.match(aid) else None
+            if d is None:
+                self._json({"error": "no agent %r" % aid}, 404)
+            else:
+                self._json(d)
+        elif path == "/api/agents/answer":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            aid, rid = (q.get("id") or [""])[0], (q.get("run") or [""])[0]
+            text = AGENTS.answer(aid, rid) if storemod.ID.match(aid) and AGENTS.get(aid) else None
+            if text is None:
+                self._json({"error": "no answer kept for that run"}, 404)
+            else:
+                self._json({"id": aid, "run": rid, "text": text})
+        elif path == "/api/agents/wake":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            aid, wid = (q.get("id") or [""])[0], (q.get("wake") or [""])[0]
+            w = AGENTS.get_wake(aid, wid) if storemod.ID.match(aid) and AGENTS.get(aid) else None
+            if w is None:
+                self._json({"error": "no such wake"}, 404)
+            else:
+                if w.get("run") and w.get("state") in ("done", "error"):
+                    w = dict(w, answer=AGENTS.answer(aid, w["run"]))
+                self._json({"wake": w})
+        elif path == "/api/agents/home":
+            aid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
+            if not storemod.ID.match(aid) or AGENTS.get(aid) is None:
+                self._json({"error": "no agent %r" % aid}, 404)
+            else:
+                self._json(dict(agentmod.home_info(CFG, AGENTS.home_volume(aid)), name=AGENTS.home_volume(aid)))
+        elif path == "/api/agents/router":
+            # what the router knows, and what "auto" would pick now for a role's default needs
+            monitors_fresh()                    # the same look a run gets: what a model can do comes from its serving block
+            cards = router_cards()
+            live = router_live()
+            plans = {shape: routermod.route(routermod.ROLES if shape == "goal" else ("master",), {}, cards, live, shape=shape)
+                     for shape in ("chat", "goal")}
+            self._json({"cards": sorted(cards.values(), key=lambda c: c["model"]),
+                        "live": [m["id"] for m in live["models"] if m["served"]], "starting": live["starting"],
+                        "plans": {k: dict(v, lines=routermod.explain(v)) for k, v in plans.items()},
+                        "defaults": routermod.DEFAULT_NEEDS})
+        elif path == "/api/channels":
+            self._json(channels_status())
         elif path == "/api/agents/court":
             a = CFG.get("agents") or {}
             self._json({"defaults": agentmod.COURT_DEFAULTS, "court": a.get("court") or {"roles": {}},
@@ -3451,10 +4414,13 @@ class Handler(BaseHTTPRequestHandler):
                             "host": found.get("host"), "ts": found.get("ts")})
         elif path == "/api/agents/slaves":
             # the goal on screen is the running one, when the harness named it (BB_RUN)
-            going = RUNS.active("agents")
-            out = agentmod.recent_slaves(CFG, goal_id=going[0].meta.get("goal_id") if going else None)
+            want = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("run", [""])[0]
+            going = [r for r in goal_runs() if not want or r.id == want]
+            out = agentmod.recent_slaves(CFG, goal_id=(going[0].meta.get("goal_id") or going[0].id) if going
+                                         else (want if re.match(r"^[A-Za-z0-9._-]{1,80}$", want) else None))
             out["running"] = bool(going)             # whether the master is working now, not just its last events
             out["progress"] = going[0].meta.get("progress") if going else None
+            out["goals"] = [{"run": r.id, "title": r.title, "agent": r.meta.get("agent")} for r in goal_runs()]
             self._json(out)
         elif path == "/api/agents/stats":
             self._json(agentmod.stats(CFG))
@@ -3657,7 +4623,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/git", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave",
+                        "/api/plugins", "/api/git", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave", "/api/agents/agent", "/api/channels",
                         "/api/update/apply", "/api/projects", "/api/terminal", "/api/audit", "/api/handoff"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
@@ -3736,6 +4702,16 @@ class Handler(BaseHTTPRequestHandler):
                     if not j:
                         self._json({"error": "no such job"}, 404)
                         return
+                    if j.get("agent"):
+                        # a job that wakes an agent: the wake is queued, and the dispatcher runs it
+                        w = wake_from_job(j, "manual")
+                        if w is None:
+                            self._json({"error": "its agent is gone, or its last wake has not run yet"}, 409)
+                            return
+                        w = dispatcher().wait_started(j["agent"], w["id"], 8) or w
+                        self._json({"ok": True, "started": j["id"], "agent": j["agent"], "wake": w["id"],
+                                    "run": w.get("run"), "state": w.get("state"), "why": w.get("why")})
+                        return
                     try:
                         run = launch_job(j, "manual")
                     except runsmod.Busy as e:
@@ -3790,6 +4766,10 @@ class Handler(BaseHTTPRequestHandler):
             self._machines_admin(body)
         elif path == "/api/agents":
             self._agents_run(body)
+        elif path == "/api/agents/agent":
+            self._agent_admin(body)
+        elif path == "/api/channels":
+            self._channels_admin(body)
         elif path == "/api/agents/slave":
             if not isinstance(body, dict) or body.get("action") != "kill":
                 self._json({"error": "expected {action: kill, id}"}, 400)
@@ -3980,7 +4960,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "court": court})
             return
         if body.get("action") == "wrapup":
-            going = [r for r in RUNS.active("agents") if getattr(r, "wrap_event", None) is not None]
+            going = [r for r in goal_runs() if getattr(r, "wrap_event", None) is not None
+                     and (not body.get("run") or r.id == body.get("run"))]
             if not going:
                 self._json({"error": "no goal is running"}, 409)
                 return
@@ -4030,6 +5011,7 @@ class Handler(BaseHTTPRequestHandler):
                 save_config()
                 TRACE.log("agents", action="setup", ssh=ssh, dir=d)
                 res["enabled"] = True
+            keep_worker_caps(res, ssh, d)                 # Test asks again, as it says
             self._json(res)
             return
         if body.get("action") == "config":
@@ -4064,6 +5046,16 @@ class Handler(BaseHTTPRequestHandler):
                     a["minion_slots"] = max(1, min(64, int(body["minion_slots"])))
                 except (TypeError, ValueError):
                     pass
+            if body.get("parallel_goals") is not None:
+                try:
+                    a["parallel_goals"] = max(1, min(8, int(body["parallel_goals"])))
+                except (TypeError, ValueError):
+                    pass
+            if body.get("agents_parallel") is not None:
+                try:
+                    CFG["agents_parallel"] = max(1, min(16, int(body["agents_parallel"])))
+                except (TypeError, ValueError):
+                    pass
             if body.get("run_timeout_s") is not None:
                 try:
                     # 5 min .. 24 h; a multi-step goal on one Spark is a 1-2 h affair
@@ -4093,6 +5085,241 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._run_streamed("agents", goal.strip()[:120] or "agents goal",
                            lambda run, emit: agent_goal(run, emit, goal)[0], key="agents", meta={"project": pid})
+
+    def _agent_admin(self, body):
+        """POST /api/agents/agent {action, ...}: the persistent agents.
+        save | create {agent}; delete | enable | disable {id}; ask {id?, text};
+        remember {id, fact, type, source, name?}; forget {id, name}; tidy {id};
+        cancel_wake {id, wake}; new_thread {id}; reset_home {id}; card {model, fields}."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = str(body.get("action") or "save")
+        ag = body.get("agent")
+        aid = str(body.get("id") or (ag.get("id") if isinstance(ag, dict) else ag if isinstance(ag, str) else "")
+                  or "").strip().lower()
+        try:
+            if action in ("save", "create"):
+                raw = body.get("agent") if isinstance(body.get("agent"), dict) else {k: v for k, v in body.items() if k != "action"}
+                if isinstance(raw.get("court"), dict) and raw["court"]:
+                    raw = dict(raw, court=agentmod.clean_court(raw["court"]))
+                mine = str(raw.get("id") or "").strip().lower()
+                for c in raw.get("channels") or []:
+                    if isinstance(c, dict) and c.get("kind") == "telegram":
+                        other = next((a["id"] for a in AGENTS.list() if a["id"] != mine and any(
+                            x.get("kind") == "telegram" and str(x.get("chat")) == str(c.get("chat")) for x in a.get("channels") or [])), None)
+                        if other:
+                            raise storemod.AgentError("Telegram chat %s already belongs to %s: a chat is bound to one agent" % (c.get("chat"), other))
+                rec = AGENTS.save(raw, create=True if action == "create" else None)
+                sync_agent_jobs(rec)
+                TRACE.log("agents", action="agent." + action, id=rec["id"])
+                dispatcher().kick()                         # (a changed budget releases what the old one held, at this look)
+                self._json({"ok": True, "agent": rec})
+                return
+            if action == "card":
+                model = str(body.get("model") or "").strip()
+                if not model or not isinstance(body.get("fields"), dict):
+                    self._json({"error": "expected {model, fields}"}, 400)
+                    return
+                bad = [k for k, v in body["fields"].items()
+                       if (k == "tier" and v not in (None, "") + tuple(routermod.TIER))
+                       or (k == "speed" and v not in (None, "") + tuple(routermod.SPEED))]
+                if bad:
+                    self._json({"error": "tier is big, medium or small; speed is fast, medium or slow"}, 400)
+                    return
+                self._json({"ok": True, "card": FACTS.set_card(model, body["fields"])})
+                return
+            if action == "ask":
+                text = str(body.get("text") or "").strip()
+                if not text and not body.get("attachments"):
+                    self._json({"error": "nothing to ask"}, 400)
+                    return
+                if aid and AGENTS.get(aid) is None:
+                    self._json({"error": "no agent %r" % aid}, 404)
+                    return
+                src = "cli" if self._client() == "cli" else "app"
+                reply = {"kind": src}
+                if body.get("thread") and re.match(r"^[A-Za-z0-9._-]{1,40}$", str(body["thread"])):
+                    reply["thread"] = str(body["thread"])
+                extra = {}
+                if body.get("shape") in ("chat", "goal"):
+                    extra["shape"] = body["shape"]
+                if isinstance(body.get("attachments"), list):
+                    extra["attachments"] = body["attachments"][:16]
+                d = dispatcher()
+                w = d.ask(aid or None, text, source=src, reply=reply, trust="owner", **extra)
+                agent_id = aid or dispatchmod.CONCIERGE
+                # the client follows a run: wait a moment for the dispatcher to start it (or say why not)
+                w = d.wait_started(agent_id, w["id"], timeout=float(body.get("wait") or 8)) or w
+                self._json({"ok": True, "agent": agent_id, "wake": w["id"], "state": w.get("state"),
+                            "run": w.get("run"), "why": w.get("why"), "not_before": w.get("not_before")}, 202)
+                return
+            a = AGENTS.get(aid) if storemod.ID.match(aid) else None
+            if a is None:
+                self._json({"error": "no agent %r" % aid}, 404)
+                return
+            if action == "delete":
+                going = DISPATCH.active(aid) if DISPATCH else []
+                for r in going:
+                    RUNS.cancel(r.id)
+                kept = AGENTS.delete(aid)
+                drop_agent_jobs(aid)
+                TRACE.log("agents", action="agent.delete", id=aid, kept=kept)
+                self._json({"ok": True, "kept": kept})
+            elif action in ("enable", "disable"):
+                rec = AGENTS.save({"id": aid, "enabled": action == "enable"}, create=False)
+                sync_agent_jobs(rec)
+                dispatcher().kick()
+                self._json({"ok": True, "agent": rec})
+            elif action == "remember":
+                f = AGENTS.remember(aid, body.get("fact"), body.get("type") or "user",
+                                    str(body.get("source") or "").strip() or "the owner said", name=body.get("name") or None)
+                self._json({"ok": True, "fact": f})
+            elif action == "forget":
+                ok = AGENTS.forget(aid, body.get("name"))
+                self._json({"ok": ok, "error": None if ok else "no fact named %r" % body.get("name")}, 200 if ok else 404)
+            elif action == "tidy":
+                self._json(dict(AGENTS.tidy(aid), ok=True))
+            elif action == "cancel_wake":
+                w = AGENTS.get_wake(aid, str(body.get("wake") or ""))
+                if w is None:
+                    self._json({"error": "no such wake"}, 404)
+                elif w.get("state") == "running" and w.get("run"):
+                    self._json({"ok": RUNS.cancel(w["run"]), "run": w["run"]})
+                elif w.get("state") in storemod.OPEN_STATES:
+                    AGENTS.set_state(aid, w["id"], "dropped", why="cancelled by %s" % self._client())
+                    self._json({"ok": True})
+                else:
+                    self._json({"error": "that wake has already ended"}, 409)
+            elif action == "reset_home":
+                if DISPATCH and DISPATCH.active(aid):
+                    self._json({"error": "%s is working: reset its home when it is idle" % a["name"]}, 409)
+                    return
+                res = agentmod.home_reset(CFG, AGENTS.home_volume(aid))
+                TRACE.log("agents", action="agent.reset_home", id=aid, ok=res.get("ok"))
+                self._json(res, 200 if res.get("ok") else 502)
+            elif action == "new_thread":
+                # the conversation with this agent in the app starts over (its memory stays)
+                gone = 0
+                for sid in ("ag-%s-app" % aid, "ag-%s-cli" % aid):
+                    if SESSIONS.get(sid) is not None:
+                        SESSIONS.delete(sid)
+                        BUS.publish("sessions", "deleted", {"id": sid})
+                        gone += 1
+                self._json({"ok": True, "cleared": gone})
+            else:
+                self._json({"error": "unknown action"}, 400)
+        except (storemod.AgentError, ValueError) as e:
+            self._json({"error": str(e)}, 400)
+
+    def _channels_admin(self, body):
+        """POST /api/channels {action, ...}: telegram_connect {token} | telegram_disconnect |
+        telegram_bind {chat, agent} | telegram_unbind {chat} | telegram_forget {chat} |
+        mail_save {name, account, password?} | mail_test {name} | mail_remove {name}.
+        A token or a password goes to the vault and never comes back out."""
+        if not isinstance(body, dict):
+            self._json({"error": "expected object"}, 400)
+            return
+        action = str(body.get("action") or "")
+        try:
+            if action == "telegram_connect":
+                token = str(body.get("token") or "").strip()
+                if not re.match(r"^\d{5,16}:[A-Za-z0-9_-]{20,80}$", token):
+                    self._json({"error": "that does not look like a bot token (BotFather gives one like 123456:ABC...)"}, 400)
+                    return
+                try:
+                    me = TELEGRAM.check(token)
+                except tgmod.TelegramError as e:
+                    self._json({"error": "Telegram did not accept it: %s" % e}, 400)
+                    return
+                VAULT.set_secret("telegram", token)
+                TELEGRAM.connected(token, me)             # known now, and listening now
+                self._json({"ok": True, "bot": {"username": me.get("username"), "name": me.get("first_name")}})
+            elif action == "telegram_disconnect":
+                VAULT.delete_secret("telegram")
+                self._json({"ok": True})
+            elif action in ("telegram_bind", "telegram_unbind"):
+                chat = str(body.get("chat") or "").strip()
+                if not re.match(r"^-?\d{1,20}$", chat):
+                    self._json({"error": "a chat is its numeric id"}, 400)
+                    return
+                target = str(body.get("agent") or "").strip().lower()
+                if action == "telegram_bind":
+                    if target == dispatchmod.CONCIERGE:
+                        dispatcher().concierge()             # made on the spot: a chat for asks to no one in particular
+                    if AGENTS.get(target) is None:
+                        self._json({"error": "no agent %r" % target}, 404)
+                        return
+                for a in AGENTS.list():                       # a chat belongs to one agent
+                    chans = [c for c in a.get("channels") or [] if not (c.get("kind") == "telegram" and str(c.get("chat")) == chat)]
+                    if action == "telegram_bind" and a["id"] == target:
+                        chans = chans + [{"kind": "telegram", "chat": chat}]
+                    if chans != (a.get("channels") or []):
+                        AGENTS.save({"id": a["id"], "channels": chans}, create=False)
+                self._json({"ok": True, "telegram": TELEGRAM.status()})
+            elif action == "telegram_forget":
+                chat = str(body.get("chat") or "")
+                TELEGRAM.d.state.update(lambda d: (d.get("seen") or {}).pop(chat, None))
+                self._json({"ok": True})
+            elif action in ("mail_save", "mail_test", "mail_remove"):
+                name = str(body.get("name") or "default").strip().lower()
+                if not re.match(r"^[a-z][a-z0-9-]{0,31}$", name):
+                    self._json({"error": "an account's name is lower-case letters, digits and -"}, 400)
+                    return
+                accounts = CFG.setdefault("channels", {}).setdefault("mail", {}).setdefault("accounts", {})
+                if action == "mail_remove":
+                    accounts.pop(name, None)
+                    VAULT.delete_secret("mail:" + name)
+                    save_config()
+                    self._json({"ok": True})
+                    return
+                if action == "mail_save":
+                    raw = body.get("account") if isinstance(body.get("account"), dict) else {}
+                    acct = {"host": str(raw.get("host") or "").strip()[:200], "user": str(raw.get("user") or "").strip()[:200],
+                            "folder": str(raw.get("folder") or "INBOX").strip()[:120], "ssl": raw.get("ssl", True) is not False}
+                    for k in ("port", "smtp_port"):
+                        if raw.get(k) not in (None, ""):
+                            acct[k] = max(1, min(65535, int(raw[k])))
+                    for k in ("smtp_host", "from", "smtp_user"):
+                        if raw.get(k):
+                            acct[k] = str(raw[k]).strip()[:200]
+                    if not acct["host"] or not acct["user"]:
+                        self._json({"error": "a mailbox needs its IMAP host and its user"}, 400)
+                        return
+                    before = accounts.get(name) or {}
+                    # the kept password is for the servers it was typed for: it is never sent anywhere else,
+                    # which a first SMTP host, another port or a connection without TLS would be
+                    moved = bool(before) and any(before.get(k) != acct.get(k) for k in (
+                        "host", "port", "user", "ssl", "smtp_host", "smtp_port", "smtp_user"))
+                    password = str(body.get("password") or "") or ("" if moved else VAULT.secret("mail:" + name))
+                    if not password and moved:
+                        self._json({"error": "the server or the user changed: type the password again"}, 400)
+                        return
+                    if not password:
+                        self._json({"error": "a password (for most providers, an app password) is needed"}, 400)
+                        return
+                    try:
+                        res = MAIL.test(name, acct, password)
+                    except Exception as e:   # noqa: BLE001 - whatever the mailbox said, the person reads it
+                        self._json({"error": "could not open the mailbox: %s" % str(e)[:200]}, 400)
+                        return
+                    accounts[name] = acct
+                    VAULT.set_secret("mail:" + name, password)
+                    save_config()
+                    self._json(dict(res, ok=True, name=name))
+                    return
+                acct = accounts.get(name)
+                if not acct:
+                    self._json({"error": "no mail account named %r" % name}, 404)
+                    return
+                try:
+                    self._json(MAIL.test(name, acct, VAULT.secret("mail:" + name) or ""))
+                except Exception as e:   # noqa: BLE001
+                    self._json({"ok": False, "error": str(e)[:200]})
+            else:
+                self._json({"error": "unknown action"}, 400)
+        except (storemod.AgentError, ValueError) as e:
+            self._json({"error": str(e)}, 400)
 
     def _rack(self, body):
         """show <recipe>: the files the recipe runs; up/down/logs/status/bench:
@@ -5116,6 +6343,13 @@ def serve(bind=None, port=None, idle_exit=None):
     import mcp as mcpmod
     mcpmod.APP_TOKEN = local_token()
     start_scheduler()
+    for a in AGENTS.list():
+        try:
+            sync_agent_jobs(a)               # an agent.json edited by hand: its schedule follows
+        except Exception as e:   # noqa: BLE001 - one agent's file never keeps the app from starting
+            TRACE.log("agents", action="agent.schedule.bad", id=a.get("id"), error="%s: %s" % (type(e).__name__, str(e)[:200]))
+    dispatcher().start()                     # inboxes into runs, runs into replies
+    start_channels()                         # Telegram, mail, feeds, a drop folder, the rack: all of them pull
     threading.Thread(target=watch_models, name="models", daemon=True).start()
     if idle_exit:
         threading.Thread(target=watch_idle, args=(int(idle_exit),), name="idle", daemon=True).start()
@@ -5173,6 +6407,9 @@ def watch_idle(limit_s):
     while not STOPPING.wait(max(1, min(30, limit_s // 4))):
         if CFG.get("keep_running") or _LISTENING[0] > 0 or RUNS.active():
             IDLE["last"] = time.time()
+            continue
+        if any(a.get("enabled", True) and (a.get("wake") or AGENTS.pending(a["id"])) for a in AGENTS.list()):
+            IDLE["last"] = time.time()           # an agent waits on a schedule or a wake: someone must be here
             continue
         if time.time() - IDLE["last"] >= limit_s:
             TRACE.log("server", action="idle_exit", idle_s=int(time.time() - IDLE["last"]))
@@ -5276,6 +6513,11 @@ def release_instance():
     if not STOPPING.is_set():
         STOPPING.set()
         BUS.publish("system", "stopping")        # wakes every stream's wait
+        if DISPATCH is not None:
+            DISPATCH.stop()
+        for ch in (TICKER, TELEGRAM):
+            if ch is not None:
+                ch.stop()
     if INSTANCE is not None:
         INSTANCE.release()
         INSTANCE = None

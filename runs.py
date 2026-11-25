@@ -133,14 +133,15 @@ class RunRegistry:
                         raise Busy(r)
             self.runs[run.id] = run
             self.order.append(run.id)
-            while len(self.order) > self.keep:
-                old = self.order.pop(0)
-                r = self.runs.get(old)
-                if r and r.state in FINAL:
-                    self.runs.pop(old, None)
-                else:
-                    self.order.insert(0, old)
-                    break
+            if len(self.order) > self.keep:
+                # the oldest finished ones go; one still going stays, and does not hold back the ones behind it
+                extra = len(self.order) - self.keep
+                gone = [i for i in self.order if self.runs.get(i) is None or self.runs[i].state in FINAL][:extra]
+                if gone:
+                    drop = set(gone)
+                    self.order = [i for i in self.order if i not in drop]
+                    for i in gone:
+                        self.runs.pop(i, None)
 
         def body():
             audit.set_actor(source)          # what this run changes is the doing of whoever started it

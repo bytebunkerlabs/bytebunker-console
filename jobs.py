@@ -1,7 +1,9 @@
 """Scheduled jobs — the console wakes up on a schedule and has the model work.
 
-A job is a prompt (a chat turn, with the console's tools and skills if asked)
-or a goal for the agent harness, run on a cron expression or every N minutes.
+A job is a prompt (a chat turn, with the console's tools and skills if asked),
+a goal for the agent harness, or a wake for one of your agents (the job names
+it, and firing writes a line in its inbox), run on a cron expression or every
+N minutes.
 Jobs live in data/jobs.json; every run appends one line to data/jobs/<id>.jsonl
 with its output, so the Jobs screen shows what the model did and when.
 
@@ -191,8 +193,14 @@ class JobStore:
             "params": {str(k)[:40]: str(v)[:2000] for k, v in (spec.get("params") or {}).items()}
             if isinstance(spec.get("params"), dict) else {},
             "profile": str(spec.get("profile") or "")[:40],
+            # a job that names an agent wakes it: the prompt becomes a line in its inbox
+            "agent": str(spec.get("agent") or "")[:32],
             "created": None, "last_run": None, "runs": 0,
         }
+        if job["agent"]:
+            job["kind"] = "agent"
+            if not prompt:
+                raise ValueError("a job that wakes an agent needs a prompt")
         with self._lock:
             old = next((j for j in self.jobs if j["id"] == job["id"]), None)
             if old is None and not spec.get("id"):
@@ -203,6 +211,9 @@ class JobStore:
                     return dict(old)
             if old:
                 job["created"] = old.get("created"); job["last_run"] = old.get("last_run"); job["runs"] = old.get("runs", 0)
+                if "agent" not in spec and old.get("agent"):
+                    # an edit from a form that does not know about agents: the job still wakes its agent
+                    job["agent"], job["kind"] = old["agent"], "agent"
                 self.jobs[self.jobs.index(old)] = job
             else:
                 job["created"] = time.time()
@@ -227,6 +238,15 @@ class JobStore:
                 if j["id"] == jid:
                     j["enabled"] = bool(on)
             self._save()
+
+    def mark_fired(self, jid, ts):
+        """A job whose firing only queues work (it woke an agent): the schedule moves on now,
+        and the run is recorded when the work ends."""
+        with self._lock:
+            job = next((j for j in self.jobs if j["id"] == jid), None)
+            if job is not None:
+                job["last_run"] = ts
+                self._save()
 
     def record_run(self, jid, rec):
         with self._lock:

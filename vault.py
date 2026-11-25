@@ -1,8 +1,9 @@
 """vault.py — a 0600 store for credentials the app keeps but must never show,
 log or export, and the git auth that uses them.
 
-Today it holds one kind of secret: a token per git host (github.com, gitlab.com,
-a self-hosted host...), used to clone and pull private plugin repos over https.
+It holds a token per git host (github.com, gitlab.com, a self-hosted host...),
+used to clone and pull private plugin repos over https, and named secrets the
+agents' channels need (a Telegram bot token, a mailbox password).
 Tokens never leave the app: the API returns only which hosts are connected and
 the user name when known, never the token. A token reaches git through
 a credential helper fed from the environment, never the remote URL — which would persist in
@@ -99,6 +100,35 @@ class Vault:
         g = self._read().get("git_hosts", {})
         return [{"host": h, "user": r.get("user", ""), "kind": r.get("kind", "pat")}
                 for h, r in sorted(g.items()) if isinstance(r, dict) and r.get("token")]
+
+
+    # -- named secrets: a channel's bot token, a mailbox password --
+    def set_secret(self, name: str, value: str) -> None:
+        name = (name or "").strip()
+        if not name or not value:
+            raise ValueError("a name and a value are required")
+        with self._lock:
+            d = self._read()
+            d.setdefault("secrets", {})[name] = str(value)
+            self._write(d)
+
+    def secret(self, name: str):
+        """The value, for the app's own use: it never leaves through the API."""
+        v = self._read().get("secrets", {}).get(name)
+        return v if isinstance(v, str) and v else None
+
+    def delete_secret(self, name: str) -> bool:
+        with self._lock:
+            d = self._read()
+            if name in d.get("secrets", {}):
+                d["secrets"].pop(name)
+                self._write(d)
+                return True
+            return False
+
+    def secret_names(self) -> list:
+        """Which secrets are set: the names only."""
+        return sorted(n for n, v in self._read().get("secrets", {}).items() if isinstance(v, str) and v)
 
 
 # --------------------------------------------------------------- git auth ---

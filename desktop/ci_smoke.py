@@ -5,9 +5,10 @@
 
 Checks the things a broken bundle gets wrong: static files present, the
 desktop first-run config, bundled skills, the built-in jobs MCP server
-started through the app itself (--mcp) and calling back to it, and the
+started through the app itself (--mcp) and calling back to it, the
 Cluster screen's path: a (fake) rack monitor added with its token, read
-back through the server, feeding the engine-busy hint."""
+back through the server, feeding the engine-busy hint, and the agents that
+persist: an agent, its memory, the router, the channels and their guides."""
 import json
 import os
 import sys
@@ -143,8 +144,33 @@ checks.append(("monitor: engine stats", engine.get("ok") is True and engine.get(
 post("/api/monitors", {"action": "remove", "name": added.get("name", "")})
 mon.shutdown()
 
+# Agents that persist: the store, the rules, the router, the dispatcher and the channels are
+# modules a bundle can leave out, and their guides are files it can
+info = json.loads(get("/api/agents/list")[1])
+checks.append(("agents: rules and defaults", (info.get("defaults") or {}).get("outward") == "ask" and "spend" in (info.get("classes") or {})))
+made = post("/api/agents/agent", {"action": "create", "agent": {"id": "smoke", "purpose": "Checks the bundle.", "rules": {"egress": ["example.com"]}}})
+post("/api/agents/agent", {"action": "remember", "id": "smoke", "fact": "the bundle has its agents", "type": "project", "source": "ci"})
+one = json.loads(get("/api/agents/agent?id=smoke")[1])
+checks.append(("agents: an agent and its memory", (made.get("agent") or {}).get("id") == "smoke" and len(one.get("memory") or []) == 1
+               and one["agent"]["rules"].get("egress") == ["example.com"]))
+plan = json.loads(get("/api/agents/router")[1])
+checks.append(("agents: the router answers", isinstance(plan.get("cards"), list) and "chat" in (plan.get("plans") or {})))
+ch = json.loads(get("/api/channels")[1])
+checks.append(("agents: channels, none connected", ch.get("telegram", {}).get("connected") is False and ch.get("mail", {}).get("accounts") == []))
+asked = post("/api/agents/agent", {"action": "ask", "id": "smoke", "text": "are you there?"})
+wake = {}
+for _ in range(60):                       # no model in a fresh install: the wake is kept, with the reason
+    wake = json.loads(get("/api/agents/wake?id=smoke&wake=%s" % asked.get("wake"))[1]).get("wake") or {}
+    if wake.get("state") in ("parked", "error", "done"):
+        break
+    time.sleep(0.25)
+checks.append(("agents: an ask with no model waits", wake.get("state") == "parked" and bool(wake.get("why"))))
+post("/api/agents/agent", {"action": "delete", "id": "smoke"})
+guides = [g.get("id") for g in json.loads(get("/api/help")[1]).get("guides", [])]
+checks.append(("agents: their guides", all(g in guides for g in ("agents", "agent-rules", "agent-channels"))))
+
 for name, ok in checks:
-    print("%-28s %s" % (name, "ok" if ok else "FAIL"))
+    print("%-36s %s" % (name, "ok" if ok else "FAIL"))
 if not all(ok for _, ok in checks):
     print("servers:", json.dumps(servers))
     sys.exit(1)

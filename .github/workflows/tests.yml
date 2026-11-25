@@ -29,3 +29,19 @@ jobs:
         run: python -m compileall -q -x "desktop/(build|dist|\.venv)" .
       - name: Unit and API tests
         run: python -m unittest discover -s tests -v
+
+  # What the unit tests cannot say: the agents layer under load for a few minutes (memory, threads and open files
+  # flat, no secret in what it wrote or said), and the mail channel against real servers, Dovecot and Postfix over TLS.
+  real:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Soak (three agents on their schedules and channels)
+        run: python tests/soak.py --minutes 3 --rate 2
+      - name: Real mail servers on this runner
+        run: BB_THROWAWAY_MACHINE=1 bash tests/real/mail_setup.sh
+      - name: Mail in over IMAP, a run, a reply out over SMTP
+        run: BB_THROWAWAY_MACHINE=1 python tests/real/mail_check.py .

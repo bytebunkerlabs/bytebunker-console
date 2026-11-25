@@ -92,7 +92,8 @@ def test_worker(ssh, directory, python="uv run", script="scripts/run_master.py")
              "echo FLAGS: $(grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null | sort -u | tr '\\n' ' ')"
              "$([ -f src/bytebunker_agents/harness/tool_broker.py ] && echo ' --access')"
              "$([ -f src/bytebunker_agents/harness/engine_pool.py ] && echo ' --pool')"
-             "$(grep -q plan_effort src/bytebunker_agents/runspec.py 2>/dev/null && echo ' --plan'); "
+             "$(grep -q plan_effort src/bytebunker_agents/runspec.py 2>/dev/null && echo ' --plan')"
+             "$(grep -q agent_context src/bytebunker_agents/runspec.py 2>/dev/null && echo ' --agentctx'); "
              "uname -sm") % (_rq(d), shlex.quote(script), python.split()[0], shlex.quote(script))
     try:
         r = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
@@ -121,7 +122,8 @@ def _caps_from(text):
     """What a harness's run_master.py understands, from its own text."""
     return {"goal_id": "--goal-id" in text, "proto2": "--proto" in text, "spec": "--spec" in text,
             "timeout": "--timeout-s" in text, "court": "--court" in text, "access": "--access" in text,
-            "pool": "--pool" in text, "plan": "--plan" in text, "checked": round(time.time())}
+            "pool": "--pool" in text, "plan": "--plan" in text, "agent": "--agentctx" in text,
+            "checked": round(time.time())}
 
 
 # The Sultan's court as the harness defines it (slaves/archetypes.py): what
@@ -295,17 +297,44 @@ def shareable_mcp(mcp_servers):
     return out
 
 
+CAPS_TTL_S = 3600      # a worker over ssh is asked again after this long: a harness updated there by hand is seen within the hour
+CAPS_RETRY_S = 600     # ... and one that did not answer is not asked again at every goal
+_caps_failed = {}      # ssh -> when asking last failed
+
+
+def caps_asked(ssh):
+    """Whether this worker was asked before and did not answer."""
+    return ssh in _caps_failed
+
+
+def caps_due(CFG):
+    """Whether a worker over ssh is to be asked what its harness can do: nothing is known or it
+    is over an hour old, and it was not asked in vain in the last ten minutes (also when
+    nothing is known at all: a worker that is away is not asked at every look)."""
+    a = agent_cfg(CFG)
+    ssh = (a.get("ssh") or "").strip()
+    if not ssh:
+        return True
+    cached, now = a.get("harness") or {}, time.time()
+    if now - _caps_failed.get(ssh, 0) < CAPS_RETRY_S:
+        return False
+    return not cached or now - (cached.get("checked") or 0) >= CAPS_TTL_S
+
+
 def harness_caps(CFG, refresh=False):
-    """The worker's harness abilities, asked once and remembered in config
-    (agents.harness); Test asks again. An older harness gets the old flags."""
+    """The worker's harness abilities, remembered in config (agents.harness). A worker over ssh
+    is asked when nothing is known, when what is known is over an hour old, and by Test and Work
+    here; one that cannot be reached keeps what was known. An older harness gets the old flags."""
     a = agent_cfg(CFG)
     script = (a.get("script") or "scripts/run_master.py").strip()
     directory = (a.get("dir") or "").strip()
     ssh = (a.get("ssh") or "").strip()
-    # a worker over ssh is asked once (Test asks again); a harness on this computer
-    # is read every time, a few file reads, so updating it is seen at once
-    if a.get("harness") and not refresh and ssh:
-        return a["harness"]
+    # a harness on this computer is read every time, a few file reads, so updating it is seen at once
+    cached = a.get("harness") or {}
+    # (with nothing known the worker is asked: this is a goal about to start there, or Test. What must not
+    # wait on a worker at every look, the dispatcher, asks through the server's agents_caps_known)
+    if ssh and cached and not refresh and not caps_due(CFG):
+        return cached
     text = ""
     try:
         if ssh:
@@ -313,10 +342,18 @@ def harness_caps(CFG, refresh=False):
             probe = ("cd %s && { grep -o -E -- '--(goal-id|proto|spec|timeout-s|court)' %s 2>/dev/null; "
                      "[ -f src/bytebunker_agents/harness/tool_broker.py ] && echo --access; "
                      "[ -f src/bytebunker_agents/harness/engine_pool.py ] && echo --pool; "
-                     "grep -q plan_effort src/bytebunker_agents/runspec.py 2>/dev/null && echo --plan; } | sort -u") % (
+                     "grep -q plan_effort src/bytebunker_agents/runspec.py 2>/dev/null && echo --plan; "
+                     "grep -q agent_context src/bytebunker_agents/runspec.py 2>/dev/null && "
+                     "grep -q proto_key src/bytebunker_agents/runspec.py 2>/dev/null && echo --agentctx; } | sort -u") % (
                 _rq(directory or "~/bytebunker-harness"), shlex.quote(script))
-            text = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
-                                  capture_output=True, text=True, timeout=20).stdout
+            r = subprocess.run(ssh_base() + ["-o", "ConnectTimeout=8", ssh, probe],
+                               capture_output=True, text=True, timeout=20)
+            if r.returncode != 0 and not (r.stdout or "").strip():
+                # it could not be asked just now (ssh, or its folder): what was known stands
+                _caps_failed[ssh] = time.time()
+                return cached
+            _caps_failed.pop(ssh, None)
+            text = r.stdout
         else:
             with open(os.path.join(os.path.expanduser(directory), script), encoding="utf-8", errors="replace") as f:
                 text = f.read()
@@ -327,21 +364,31 @@ def harness_caps(CFG, refresh=False):
             try:
                 with open(os.path.join(os.path.expanduser(directory), "src", "bytebunker_agents", "runspec.py"),
                           encoding="utf-8", errors="replace") as f:
-                    if "plan_effort" in f.read():
-                        text += "\n--plan"
+                    spec_src = f.read()
+                if "plan_effort" in spec_src:
+                    text += "\n--plan"
+                # (a harness knows agents when it takes their context and signs its protocol lines with
+                # the run's key: one with the first and not the second is treated as one from before agents)
+                if "agent_context" in spec_src and "proto_key" in spec_src:
+                    text += "\n--agentctx"
             except OSError:
                 pass
     except Exception:   # noqa: BLE001 - unknown means the old flags
-        return {}
+        if ssh:
+            _caps_failed[ssh] = time.time()
+        return cached if ssh else {}
     a["harness"] = _caps_from(text)
     return a["harness"]
 
 
-def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None, wrap_file=None):
+def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None, wrap_file=None,
+                  instructions=None, master_name=None, timeout_s=None, models=None):
     """Return an argv list to spawn. Raises AgentConfigError when the feature
     is off or unconfigured. The goal is never interpolated into a shell
     unquoted: locally it is its own argv element; over SSH it is shlex-quoted
-    inside the single remote command string."""
+    inside the single remote command string. instructions, master_name,
+    timeout_s and models ({master, thinking, fast}) are this one run's, over
+    the Agents screen's (a persistent agent's goal)."""
     a = agent_cfg(CFG)
     if not a.get("enabled"):
         raise AgentConfigError(
@@ -366,7 +413,7 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None,
     if caps.get("goal_id") and run_id and re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", run_id):
         extra += ["--goal-id", run_id]
     if caps.get("timeout"):
-        extra += ["--timeout-s", str(max(60, agent_timeout(CFG) - 30))]
+        extra += ["--timeout-s", str(max(60, int(timeout_s or agent_timeout(CFG)) - 30))]
     if caps.get("proto2"):
         extra += ["--proto", "2"]
     if caps.get("spec") and spec_path and not ssh:
@@ -380,16 +427,20 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None,
     envs = {"PYTHONUNBUFFERED": "1"}
     if wrap_file:
         envs["BYTEBUNKER_WRAP_FILE"] = wrap_file      # local: the app writes it when you press Wrap up
-    if (a.get("master_name") or "").strip():
-        envs["BYTEBUNKER_MASTER_NAME"] = a["master_name"].strip()
-    if (a.get("master_instructions") or "").strip():
-        envs["BYTEBUNKER_MASTER_INSTRUCTIONS"] = a["master_instructions"].strip()
-    # which engine each role uses — chosen on the Agents screen, overriding the
-    # worker's config.yaml for this run only
-    for key, env in (("master_model", "BYTEBUNKER_MASTER_MODEL"), ("thinking_model", "BYTEBUNKER_THINKING_MODEL"),
-                     ("slave_model", "BYTEBUNKER_SLAVE_MODEL")):
-        if (a.get(key) or "").strip():
-            envs[env] = a[key].strip()
+    name = (master_name if master_name is not None else a.get("master_name") or "").strip()
+    if name:
+        envs["BYTEBUNKER_MASTER_NAME"] = name
+    said = (instructions if instructions is not None else a.get("master_instructions") or "").strip()
+    if said:
+        envs["BYTEBUNKER_MASTER_INSTRUCTIONS"] = said[:60000]
+    # which engine each role uses — chosen on the Agents screen (or by the router, for an
+    # agent's run), overriding the worker's config.yaml for this run only
+    for key, env, role in (("master_model", "BYTEBUNKER_MASTER_MODEL", "master"),
+                           ("thinking_model", "BYTEBUNKER_THINKING_MODEL", "thinking"),
+                           ("slave_model", "BYTEBUNKER_SLAVE_MODEL", "fast")):
+        chosen = ((models or {}).get(role) or a.get(key) or "").strip()
+        if chosen:
+            envs[env] = chosen.rsplit("@", 1)[0] if "@" in chosen and models else chosen
 
     if ssh:
         # one remote command string; every interpolated value is quoted. A
@@ -1061,6 +1112,57 @@ def mirror_skills_dir(CFG, skills_dir):
         return {"pushed": True, "where": dest, "skills": names}
     except Exception as e:   # noqa: BLE001
         return {"pushed": False, "reason": str(e)[:160]}
+
+
+_HOME_NAME = re.compile(r"^bb-agent-[a-z][a-z0-9-]{0,31}$")
+_HOME_DIR = 'D="${BYTEBUNKER_HOMES:-${XDG_DATA_HOME:-$HOME/.local/share}/bytebunker/homes}/%s"; '
+
+
+def _worker_sh(CFG, script, timeout=30):
+    ssh = (agent_cfg(CFG).get("ssh") or "").strip()
+    cmd = ssh_base() + ["-o", "ConnectTimeout=8", ssh, script] if ssh else ["sh", "-c", script]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def home_info(CFG, name):
+    """An agent's persistent home on the worker: how much it holds. {ok, exists, bytes, files, path}."""
+    if not _HOME_NAME.match(name or ""):
+        return {"ok": False, "error": "bad home name"}
+    if not agent_cfg(CFG).get("enabled"):
+        return {"ok": False, "error": "no agents worker is set up"}
+    # its browser's profile is a folder beside the home ($D.browser): part of what it keeps
+    script = (_HOME_DIR % name) + ('if [ -d "$D" ] || [ -d "$D.browser" ]; then du -sk "$D" "$D.browser" 2>/dev/null | '
+                                   'awk \'{s+=$1} END {print s+0}\'; find "$D" "$D.browser" -type f 2>/dev/null | wc -l; '
+                                   'echo "$D"; else echo NONE; fi')
+    try:
+        out = _worker_sh(CFG, script).stdout.split("\n")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"ok": False, "error": str(e)[:150]}
+    out = [x.strip() for x in out if x.strip()]
+    if not out:
+        return {"ok": False, "error": "the worker did not answer"}
+    if out[0] == "NONE":
+        return {"ok": True, "exists": False, "bytes": 0, "files": 0}
+    try:
+        return {"ok": True, "exists": True, "bytes": int(out[0]) * 1024, "files": int(out[1]), "path": out[2] if len(out) > 2 else ""}
+    except (ValueError, IndexError):
+        return {"ok": False, "error": "could not read the home's size"}
+
+
+def home_reset(CFG, name):
+    """Empty an agent's home on the worker: its files and its browser's profile go. Its memory, which
+    lives in the app, is not touched."""
+    if not _HOME_NAME.match(name or ""):
+        return {"ok": False, "error": "bad home name"}
+    if not agent_cfg(CFG).get("enabled"):
+        return {"ok": False, "error": "no agents worker is set up"}
+    script = (_HOME_DIR % name) + ('case "$D" in */bytebunker/homes/bb-agent-*|*/bb-agent-*) '
+                                   'rm -rf -- "$D" "$D.browser" && echo GONE;; *) echo REFUSED;; esac')
+    try:
+        out = _worker_sh(CFG, script).stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"ok": False, "error": str(e)[:150]}
+    return {"ok": out.endswith("GONE"), "error": None if out.endswith("GONE") else "the worker did not remove it"}
 
 
 def kill_slave(CFG, slave_id):

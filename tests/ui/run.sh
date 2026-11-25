@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Browser tests: a real server on a temporary home, with the fake engine, a
-# fake MCP server and a fake agents harness, driven by Playwright.
+# fake MCP server, a fake agents harness and a stand-in for Telegram, driven by Playwright.
 #
 #   npm install --no-save playwright-core && npx playwright install chromium
 #   bash tests/ui/run.sh
@@ -11,13 +11,17 @@ PY="${PYTHON:-python3}"
 H="$(mktemp -d)"
 ENGINE_PORT="${BB_UI_ENGINE_PORT:-18998}"
 SERVER_PORT="${BB_UI_SERVER_PORT:-18797}"
+TELEGRAM_PORT="${BB_UI_TELEGRAM_PORT:-18996}"
 export BB_UI_BASE="http://127.0.0.1:$SERVER_PORT" BB_UI_ENGINE="http://127.0.0.1:$ENGINE_PORT"
+export BB_UI_TELEGRAM="http://127.0.0.1:$TELEGRAM_PORT" BB_UI_HOMES="$H/homes"
 
-cleanup() { kill $EPID $SPID 2>/dev/null; wait 2>/dev/null; rm -rf "$H"; }
+cleanup() { kill $EPID $SPID $TPID 2>/dev/null; wait 2>/dev/null; rm -rf "$H"; }
 trap cleanup EXIT
 
 "$PY" tests/fakes/fake_engine.py --port "$ENGINE_PORT" > "$H/engine.log" 2>&1 &
 EPID=$!
+"$PY" tests/fakes/fake_telegram.py --port "$TELEGRAM_PORT" > "$H/telegram.log" 2>&1 &
+TPID=$!
 mkdir -p "$H/data"
 "$PY" - "$H" "$R" "$ENGINE_PORT" "$SERVER_PORT" <<'PYEOF'
 import json, os, sys
@@ -43,13 +47,14 @@ json.dump({"gateways": [{"name": "fake", "url": "http://127.0.0.1:%s/v1" % eport
            "model_capabilities": {"fake-model": {"effort": ["low", "medium", "high"]}}},
           open(os.path.join(h, "config.json"), "w"))
 PYEOF
-BYTEBUNKER_LOCAL_TOKEN=off BYTEBUNKER_LOCAL_RACK=off PATH="$H/rackfake/bin:$PATH" BYTEBUNKER_DATA="$H/data" BYTEBUNKER_CONFIG="$H/config.json" "$PY" -c "import sys; sys.path.insert(0, '$R'); import server; srv = server.serve('127.0.0.1', $SERVER_PORT); srv.serve_forever()" > "$H/server.log" 2>&1 &
+BYTEBUNKER_LOCAL_TOKEN=off BYTEBUNKER_LOCAL_RACK=off PATH="$H/rackfake/bin:$PATH" BYTEBUNKER_DATA="$H/data" BYTEBUNKER_CONFIG="$H/config.json" \
+  BYTEBUNKER_TELEGRAM_API="$BB_UI_TELEGRAM" BYTEBUNKER_POLL_CAP_S=1 BYTEBUNKER_HOMES="$BB_UI_HOMES" "$PY" -c "import sys; sys.path.insert(0, '$R'); import server; srv = server.serve('127.0.0.1', $SERVER_PORT); srv.serve_forever()" > "$H/server.log" 2>&1 &
 SPID=$!
 for i in $(seq 1 100); do curl -s -o /dev/null "$BB_UI_BASE/api/hello" && break; sleep 0.1; done
 for i in $(seq 1 100); do curl -s "$BB_UI_BASE/api/tools" | grep -q fake__echo && break; sleep 0.1; done
 
 rc=0
-for t in journeys app parity hidden fonts; do
+for t in journeys app agents parity hidden fonts; do
   echo "== $t"
   node "tests/ui/$t.js" || { rc=1; echo "   (server log: $H/server.log)"; tail -20 "$H/server.log"; }
 done

@@ -39,6 +39,22 @@ class Caps(unittest.TestCase):
         open(os.path.join(d, "src", "bytebunker_agents", "harness", "engine_pool.py"), "w").close()
         self.assertTrue(agents.harness_caps(cfg).get("pool"))        # updated: seen without a Test
 
+    def test_a_harness_that_does_not_sign_its_lines_is_one_from_before_agents(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "scripts"))
+        os.makedirs(os.path.join(d, "src", "bytebunker_agents"))
+        with open(os.path.join(d, "scripts", "run_master.py"), "w") as f:
+            f.write("--goal-id --spec --proto --timeout-s --court")
+        cfg = {"agents": {"enabled": True, "dir": d}}
+        spec = os.path.join(d, "src", "bytebunker_agents", "runspec.py")
+        with open(spec, "w") as f:
+            f.write("ALLOWED = {'agent_context', 'plan_effort'}\n")
+        caps = agents.harness_caps(cfg)
+        self.assertEqual((caps["spec"], caps["plan"], caps["agent"]), (True, True, False))
+        with open(spec, "w") as f:
+            f.write("ALLOWED = {'agent_context', 'plan_effort', 'proto_key'}\n")
+        self.assertTrue(agents.harness_caps(cfg)["agent"])            # the run's key would be refused by the one before
+
 
 class LoopbackModels(unittest.TestCase):
     """A model on this machine's 127.0.0.1: agents here can reach it, a worker over ssh cannot."""

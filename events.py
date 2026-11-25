@@ -18,7 +18,7 @@ import threading
 import time
 
 TOPICS = ("sessions", "runs", "output", "jobs", "usage", "cluster", "gateways", "models", "agents", "deploy",
-          "approvals", "config", "mcp", "system")
+          "approvals", "config", "mcp", "system", "audit", "inbox", "channels")
 
 
 class EventBus:

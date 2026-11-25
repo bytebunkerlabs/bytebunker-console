@@ -23,6 +23,7 @@ const SCENARIOS = [
   { name: "json, seed, stops", setup: async (page) => { await page.evaluate(() => { document.getElementById("adv-params").open = true; }); await page.click("#json-switch"); await page.fill("#seed", "42"); await page.fill("#stops", "END, STOP"); }, turns: [["json please", [{ content: "{\"a\": 1}" }]]] },
   { name: "effort max maps to the model's high", setup: async (page) => { await page.fill("#effort", "5"); await page.dispatchEvent("#effort", "input"); }, turns: [["think hard", [{ content: "thought", reasoning: "hmm" }]]] },
   { name: "text attachment", attach: { name: "notes.txt", text: "line one\nline two\n" }, turns: [["what is in it?", [{ content: "two lines" }]]] },
+  { name: "llama.cpp says the prompt is too long", turns: [["huge", [{ status: 400, error: "request (188014 tokens) exceeds the available context size (131072 tokens), try increasing it" }]]] },
 ];
 
 const sameUploads = (x) => JSON.parse(JSON.stringify(x).replace(/\/uploads\/[^/"]+\//g, "/uploads/SESSION/"));

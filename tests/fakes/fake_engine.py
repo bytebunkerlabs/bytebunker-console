@@ -19,6 +19,9 @@ script is empty, echoes the last user message). A reply can carry:
   stall                        seconds of silence after the first delta (a buffered tool call)
   chunk                        characters per delta (default 4)
   cut                          close the stream after this many deltas, mid-reply
+  calls_first                  send the tool calls before the reasoning and the content
+  content_first                send the content before the reasoning
+  pace                         seconds between deltas
   usage                        override {"prompt_tokens", "completion_tokens"}
 Streaming honours stream_options.include_usage like vLLM does.
 
@@ -236,19 +239,30 @@ class FakeEngine:
             self.running += 1
         try:
             send({"role": "assistant", "content": ""})
+            calls = self._calls(reply)
+
+            def send_calls():
+                for c in calls:
+                    args = c["function"]["arguments"]
+                    send({"tool_calls": [{"index": c["index"], "id": c["id"], "type": "function",
+                                          "function": {"name": c["function"]["name"], "arguments": ""}}]})
+                    for i in range(0, len(args), size * 3):
+                        send({"tool_calls": [{"index": c["index"], "function": {"arguments": args[i:i + size * 3]}}]})
+
+            if reply.get("calls_first"):
+                send_calls()
             r = reply.get("reasoning") or ""
+            c = reply.get("content") or ""
+            if reply.get("content_first"):
+                for i in range(0, len(c), size):
+                    send({"content": c[i:i + size]})
             for i in range(0, len(r), size):
                 send({"reasoning_content": r[i:i + size]})
-            c = reply.get("content") or ""
-            for i in range(0, len(c), size):
-                send({"content": c[i:i + size]})
-            calls = self._calls(reply)
-            for c in calls:
-                args = c["function"]["arguments"]
-                send({"tool_calls": [{"index": c["index"], "id": c["id"], "type": "function",
-                                      "function": {"name": c["function"]["name"], "arguments": ""}}]})
-                for i in range(0, len(args), size * 3):
-                    send({"tool_calls": [{"index": c["index"], "function": {"arguments": args[i:i + size * 3]}}]})
+            if not reply.get("content_first"):
+                for i in range(0, len(c), size):
+                    send({"content": c[i:i + size]})
+            if not reply.get("calls_first"):
+                send_calls()
             fin = reply.get("finish_reason") or ("tool_calls" if calls else "stop")
             send({}, finish=fin)
             if (body.get("stream_options") or {}).get("include_usage"):

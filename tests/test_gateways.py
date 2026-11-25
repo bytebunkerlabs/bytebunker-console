@@ -57,6 +57,31 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(cfg["upstream_key"], "kb")
 
 
+class ServedWindow(unittest.TestCase):
+    """The window an engine says it serves, read from its own model list."""
+
+    def test_vllm_and_llama_cpp_each_say_it_their_way(self):
+        self.assertEqual(gw.served_window({"id": "m", "max_model_len": 32768}), 32768)
+        # llama.cpp: what it was started with (n_ctx), not what the weights could do (n_ctx_train)
+        self.assertEqual(gw.served_window({"id": "m", "owned_by": "llamacpp",
+                                           "meta": {"n_ctx": 131072, "n_ctx_train": 1048576}}), 131072)
+        self.assertEqual(gw.served_window({"id": "m", "max_model_len": 4096, "meta": {"n_ctx": 8192}}), 4096)
+        for odd in ({"id": "m"}, {"id": "m", "meta": None}, {"id": "m", "meta": "n_ctx"}, {"id": "m", "meta": {"n_ctx": 0}},
+                    {"id": "m", "max_model_len": True}, {"id": "m", "max_model_len": "32768"}, {"id": "m", "meta": {"n_ctx": -1}}):
+            self.assertIsNone(gw.served_window(odd), odd)
+
+    def test_the_registry_keeps_what_a_llama_cpp_engine_serves(self):
+        real = gw.get_json
+        gw.get_json = lambda url, key=None, timeout=6: {"data": [
+            {"id": "inkling-2-mini", "owned_by": "llamacpp", "meta": {"n_ctx": 131072, "n_ctx_train": 1048576}}]}
+        try:
+            reg = gw.Registry({"gateways": [{"name": "mac", "url": "http://m:18888/v1"}]}, caps)
+            reg.refresh(force=True)
+        finally:
+            gw.get_json = real
+        self.assertEqual(reg.served, {"inkling-2-mini": 131072})
+
+
 class RegistryTest(unittest.TestCase):
     def setUp(self):
         self.cfg = {"gateways": [

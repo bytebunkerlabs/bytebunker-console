@@ -24,6 +24,7 @@ import json
 import mimetypes
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -597,19 +598,49 @@ def run_turn(srv, out, sid, req, json_out=False, quiet=False, show_thinking=True
     return follow(srv, r["run"], view, out), r["session"]
 
 
+def piped_input(asked=True):
+    """What was piped in, as bytes; nothing from a terminal. A pipe or a file is read to its end,
+    which is the contract of `git diff | bb "review this"`. Anything else that is not a terminal (a
+    socket that a scheduler or another program left as standard input) may never end: what arrives
+    promptly is taken, and bb goes on with the words it was given instead of waiting for ever."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return b""
+        fd = sys.stdin.fileno()
+        mode = os.fstat(fd).st_mode
+    except (OSError, ValueError, AttributeError):
+        return b""
+    if stat.S_ISFIFO(mode) or stat.S_ISREG(mode) or stat.S_ISCHR(mode):
+        return sys.stdin.buffer.read()
+    if os.name == "nt":
+        return b""
+    import select
+    chunks, idle = [], 0.3 if asked else 5.0      # with no words, what is piped is the whole ask: wait a little longer
+    while True:
+        try:
+            ready = select.select([fd], [], [], idle)[0]
+            chunk = os.read(fd, 65536) if ready else b""
+        except (OSError, ValueError):
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+        idle = 0.3
+    return b"".join(chunks)
+
+
 # ------------------------------------------------------------------ commands --
 def cmd_ask(a, out):
     srv = connect(out=out)
     text = " ".join(a.text).strip()
     sid = a.session or new_session_id()
     atts = []
-    if not sys.stdin.isatty():
-        piped = sys.stdin.buffer.read()
-        if piped:
-            if text:
-                atts.append(attachment_for(srv, sid, None, name=a.name or "stdin.txt", data=piped))
-            else:
-                text = piped.decode("utf-8", "replace")
+    piped = piped_input(asked=bool(text))
+    if piped:
+        if text:
+            atts.append(attachment_for(srv, sid, None, name=a.name or "stdin.txt", data=piped))
+        else:
+            text = piped.decode("utf-8", "replace")
     for f in a.attach or []:
         atts.append(attachment_for(srv, sid, f))
     if not text and not atts:
@@ -1037,15 +1068,329 @@ class GenericView(TurnView):
         super().event(e)
 
 
+AGENT_VERBS = ("ls", "new", "show", "ask", "memory", "rules", "inbox", "rm", "on", "off", "runs", "stop", "router",
+               "channels")
+
+
+class AgentView(GenericView):
+    """An agent's run: the answer on stdout, what the court says while it works on stderr."""
+
+    said = ()        # the errors shown as they happened
+
+    def event(self, e):
+        if e.get("topic") == "output" and e.get("type") == "out":
+            d = e.get("data") or {}
+            if d.get("line") is not None:
+                if not self.quiet:
+                    self.out.err(self.out.dim(d["line"]))
+            elif d.get("error"):
+                self.said += (str(d["error"]),)
+                self.out.err(self.out.bad("error: " + d["error"]))
+            return
+        super().event(e)
+
+
+def _agent_post(srv, body):
+    return srv.post("/api/agents/agent", body)
+
+
+def _agent_state(r):
+    if not r.get("enabled", True):
+        return "off"
+    if r.get("run") or r.get("running"):
+        return "running"
+    if r.get("parked"):
+        return "parked"
+    if r.get("waiting"):
+        return "%d waiting" % r["waiting"]
+    return "quiet hours" if r.get("quiet_now") else "idle"
+
+
+def _when(ts):
+    return time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else ""
+
+
+def agents_ls(srv, out):
+    rows = srv.get("/api/agents/list")["agents"]
+    if not rows:
+        out.say('no agents yet: bb agents new ops --purpose "Keeps the rack serving."')
+        return EXIT_OK
+    out.say(table([[r["id"], r["name"], _agent_state(r), r["facts"],
+                    "%d/%d" % (r["usage"]["runs"], (r.get("budget") or {}).get("runs_day") or 0),
+                    ago((r.get("last") or {}).get("ended") or (r.get("last") or {}).get("started")),
+                    r["purpose"]] for r in rows],
+                  ["agent", "name", "state", "facts", "runs today", "last run", "purpose"]))
+    return EXIT_OK
+
+
+def agents_new(srv, a, out, words):
+    if not words:
+        raise BBError('bb agents new ID --purpose "what it is for" [--name N] [--cron "0 7 * * 1-5" --prompt "..."]', EXIT_USAGE)
+    agent = {"id": words[0].lower(), "purpose": a.purpose or " ".join(words[1:])}
+    if a.name:
+        agent["name"] = a.name
+    if a.shape:
+        agent["shape"] = a.shape
+    if a.cron or a.every:
+        if not a.prompt:
+            raise BBError("a schedule needs --prompt: what to do each time", EXIT_USAGE)
+        agent["wake"] = [dict({"kind": "cron", "cron": a.cron} if a.cron else {"kind": "interval", "every_min": a.every},
+                              prompt=a.prompt)]
+    chans = []
+    for c in a.channel or []:
+        kind, _, where = c.partition(":")
+        chans.append({"kind": kind, "chat": where} if kind == "telegram" else {"kind": kind, "to": where})
+    if chans:
+        agent["channels"] = chans
+    rec = _agent_post(srv, {"action": "create", "agent": agent})["agent"]
+    out.err(out.good("made %s (%s). Ask it: bb agents ask %s \"...\"" % (rec["id"], rec["name"], rec["id"])))
+    return EXIT_OK
+
+
+def agents_show(srv, aid, out, as_json=False):
+    d = srv.get("/api/agents/agent?id=" + urllib.parse.quote(aid))
+    if as_json:
+        out.say(json.dumps(d, ensure_ascii=False, indent=1))
+        return EXIT_OK
+    a, s = d["agent"], d["summary"]
+    out.say("%s (%s)  %s" % (a["name"], a["id"], _agent_state(dict(s, run=(s.get("running") or {}).get("run")))))
+    out.say(a["purpose"])
+    out.say()
+    for line in d["routing"].get("lines") or [d["routing"].get("error") or "no model routing yet"]:
+        out.say("  " + line)
+    out.say()
+    out.say("rules   " + "  ".join("%s=%s" % kv for kv in d["rules"].items()) +
+            ("  egress=" + ",".join(a["rules"]["egress"]) if (a.get("rules") or {}).get("egress") else ""))
+    b, u = a.get("budget") or {}, s["usage"]
+    out.say("budget  %s of %s tokens today, %d of %d runs, %d min a run%s" % (
+        format(u["tokens"], ","), format(b.get("tokens_day") or 0, ","), u["runs"], b.get("runs_day") or 0,
+        b.get("minutes_run") or 0, ", quiet " + b["quiet"] if b.get("quiet") else ""))
+    if a.get("channels"):
+        out.say("channels " + ", ".join("%s %s" % (c["kind"], c.get("chat") or c.get("to") or "") for c in a["channels"]))
+    for w in a.get("wake") or []:
+        what = {"cron": "cron " + str(w.get("cron")), "interval": "every %s min" % w.get("every_min"),
+                "rack": "rack: " + ", ".join(w.get("events") or [])}.get(w["kind"], w["kind"] + " " + str(w.get("what") or w.get("path") or ""))
+        out.say("wakes on %s%s" % (what, ": " + w["prompt"][:70] if w.get("prompt") else ""))
+    out.say("memory  %d fact%s in %s" % (len(d["memory"]), "" if len(d["memory"]) == 1 else "s", os.path.join(d["folder"], "memory")))
+    waiting = [w for w in d["inbox"] if w.get("state") in ("new", "deferred", "parked")]
+    for w in waiting[:5]:
+        out.say("waiting %s  %s%s" % (w["id"], w["text"][:60].replace("\n", " "), "  (" + w["why"] + ")" if w.get("why") else ""))
+    if d["runs"]:
+        out.say()
+        out.say(table([[r["run"], r.get("shape") or "", r.get("state") or "", _when(r.get("started")),
+                        (r.get("error") or r.get("answer") or "")[:60]] for r in d["runs"][:8]],
+                      ["run", "shape", "state", "started", "answer"]))
+    return EXIT_OK
+
+
+def agents_ask(srv, a, out, words):
+    """bb agents ask [AGENT] "text": the answer here; an ask to nobody goes to the concierge."""
+    ids = [r["id"] for r in srv.get("/api/agents/list")["agents"]]
+    aid = None
+    if len(words) > 1 and words[0].lower() in ids:
+        aid, words = words[0].lower(), words[1:]
+    text = " ".join(words).strip()
+    piped = piped_input(asked=bool(text)).decode("utf-8", "replace")
+    if piped.strip():
+        text = (text + "\n\n" + piped) if text else piped
+    if not text:
+        raise BBError('bb agents ask [AGENT] "what you want to know"', EXIT_USAGE)
+    body = {"action": "ask", "text": text}
+    if aid:
+        body["id"] = aid
+    if a.shape:
+        body["shape"] = a.shape
+    r = _agent_post(srv, body)
+    aid, wid = r["agent"], r["wake"]
+    if a.detach:
+        out.say(wid)
+        out.err(out.dim("asked %s; see it with: bb agents inbox %s" % (aid, aid)))
+        return EXIT_OK
+    w = r
+    try:
+        waited = 0
+        while not w.get("run") and w.get("state") == "new" and waited < 900:
+            out.status("%s is busy; your ask is next in line…" % aid)
+            time.sleep(1)
+            waited += 1
+            w = srv.get("/api/agents/wake?id=%s&wake=%s" % (aid, wid))["wake"]
+    except KeyboardInterrupt:
+        out.err(out.dim("\nleft in its inbox: bb agents inbox " + aid))
+        return EXIT_CANCELLED
+    out.clear_status()
+    if not w.get("run"):
+        out.err(out.warn("%s did not start: %s. The ask stays in its inbox (bb agents inbox %s)." % (
+            aid, w.get("why") or w.get("state"), aid)))
+        return EXIT_OK if w.get("state") in ("deferred", "parked") else EXIT_FAILED
+    view = AgentView(out, srv=srv, rid=w["run"])
+    code = follow(srv, w["run"], view, out)
+    done = srv.get("/api/agents/wake?id=%s&wake=%s" % (aid, wid))["wake"]
+    answer = (done.get("answer") or "").strip()
+    if answer and not view.wrote.strip():
+        out.say(answer)                           # a goal's answer: its lines streamed, the answer comes whole
+    elif answer and answer != view.wrote.strip() and answer.startswith(view.wrote.strip()):
+        out.err(out.warn(answer[len(view.wrote.strip()):].strip()))    # the flag a degraded answer carries
+    if done.get("state") == "error":
+        # a run that failed says why, here too: a goal that could not start has printed nothing so far
+        why = " ".join(str(done.get("why") or (view.final or {}).get("error") or "it failed").split())
+        shown = [" ".join(str(x).split()) for x in tuple(view.said) + ((view.message or {}).get("error"),) if x]
+        if not any(x in why or why in x for x in shown):
+            out.err(out.bad("%s could not finish: %s" % (aid, why)))
+        if code == EXIT_OK:
+            code = EXIT_FAILED
+    return code
+
+
+def agents_memory(srv, a, out, words):
+    if not words:
+        raise BBError("bb agents memory AGENT [add \"fact\" | forget NAME | tidy]", EXIT_USAGE)
+    aid, verb, rest = words[0].lower(), (words[1] if len(words) > 1 else "ls"), words[2:]
+    if verb == "add":
+        f = _agent_post(srv, {"action": "remember", "id": aid, "fact": " ".join(rest), "type": a.type or "user",
+                              "source": a.source or "the owner said", "name": a.name})["fact"]
+        out.err(out.good("remembered as " + f["name"]))
+    elif verb == "forget":
+        if not rest:
+            raise BBError("bb agents memory %s forget NAME" % aid, EXIT_USAGE)
+        _agent_post(srv, {"action": "forget", "id": aid, "name": rest[0]})
+        out.err("forgot " + rest[0])
+    elif verb == "tidy":
+        r = _agent_post(srv, {"action": "tidy", "id": aid})
+        out.err("%d fact%s; %d merged%s" % (r["facts"], "" if r["facts"] == 1 else "s", len(r["merged"]),
+                                             "; from untrusted content, for your review: " + ", ".join(r["review"]) if r["review"] else ""))
+    elif verb == "ls":
+        facts = srv.get("/api/agents/agent?id=" + urllib.parse.quote(aid))["memory"]
+        out.say(table([[f["name"], f["type"], f["source"][:40], f["fact"]] for f in facts],
+                      ["fact", "type", "source", ""]) if facts else "nothing remembered yet")
+    else:
+        raise BBError("bb agents memory AGENT [add \"fact\" | forget NAME | tidy]", EXIT_USAGE)
+    return EXIT_OK
+
+
+def agents_rules(srv, a, out, words):
+    """bb agents rules AGENT [outward=allow rack=ask egress=+example.com runs_day=20 quiet=23:00-07:00 ...]"""
+    if not words:
+        raise BBError("bb agents rules AGENT [class=allow|ask|deny ...] [egress=+domain|-domain|any|none] [runs_day=N] [quiet=HH:MM-HH:MM]", EXIT_USAGE)
+    aid, sets = words[0].lower(), words[1:]
+    d = srv.get("/api/agents/agent?id=" + urllib.parse.quote(aid))
+    agent = d["agent"]
+    if sets:
+        rules, budget = dict(agent.get("rules") or {}), dict(agent.get("budget") or {})
+        for kv in sets:
+            k, sep, v = kv.partition("=")
+            if not sep:
+                raise BBError("write %s=value" % kv, EXIT_USAGE)
+            if k == "egress":
+                cur = list(rules.get("egress") or [])
+                star = lambda x: "*" if x == "any" else x        # egress=any: a * the shell does not expand
+                for dom in v.split(","):
+                    dom = dom.strip().lower()
+                    if dom == "none":
+                        cur = []
+                    elif dom.startswith("-"):
+                        cur = [x for x in cur if x != star(dom[1:])]
+                    elif dom and star(dom.lstrip("+")) not in cur:
+                        cur.append(star(dom.lstrip("+")))
+                rules["egress"] = cur
+            elif k in ("tokens_day", "minutes_run", "runs_day", "quiet"):
+                budget[k] = v
+            else:
+                rules[k] = v
+        agent = _agent_post(srv, {"action": "save", "agent": {"id": aid, "rules": rules, "budget": budget}})["agent"]
+        d = srv.get("/api/agents/agent?id=" + urllib.parse.quote(aid))
+    classes = srv.get("/api/agents/list")["classes"]
+    out.say(table([[c, p, classes.get(c, "")] for c, p in d["rules"].items()], ["class", "policy", "covers"]))
+    eg = (agent.get("rules") or {}).get("egress") or []
+    out.say("egress  " + ("any public site (your own network is refused)" if "*" in eg else
+                          (", ".join(eg) + " (and nothing else)") if eg else "none (nothing outside is reachable)"))
+    b = agent.get("budget") or {}
+    out.say("budget  %s tokens a day, %s runs a day, %s min a run, quiet %s" % (
+        format(b.get("tokens_day") or 0, ","), b.get("runs_day"), b.get("minutes_run"), b.get("quiet") or "never"))
+    return EXIT_OK
+
+
+def agents_inbox(srv, a, out, words):
+    if not words:
+        raise BBError("bb agents inbox AGENT", EXIT_USAGE)
+    rows = srv.get("/api/agents/agent?id=" + urllib.parse.quote(words[0].lower()))["inbox"][:max(1, a.n or 20)]
+    out.say(table([[w["id"], _when(w.get("ts")), w.get("source") or "", w.get("state") or "", w.get("run") or "",
+                    (w.get("why") or "")[:40], w["text"][:60]] for w in rows],
+                  ["wake", "when", "from", "state", "run", "why", "ask"]) if rows else "nothing has woken it yet")
+    return EXIT_OK
+
+
 def cmd_agents(a, out):
     srv = connect(out=out)
-    if a.goal and a.goal[0] in ("ls", "stop") and len(a.goal) <= 2:
-        if a.goal[0] == "ls":
-            a2 = argparse.Namespace(action="ls", kind="agents", id=None)
-            return cmd_runs(a2, out)
-        rid = a.goal[1] if len(a.goal) > 1 else None
+    words = list(a.goal or [])
+    verb = words[0] if words and words[0] in AGENT_VERBS else None
+    # one quoted goal that happens to start with a verb's word is a goal: verbs stand alone
+    if verb == "ls":
+        return agents_ls(srv, out)
+    if verb == "new":
+        return agents_new(srv, a, out, words[1:])
+    if verb == "show":
+        if len(words) < 2:
+            raise BBError("bb agents show AGENT", EXIT_USAGE)
+        return agents_show(srv, words[1].lower(), out, a.json)
+    if verb == "ask":
+        return agents_ask(srv, a, out, words[1:])
+    if verb == "memory":
+        return agents_memory(srv, a, out, words[1:])
+    if verb == "rules":
+        return agents_rules(srv, a, out, words[1:])
+    if verb == "inbox":
+        return agents_inbox(srv, a, out, words[1:])
+    if verb in ("on", "off", "rm"):
+        if len(words) < 2:
+            raise BBError("bb agents %s AGENT" % verb, EXIT_USAGE)
+        aid = words[1].lower()
+        if verb == "rm":
+            if not a.yes and can_prompt():
+                if (ask_user(out, out.warn("remove %s? its folder moves to .trash, memory and all [y/N]: " % aid)) or "").lower()[:1] != "y":
+                    return EXIT_CANCELLED
+            kept = _agent_post(srv, {"action": "delete", "id": aid})["kept"]
+            out.err("removed; its folder is kept at " + kept)
+        else:
+            _agent_post(srv, {"action": "enable" if verb == "on" else "disable", "id": aid})
+            out.err("%s is %s" % (aid, verb))
+        return EXIT_OK
+    if verb == "router":
+        d = srv.get("/api/agents/router")
+        out.say(table([[c["model"], "live" if c["model"] in d["live"] else "", c["tier"], c["speed"],
+                        "%g" % c["tok_s"] if c.get("tok_s") else "", "yes" if c["tools"] else "", "yes" if c["thinking"] else "",
+                        "yes" if c["vision"] else "", "%dk" % round(c["ctx"] / 1000) if c.get("ctx") else ""] for c in d["cards"]],
+                      ["model", "", "tier", "speed", "tok/s", "tools", "thinking", "vision", "window"]))
+        out.say()
+        for shape in ("chat", "goal"):
+            out.say("auto, a %s:" % ("chat ask" if shape == "chat" else "goal"))
+            for line in d["plans"][shape]["lines"]:
+                out.say("  " + line)
+        return EXIT_OK
+    if verb == "channels":
+        d = srv.get("/api/channels")
+        tg = d["telegram"]
+        out.say("telegram  " + ("not connected (the app: Agents, Channels)" if not tg["connected"] else
+                                (tg.get("error") or "@%s" % ((tg.get("bot") or {}).get("username") or "?"))))
+        for c in tg["chats"]:
+            out.say("  chat %s %s -> %s" % (c["chat"], c.get("title") or "", c["agent"]))
+        for p in tg["pending"]:
+            out.say("  chat %s %s wrote and is not bound to an agent" % (p["chat"], p.get("title") or p.get("from") or ""))
+        for a in d["mail"]["accounts"]:
+            out.say("mail      %s: %s on %s%s" % (a["name"], a["user"], a["host"], "  (%s)" % a["error"] if a.get("error") else ""))
+        if not d["mail"]["accounts"]:
+            out.say("mail      no mailbox")
+        for w in d["watched"]:
+            out.say("watching  %s: %s %s" % (w["agent"], w.get("what") or w["kind"], w["where"]))
+        for e in (d.get("errors") or {}).values():
+            out.err(out.bad(e))
+        return EXIT_OK
+    if verb == "runs":
+        return cmd_runs(argparse.Namespace(action="ls", kind="agent" if len(words) > 1 and words[1] == "agents" else "agents", id=None), out)
+    if verb == "stop":
+        rid = words[1] if len(words) > 1 else None
         if not rid:
-            live = [r for r in srv.get("/api/runs?kind=agents&limit=10")["runs"] if r["state"] in ("running", "queued")]
+            live = [r for r in srv.get("/api/runs?limit=40")["runs"]
+                    if r["kind"] in ("agents", "agent") and r["state"] in ("running", "queued")]
             if not live:
                 out.err("no goal is running")
                 return EXIT_OK
@@ -1055,7 +1400,8 @@ def cmd_agents(a, out):
         return EXIT_OK
     goal = " ".join(a.goal).strip()
     if not goal:
-        raise BBError('bb agents "goal" (or: bb agents ls, bb agents stop)', EXIT_USAGE)
+        raise BBError('bb agents "goal" for the court, or: bb agents ls | new | show | ask | memory | rules | inbox | stop',
+                      EXIT_USAGE)
     rid = None
     try:
         body = {"goal": goal, "cwd": os.getcwd()}
@@ -1434,10 +1780,24 @@ def parser():
     r.add_argument("action", choices=("ls", "watch", "stop"), nargs="?", default="ls")
     r.add_argument("id", nargs="?")
     r.add_argument("-k", "--kind")
-    ag = sub.add_parser("agents")
-    ag.add_argument("goal", nargs="*")
+    ag = sub.add_parser("agents", help="your agents (ls, new, show, ask, memory, rules, inbox), or a goal for the court")
+    ag.add_argument("goal", nargs="*", help='a verb and its words, or "a goal" for the court')
     ag.add_argument("--detach", action="store_true", help="start it and return; it runs on the server")
     ag.add_argument("-P", "--project", help="a project by name (default: the one this folder is in)")
+    ag.add_argument("--purpose", help="new: what the agent is for")
+    ag.add_argument("--name", help="new: its display name; memory add: the fact's name")
+    ag.add_argument("--cron", help='new: wake on a schedule, e.g. "0 7 * * 1-5"')
+    ag.add_argument("--every", type=int, metavar="MIN", help="new: wake every N minutes")
+    ag.add_argument("--prompt", help="new: what to do on each scheduled wake")
+    ag.add_argument("--channel", action="append", metavar="KIND:WHERE", help="new: telegram:CHAT_ID or mail:you@example.com")
+    shp = ag.add_mutually_exclusive_group()
+    shp.add_argument("--goal", dest="shape", action="store_const", const="goal", help="ask: hand it to the court")
+    shp.add_argument("--chat", dest="shape", action="store_const", const="chat", help="ask: answer it in one turn")
+    ag.add_argument("--type", choices=("user", "project", "feedback", "reference"), help="memory add: the fact's type")
+    ag.add_argument("--source", help="memory add: where the fact came from")
+    ag.add_argument("--json", action="store_true", help="show: the whole record as JSON")
+    ag.add_argument("--yes", action="store_true", help="rm: without asking")
+    ag.add_argument("-n", type=int, help="inbox: how many")
     j = sub.add_parser("jobs")
     j.add_argument("action", choices=("ls", "run"), nargs="?", default="ls")
     j.add_argument("id", nargs="?")
@@ -1503,6 +1863,43 @@ def bare_command(p, argv):
     return "chat"
 
 
+def options_first(p, argv):
+    """bb agents ask ops --chat "…": a command whose words are free text takes its options anywhere
+    among them. argparse wants them before or after, never between, so they are moved to the front.
+    What counts as an option is what argparse would count: a token with a space in it is a word."""
+    sp = p.commands.get(argv[0])
+    if sp is None:
+        return argv
+    known = {o: act for act in sp._actions for o in act.option_strings}
+
+    def option(t):
+        if not t.startswith("-") or len(t) < 2 or " " in t:
+            return None, False
+        name, eq, _ = t.partition("=")
+        if name in known:
+            return known[name], bool(eq)
+        if t.startswith("--"):
+            hits = sorted({id(known[o]) for o in known if o.startswith(name)})      # --pur is --purpose
+            return (next(known[o] for o in known if o.startswith(name)), bool(eq)) if len(hits) == 1 else (None, False)
+        return (known[t[:2]], True) if t[:2] in known else (None, False)            # -n5
+
+    opts, words, i = [], [], 1
+    while i < len(argv):
+        t = argv[i]
+        if t == "--":
+            words += argv[i:]               # everything after it is words, as argparse has it
+            break
+        act, attached = option(t)
+        if act is None:
+            words.append(t)
+            i += 1
+            continue
+        n = 1 if attached or act.nargs == 0 else 2
+        opts += argv[i:i + n]
+        i += n
+    return argv[:1] + opts + words
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     out = Out()
@@ -1513,6 +1910,8 @@ def main(argv=None):
         argv = ["ask"] + argv               # bb "question" is bb ask "question"
     elif argv[0].startswith("-") and argv[0] not in ("-h", "--help", "--version"):
         argv = [bare_command(p, argv)] + argv   # bb -P Billing chats in a project; bb -p Fast "…" asks
+    if argv[0] == "agents":
+        argv = options_first(p, argv)
     try:
         a = p.parse_args(argv)
     except SystemExit as e:

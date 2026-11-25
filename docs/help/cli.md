@@ -46,7 +46,11 @@ bb sessions ls                      recent sessions, the app's and bb's
 bb projects                         projects; * marks the one this folder is in
 bb pair you@host                    add a rack: its engine and monitor come too
 bb deploy up qwen3-8b               serve a recipe on a rack
-bb agents "goal"                    give the agents a goal and follow it
+bb agents ls                        your agents: what each is for, what it is doing
+bb agents ask ops "…"               ask an agent; the answer here (no agent named: the concierge)
+bb agents memory ops                what an agent remembers; add "…" / forget NAME / tidy
+bb agents rules ops rack=deny       what it may do alone, its budget and quiet hours
+bb agents "goal"                    give the court a goal, with no agent around it, and follow it
 bb doctor                           what is reachable, and what to do if not
 bb open                             the app in your browser, with a one-time link
 ```
@@ -81,3 +85,7 @@ allow ws__write {"path": "notes.md", …}? [y]es, [n]o, [a]lways:
 | 5 | no ByteBunker server |
 
 Ctrl-C stops the turn on the server and keeps what came. bb starts the server when it is not running; a server bb started leaves after 30 idle minutes unless **Keep the server running** is on in Settings.
+
+## Agents
+
+`bb agents new ops --purpose "Keeps the rack serving."` makes an agent; `--cron "0 7 * * 1-5" --prompt "Morning report."` gives it a schedule and `--channel telegram:CHAT_ID` a place to report. `bb agents show ops` prints its models (and why the router picked them), its rules, its budget, what wakes it and its last runs. `bb agents ask ops "…"` prints the answer on stdout and what happened on the way on stderr, so it pipes; `--goal` hands the ask to the court and `--chat` answers it in one turn. An approval the agent needs is asked in the terminal. `bb agents inbox ops` lists what woke it, `bb agents router` what each model is and what auto picks now, `bb agents channels` what is connected. → [Agents](help:agents)
