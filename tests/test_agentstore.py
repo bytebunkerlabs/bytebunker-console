@@ -43,7 +43,7 @@ class Records(Base):
         self.assertEqual(a["roles"], {"master": "auto", "thinking": "auto", "fast": "auto"})
         self.assertEqual(a["rules"], {"egress": ["developer.nvidia.com"]})           # only what differs from the defaults
         self.assertEqual(a["wake"][1], {"kind": "rack", "events": ["engine_down", "model_switched"]})
-        with open(os.path.join(self.root, "ops", "agent.json")) as f:
+        with open(os.path.join(self.root, "ops", "agent.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["purpose"], OPS["purpose"])
         for part in ("memory/MEMORY.md", "runs"):
             self.assertTrue(os.path.exists(os.path.join(self.root, "ops", part)), part)
@@ -99,11 +99,11 @@ class Memory(Base):
         f = self.store.remember("ops", "spark-2 had 83 GB free at 07:00 on 2026-11-09", "project", "run agents-1a2b3c",
                                 name="disk-spark-2")
         self.assertEqual((f["name"], f["type"], f["source"]), ("disk-spark-2", "project", "run agents-1a2b3c"))
-        with open(os.path.join(self.root, "ops", "memory", "disk-spark-2.md")) as fh:
+        with open(os.path.join(self.root, "ops", "memory", "disk-spark-2.md"), encoding="utf-8") as fh:
             text = fh.read()
         self.assertTrue(text.startswith("---\nname: disk-spark-2\ntype: project\nsource: run agents-1a2b3c\n"))
         self.assertTrue(text.rstrip().endswith("spark-2 had 83 GB free at 07:00 on 2026-11-09"))
-        with open(os.path.join(self.root, "ops", "memory", "MEMORY.md")) as fh:
+        with open(os.path.join(self.root, "ops", "memory", "MEMORY.md"), encoding="utf-8") as fh:
             index = fh.read()
         self.assertIn("- [disk-spark-2](disk-spark-2.md) — spark-2 had 83 GB free", index)
         self.assertIn("(project; run agents-1a2b3c)", index)
@@ -130,11 +130,11 @@ class Memory(Base):
         self.assertFalse(self.store.forget("ops", "old"))
         self.assertFalse(self.store.forget("ops", "../agent"))            # a name, never a path
         self.assertFalse(self.store.forget("ops", "MEMORY"))
-        with open(os.path.join(self.root, "ops", "memory", "MEMORY.md")) as fh:
+        with open(os.path.join(self.root, "ops", "memory", "MEMORY.md"), encoding="utf-8") as fh:
             self.assertNotIn("old", fh.read())
 
     def test_a_file_the_owner_wrote_by_hand_is_a_fact(self):
-        with open(os.path.join(self.root, "ops", "memory", "by-hand.md"), "w") as f:
+        with open(os.path.join(self.root, "ops", "memory", "by-hand.md"), "w", encoding="utf-8") as f:
             f.write("never restart the rack before 22:00\n")
         f = self.store.fact("ops", "by-hand")
         self.assertEqual((f["fact"], f["type"], f["source"]), ("never restart the rack before 22:00", "project", "unknown"))
@@ -182,7 +182,7 @@ class Memory(Base):
 
     def test_a_line_cut_short_does_not_swallow_the_next_wake(self):
         a = self.store.wake("ops", "app", "one")
-        with open(os.path.join(self.root, "ops", "inbox.jsonl"), "a") as f:
+        with open(os.path.join(self.root, "ops", "inbox.jsonl"), "a", encoding="utf-8") as f:
             f.write('{"id": "w-cut", "source": "app", "text": "a line the disk cut sho')     # no newline: a full disk
         b = self.store.wake("ops", "app", "two")
         self.assertEqual([w["text"] for w in self.store.pending("ops")], ["one", "two"])
@@ -197,7 +197,7 @@ class Memory(Base):
                 self.store.write_answer("ops", "agent-%03d" % i, "answer %d" % i)
                 self.store.record_run("ops", {"run": "agent-%03d" % i, "state": "done", "ok": True})
             d = os.path.join(self.root, "ops", "runs")
-            with open(os.path.join(d, "index.jsonl")) as f:
+            with open(os.path.join(d, "index.jsonl"), encoding="utf-8") as f:
                 self.assertLessEqual(len(f.readlines()), 40)
             runs = self.store.runs("ops", 500)
             self.assertEqual((runs[0]["run"], runs[0]["state"]), ("agent-059", "done"))
@@ -239,7 +239,7 @@ class Memory(Base):
         r = self.store.tidy("ops")
         self.assertEqual(r["merged"], [{"dropped": "glm-b", "same_as": "glm-a"}])
         self.assertEqual(r["review"], ["page"])
-        with open(os.path.join(self.root, "ops", "memory", "MEMORY.md")) as fh:
+        with open(os.path.join(self.root, "ops", "memory", "MEMORY.md"), encoding="utf-8") as fh:
             index = [l for l in fh.read().splitlines() if l.startswith("- [")]
         self.assertEqual(len(index), len(set(index)))
         self.assertEqual(len(index), 2)
@@ -264,7 +264,7 @@ class Inbox(Base):
     def test_a_wake_is_one_line_with_where_to_reply(self):
         w = self.store.wake("ops", "telegram", "what served overnight?", reply={"kind": "telegram", "chat": "123456789"})
         self.assertEqual((w["source"], w["trust"], w["state"]), ("telegram", "owner", "new"))
-        with open(os.path.join(self.root, "ops", "inbox.jsonl")) as f:
+        with open(os.path.join(self.root, "ops", "inbox.jsonl"), encoding="utf-8") as f:
             line = json.loads(f.readline())
         self.assertEqual(line["reply"], {"kind": "telegram", "chat": "123456789"})
         self.assertEqual([x["id"] for x in self.store.pending("ops")], [w["id"]])
@@ -276,7 +276,7 @@ class Inbox(Base):
         self.store.set_state("ops", w["id"], "done", run="chat-1", ok=True)
         got = self.store.inbox("ops")[0]
         self.assertEqual((got["state"], got["run"], got["text"]), ("done", "chat-1", "a question"))
-        with open(os.path.join(self.root, "ops", "inbox.jsonl")) as f:
+        with open(os.path.join(self.root, "ops", "inbox.jsonl"), encoding="utf-8") as f:
             self.assertEqual(len(f.readlines()), 3)                     # append-only
 
     def test_a_source_that_repeats_itself_wakes_it_once(self):
@@ -328,7 +328,7 @@ class Inbox(Base):
             for i in range(30):
                 last = self.store.wake("ops", "app", "q%d" % i)
                 self.store.set_state("ops", last["id"], "done", run="chat-%d" % i)
-            with open(os.path.join(self.root, "ops", "inbox.jsonl")) as f:
+            with open(os.path.join(self.root, "ops", "inbox.jsonl"), encoding="utf-8") as f:
                 n = len(f.readlines())
             self.assertLess(n, 41)
             got = self.store.get_wake("ops", last["id"])

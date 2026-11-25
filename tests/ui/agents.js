@@ -157,10 +157,17 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   check("agents: an ask to nobody is answered by the concierge", (await page.locator("#pa-answer").innerText().catch(() => "")).includes("It is a test day."),
         (await page.locator("#agents-detail").innerText().catch(() => "")).slice(0, 200));
 
+  // an agent's row is clicked and its pane is waited for: a tab clicked sooner is still the last agent's
+  const openAgent = async (id) => {
+    await page.click('#pa-list .pa-row[data-agent="' + id + '"]');
+    await page.waitForFunction((id) => ((document.querySelector("#agents-detail .skill-id .src") || {}).textContent || "").startsWith(id + " "),
+                               id, { timeout: 8000 }).catch(() => {});
+  };
+
   // ---- its home on the worker: its size, and Reset
   const fs = require("fs"), pathmod = require("path");
   const homeDir = pathmod.join(process.env.BB_UI_HOMES || "/nonexistent", "bb-agent-ops");
-  await page.click('#pa-list .pa-row[data-agent="ops"]');
+  await openAgent("ops");
   await page.waitForSelector('.pa-tabs [data-patab="setup"]', { timeout: 5000 });
   await page.click('.pa-tabs [data-patab="setup"]');
   await page.waitForFunction(() => (document.querySelector("#pa-home") || {}).innerText && !document.querySelector("#pa-home").innerText.includes("\u2026"), null, { timeout: 8000 }).catch(() => {});
@@ -229,7 +236,7 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   await page.unroute("**/api/agents/list").catch(() => {});
 
   // ---- delete: gone from the list, its schedule with it
-  await page.click('#pa-list .pa-row[data-agent="ops"]');
+  await openAgent("ops");
   await page.waitForSelector('.pa-tabs [data-patab="setup"]', { timeout: 5000 });
   await page.click('.pa-tabs [data-patab="setup"]');
   await page.waitForSelector("#pa-body button:has-text('Delete')", { timeout: 5000 });

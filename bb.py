@@ -455,7 +455,10 @@ class TurnView:
                 o.err(o.bad("%s asks before it runs, and there is nobody to ask: rerun with --yes to allow it" % name))
                 self.srv.post("/api/runs/%s/tool-results" % self.rid,
                               {"call_id": cid, "content": "not allowed: nobody could approve it", "is_error": True})
-                self.srv.post("/api/runs/%s/cancel" % self.rid)
+                try:
+                    self.srv.post("/api/runs/%s/cancel" % self.rid)
+                except BBError:
+                    pass                              # the run ended by itself before the cancel arrived
                 return
             ans = (ask_user(o, o.warn("allow %s %s? [y]es, [n]o, [a]lways: " % (name, _brief(args)))) or "").lower()
             if ans.startswith("a"):
@@ -640,7 +643,7 @@ def cmd_ask(a, out):
         if text:
             atts.append(attachment_for(srv, sid, None, name=a.name or "stdin.txt", data=piped))
         else:
-            text = piped.decode("utf-8", "replace")
+            text = piped.decode("utf-8", "replace").replace("\r\n", "\n")     # a Windows pipe ends its lines with CR LF
     for f in a.attach or []:
         atts.append(attachment_for(srv, sid, f))
     if not text and not atts:
@@ -1190,7 +1193,7 @@ def agents_ask(srv, a, out, words):
     if len(words) > 1 and words[0].lower() in ids:
         aid, words = words[0].lower(), words[1:]
     text = " ".join(words).strip()
-    piped = piped_input(asked=bool(text)).decode("utf-8", "replace")
+    piped = piped_input(asked=bool(text)).decode("utf-8", "replace").replace("\r\n", "\n")
     if piped.strip():
         text = (text + "\n\n" + piped) if text else piped
     if not text:

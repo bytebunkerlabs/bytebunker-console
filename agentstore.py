@@ -201,8 +201,9 @@ def _clean_wake(raw):
                 raise AgentError("%s: every_min is a number of minutes" % where)
         elif k == "folder":
             p = str(w.get("path") or "").strip()
-            if not (p.startswith("/") or p.startswith("~")):
-                raise AgentError("%s: a full path on this computer (/... or ~/...)" % where)
+            if not (p.startswith("~") or os.path.isabs(p)):
+                raise AgentError("%s: a full path on this computer (%s)"
+                                 % (where, "C:\\... or ~\\..." if os.name == "nt" else "/... or ~/..."))
             e["path"] = p[:400]
         if w.get("prompt"):
             e["prompt"] = str(w["prompt"]).strip()[:4000]

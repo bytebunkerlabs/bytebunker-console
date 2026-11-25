@@ -103,7 +103,8 @@ class Folders:
         if size > FILE_MAX:
             data += " (too large to attach: it stays in the folder)"
         else:
-            fd = os.open(full, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            fd = os.open(full, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_BINARY", 0))                      # Windows: the bytes as they are
             with os.fdopen(fd, "rb") as f:
                 if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
                     raise OSError("not a regular file")
