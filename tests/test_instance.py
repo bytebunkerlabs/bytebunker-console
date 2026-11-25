@@ -6,10 +6,11 @@ import sys
 import tempfile
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import instance  # noqa: E402
+from instance import QuickHTTPServer  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
@@ -56,7 +57,7 @@ class InstanceTest(unittest.TestCase):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv = QuickHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             a = instance.Instance(self.data)

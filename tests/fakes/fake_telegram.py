@@ -29,6 +29,7 @@ import json
 import re
 import threading
 import time
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -49,6 +50,14 @@ PARAMS = {
                      "message_effect_id", "suggested_post_parameters", "reply_parameters", "reply_markup"},
 }
 TEXT_UNITS = 4096
+
+
+class QuickHTTPServer(ThreadingHTTPServer):
+    """Without the DNS question http.server asks when it binds (socket.getfqdn): half a minute where the resolver is slow."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def units(text):
@@ -298,7 +307,7 @@ class FakeTelegram:
                     return self._json(200, {"ok": True, "result": {"file_id": body["file_id"], "file_path": f[0], "file_size": len(f[1])}})
                 self._json(404, {"ok": False, "description": "no such method"})
 
-        self.srv = ThreadingHTTPServer((self.host, self.port), H)
+        self.srv = QuickHTTPServer((self.host, self.port), H)
         self.srv.daemon_threads = True
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()

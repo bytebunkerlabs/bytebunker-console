@@ -54,7 +54,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 from traces import TraceLog, StreamCapture, export_lines
 import skills as skillmod
@@ -6320,7 +6320,7 @@ def serve(bind=None, port=None, idle_exit=None):
         raise SystemExit("another ByteBunker server is already using %s%s" % (
             DATA, (": http://127.0.0.1:%s/ (pid %s)" % (info.get("port"), info.get("pid"))) if info else ""))
     try:
-        srv = ThreadingHTTPServer((bind, int(CFG.get("port", 8765) if port is None else port)), Handler)
+        srv = instancemod.QuickHTTPServer((bind, int(CFG.get("port", 8765) if port is None else port)), Handler)
     except OSError:
         inst.release()
         raise

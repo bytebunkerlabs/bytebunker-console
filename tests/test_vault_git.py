@@ -12,12 +12,13 @@ import sys
 import tempfile
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
 import vault as vaultmod  # noqa: E402
+from instance import QuickHTTPServer  # noqa: E402
 from test_api import Server  # noqa: E402
 
 
@@ -126,7 +127,7 @@ class AuthedRepo:
                 self.end_headers()
                 self.wfile.write(data)
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd = QuickHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.url = "http://127.0.0.1:%d/" % self.httpd.server_address[1]
 

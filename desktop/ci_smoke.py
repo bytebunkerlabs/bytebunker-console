@@ -16,10 +16,19 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:18765").rstrip("/")
 TOKEN = {"value": ""}
+
+
+class QuickHTTPServer(ThreadingHTTPServer):
+    """Without the DNS question http.server asks when it binds (socket.getfqdn): half a minute where the resolver is slow."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def instance_token():
@@ -127,7 +136,7 @@ checks.append(("tls: system certificates", (tls.get("ca_certs") or 0) > 0 and "P
                and "hostedtoolcache" not in caf.lower()))
 print("tls:", json.dumps(tls))
 
-mon = ThreadingHTTPServer(("127.0.0.1", 0), FakeMonitor)
+mon = QuickHTTPServer(("127.0.0.1", 0), FakeMonitor)
 threading.Thread(target=mon.serve_forever, daemon=True).start()
 mport = mon.server_address[1]
 try:

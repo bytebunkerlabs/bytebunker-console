@@ -8,10 +8,11 @@ import os
 import sys
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import monitors as monmod  # noqa: E402
+from instance import QuickHTTPServer  # noqa: E402
 
 
 def node(name, host=None, gen=None, running=0, ok=True):
@@ -55,7 +56,7 @@ class FakeMonitor:
                                             "nodes": json.loads(json.dumps(nodes))})
                 self._send(404, {"error": "not found"})
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = QuickHTTPServer(("127.0.0.1", 0), H)
         self.srv.daemon_threads = True
         self.port = self.srv.server_address[1]
         self.url = "http://127.0.0.1:%d" % self.port
@@ -147,7 +148,7 @@ class Merge(unittest.TestCase):
             def do_GET(self):
                 self.send_response(404)
                 self.end_headers()
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv = QuickHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             r = monmod.check("http://127.0.0.1:%d" % srv.server_address[1], "t")

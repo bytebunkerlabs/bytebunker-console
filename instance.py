@@ -11,12 +11,26 @@ so a stale instance.json is recognised and replaced.
 import json
 import os
 import secrets
+import socketserver
 import sys
 import time
 import urllib.request
+from http.server import ThreadingHTTPServer
 
 LOCK = "instance.lock"
 INFO = "instance.json"
+
+
+class QuickHTTPServer(ThreadingHTTPServer):
+    """A ThreadingHTTPServer that does not ask DNS for its own name.
+
+    http.server fills server_name with socket.getfqdn(host) when it binds, and nothing here reads it. Where the
+    resolver is slow that question takes half a minute (35 s on GitHub's macOS 15 machines, measured 2026-11-25),
+    and the app would start that much later."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def _lock(fh):

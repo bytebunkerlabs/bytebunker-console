@@ -12,12 +12,13 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "fakes"))
 from test_api import Server  # noqa: E402
+from instance import QuickHTTPServer  # noqa: E402
 from fake_engine import FakeEngine  # noqa: E402
 from fake_telegram import FakeTelegram  # noqa: E402
 
@@ -51,7 +52,7 @@ class Monitor:
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = QuickHTTPServer(("127.0.0.1", 0), H)
         self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 

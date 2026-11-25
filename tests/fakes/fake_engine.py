@@ -35,7 +35,16 @@ import sys
 import threading
 import time
 import uuid
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class QuickHTTPServer(ThreadingHTTPServer):
+    """Without the DNS question http.server asks when it binds (socket.getfqdn): half a minute where the resolver is slow."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def _tok(text):
@@ -159,7 +168,7 @@ class FakeEngine:
                     return engine._stream(self, body, reply)
                 return self._json(200, engine._whole(body, reply))
 
-        self.srv = ThreadingHTTPServer((self.host, self.port), H)
+        self.srv = QuickHTTPServer((self.host, self.port), H)
         self.srv.daemon_threads = True
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
