@@ -51,7 +51,7 @@ runs) by itself, so the model shows in the Playground without a pairing step.
 - A Windows PC reached over ssh is reached at its WSL2 Ubuntu (ssh into WSL), not Windows' own OpenSSH.
 - The signed, versioned installer from get.bytebunkerlabs.ai (decision 7) replaces `git clone` later; until then the
   app installs dgx-serve's main branch.
-- The old console recipes (vllm-cuda, ollama-windows) stay, folded under "Older recipes", until 1.0 removes them.
+- The old console recipes (vllm-cuda, ollama-windows) were removed in 0.9.1.
 
 ## Done when
 

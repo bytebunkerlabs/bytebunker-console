@@ -40,6 +40,90 @@ const check = (name, ok, detail) => { results.push([name, !!ok, detail || ""]); 
   check("agents: Settings has the court, every role, yours to name", courtText.includes("court") && courtText.includes("researcher") &&
         courtText.includes("malikah") && await page.locator('#agents-court [data-role="researcher"] input.text-input').first().isVisible().catch(() => false),
         courtText.slice(0, 120) + " " + errors.slice(-3).join(" | "));
+  // the court's models are the app's roles: shown on this tab, changed in Settings. What the server says is
+  // stubbed here (its own tests cover that); this is the page's part, whatever harness this run has
+  let courtSays = { harness_state: "spec", roles_unused: [], court_models: { master: "", thinking: "", fast: "fake-model" }, unserved: {},
+                    pool_engines: [{ name: "fake", model: "fake-model", slots: 4 }] };
+  await page.route("**/api/agents", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const r = await route.fetch();
+    await route.fulfill({ response: r, json: Object.assign(await r.json(), courtSays) });
+  });
+  const courtAgain = async (ready) => {
+    await page.click('[data-nav="playground"]');             // the screen asks the server again when it is opened
+    await page.click('[data-nav="agents"]');
+    await page.click('#agents-tabs [data-atab="settings"]');
+    await page.waitForFunction(ready, null, { timeout: 15000 }).catch(() => {});
+    return await page.locator("#court-models").innerText().catch(() => "");
+  };
+  let courtModels = await courtAgain(() => ((document.querySelector('#court-models [data-role="fast"]') || {}).textContent || "").startsWith("minions: fake-model"));
+  check("agents: Settings shows the court's models, taken from the roles",
+        courtModels.includes("minions: fake-model") && courtModels.includes("master: the worker's default") &&
+        await page.locator("#model-master, #model-slave, #model-thinking").count() === 0 && await page.locator("#court-models-old").count() === 0, courtModels);
+  const poolNow = await page.locator("#minion-pool-now").innerText().catch(() => "");
+  check("agents: the minion pool starts from the fast role's model", poolNow.includes("fake-model"), poolNow);
+  // Save on the master's card still saves (it once read the pickers that are gone)
+  await page.fill("#minion-slots", "6");
+  await page.click("#master-save");
+  await page.waitForFunction(() => (document.querySelector("#master-note") || {}).textContent.includes("Saved"), null, { timeout: 8000 }).catch(() => {});
+  const savedSlots = (await (await fetch(BASE + "/api/agents")).json()).minion_slots;
+  check("agents: Save on the master's card saves", (await page.locator("#master-note").innerText().catch(() => "")).includes("Saved") && savedSlots === 6,
+        (await page.locator("#master-note").innerText().catch(() => "")) + " slots " + savedSlots + " " + errors.slice(-2).join(" | "));
+  await post("/api/agents", { action: "config", master_name: "", master_instructions: "", minion_slots: 4 });
+  await page.click('[data-nav="playground"]');
+  await page.click('[data-nav="agents"]');
+  await page.click('#agents-tabs [data-atab="master"]');
+  await page.waitForFunction(() => ((document.querySelector("#agents-summary") || {}).textContent || "").includes("minions fake-model"), null, { timeout: 15000 }).catch(() => {});
+  const summary = await page.locator("#agents-summary").innerText().catch(() => "");
+  check("agents: the Master tab's summary names the minions' model", summary.includes("minions fake-model"), summary);
+  // a role whose model nobody serves is marked where the court's models are shown
+  courtSays = Object.assign({}, courtSays, { court_models: { master: "", thinking: "gone-model", fast: "fake-model" }, unserved: { thinking: "gone-model" } });
+  await courtAgain(() => !!document.querySelector('#court-models [data-role="thinking"] .not-served'));
+  const mark = await page.locator('#court-models [data-role="thinking"]').innerText().catch(() => "");
+  check("agents: a role's model nobody serves is marked", mark.includes("gone-model") && mark.includes("not served anywhere") &&
+        await page.locator('#court-models [data-role="fast"] .not-served').count() === 0, mark);
+  // a worker whose harness is too old to be handed the roles keeps its own models, and the page says so
+  courtSays = { harness_state: "old", roles_unused: ["fast"], court_models: { master: "", thinking: "", fast: "" }, unserved: {}, pool_engines: [] };
+  courtModels = await courtAgain(() => (document.querySelector("#court-models-old") || { dataset: {} }).dataset.state === "old");
+  const hover = (role) => page.locator('#court-models [data-role="' + role + '"]').getAttribute("title").catch(() => "");
+  check("agents: a worker too old for the roles is said to keep its own models", courtModels.includes("too old to take your roles") &&
+        courtModels.includes("minions: the worker's default") && (await hover("fast")).includes("names a model, and this worker is not handed it") &&
+        (await hover("master")).includes("names no model"), courtModels + " | " + await hover("fast") + " | " + await hover("master"));
+  // a harness on this computer that cannot be read is taken as old by a goal, and the page says which it is
+  courtSays = Object.assign({}, courtSays, { harness_state: "unread" });
+  courtModels = await courtAgain(() => (document.querySelector("#court-models-old") || { dataset: {} }).dataset.state === "unread");
+  check("agents: a harness that cannot be read is said to keep its own models", courtModels.includes("could not be read, so it keeps its own models") &&
+        !courtModels.includes("too old"), courtModels);
+  // a worker over ssh nobody has asked yet: the roles are shown, with the word that it has not said
+  courtSays = { harness_state: "unasked", roles_unused: [], court_models: { master: "", thinking: "", fast: "fake-model" }, unserved: {}, pool_engines: [] };
+  courtModels = await courtAgain(() => (document.querySelector("#court-models-old") || { dataset: {} }).dataset.state === "unasked");
+  check("agents: a worker nobody has asked yet is shown with the roles, and the page says so", courtModels.includes("minions: fake-model") &&
+        courtModels.includes("has not said yet whether it takes your roles") && !courtModels.includes("too old"), courtModels);
+  // with no role naming a model there is nothing to say of any of them
+  courtSays = { harness_state: "unasked", roles_unused: [], court_models: { master: "", thinking: "", fast: "" }, unserved: {}, pool_engines: [] };
+  courtModels = await courtAgain(() => !document.querySelector("#court-models-old"));
+  const quietOld = Object.assign({}, courtSays, { harness_state: "old" });
+  const quietUnasked = await page.locator("#court-models-old").count();
+  courtSays = quietOld;
+  courtModels = await courtAgain(() => !document.querySelector("#court-models-old"));
+  await page.waitForTimeout(400);
+  check("agents: with no role naming a model, nothing is said of the worker's harness", quietUnasked === 0 &&
+        await page.locator("#court-models-old").count() === 0 && courtModels.includes("minions: the worker's default"), courtModels);
+  // a server from before 0.9.1 says nothing of the court's models: the line is drawn and nothing breaks
+  const before = errors.length;
+  courtSays = { harness_state: undefined, roles_unused: undefined, court_models: undefined, unserved: undefined, pool_engines: undefined };
+  courtModels = await courtAgain(() => !document.querySelector("#court-models-old"));
+  check("agents: an answer without the court's models draws the line and breaks nothing", courtModels.includes("master: the worker's default") &&
+        errors.length === before, courtModels + " " + errors.slice(before).join(" | "));
+  await page.unroute("**/api/agents");
+  await page.click("#court-models-roles");
+  await page.waitForTimeout(600);
+  check("agents: its link opens Settings on Roles", await page.locator("#settings-box .card", { hasText: "Roles" }).first().isVisible().catch(() => false),
+        await page.evaluate(() => location.hash));
+  await page.click('[data-nav="agents"]');
+  await page.waitForTimeout(600);
+  await page.click('#agents-tabs [data-atab="settings"]');
+  await page.waitForSelector('#agents-court [data-role="researcher"]', { timeout: 8000 }).catch(() => {});
   // Access: a folder for the khazin, read-only; a network role is offered none
   check("agents: the khazin waits for access", (await page.locator('#agents-court [data-role="khazin"]').innerText().catch(() => "")).includes("nothing yet"));
   await page.locator("#agents-court .court-access-box summary").click();

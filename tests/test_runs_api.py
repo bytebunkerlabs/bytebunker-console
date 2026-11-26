@@ -181,9 +181,9 @@ class AgentRunsV2Test(unittest.TestCase):
         cls.srv = Server(cls.data, {
             "gateways": [{"name": "lan", "url": cls.eng.url.replace("127.0.0.1", "localhost"), "key": "k-1",
                           "enabled": True, "agents_url": "http://192.0.2.10:8000/v1"}],
-            "roles": {"fast": "fake-model"},
+            "roles": {"fast": "fake-model", "big": "fake-model"},
             "agents": {"enabled": True, "ssh": "", "dir": cls.data, "python": sys.executable,
-                       "script": "fake_harness_v2.py", "master_model": "fake-model"}})
+                       "script": "fake_harness_v2.py"}})
 
     @classmethod
     def tearDownClass(cls):
@@ -246,6 +246,45 @@ class AgentRunsV2Test(unittest.TestCase):
         self.srv.request("POST", "/api/agents", {"action": "court", "court": {"roles": {}}})
         rid, frames, full = self.goal("quick")
         self.assertFalse(any(f.get("line", "").startswith("court ") for f in frames))
+
+    def test_the_court_runs_on_the_apps_roles(self):
+        # Agents, Settings had a model picker for the master, the thinking roles and the minions. The roles
+        # decide now, and the screen is told what the court would run on
+        st, d = self.srv.request("GET", "/api/agents")           # a harness on this computer is read on the spot
+        self.assertEqual((d["harness_state"], d["roles_unused"], d["court_models"], d["unserved"]),
+                         ("spec", [], {"master": "fake-model", "thinking": "", "fast": "fake-model"}, {}))
+        self.assertEqual([e["model"] for e in d["pool_engines"]], ["fake-model"])
+        try:                                                    # the minions' engine is the fast role's, not the master's
+            self.srv.request("POST", "/api/settings", {"roles": {"big": "", "thinking": "fake-model"}})
+            st, d2 = self.srv.request("GET", "/api/agents")
+            self.assertEqual((d2["court_models"], [e["model"] for e in d2["pool_engines"]]),
+                             ({"master": "", "thinking": "fake-model", "fast": "fake-model"}, ["fake-model"]))
+            self.srv.request("POST", "/api/settings", {"roles": {"fast": ""}})
+            st, d3 = self.srv.request("GET", "/api/agents")
+            self.assertEqual(d3["pool_engines"], [])
+        finally:
+            self.srv.request("POST", "/api/settings", {"roles": {"big": "fake-model", "thinking": "", "fast": "fake-model"}})
+        self.assertFalse({"master_model", "thinking_model", "slave_model"} & set(d))
+        # a pick sent by a page from before is not kept
+        st, r = self.srv.request("POST", "/api/agents", {"action": "config", "master_name": "Sultan", "master_instructions": "",
+                                                         "master_model": "x", "thinking_model": "y", "slave_model": "z"})
+        self.assertEqual(st, 200, r)
+        self.assertFalse({"master_model", "thinking_model", "slave_model"} & set(r))
+        with open(os.path.join(self.data, "config.json"), encoding="utf-8") as f:
+            self.assertFalse({"master_model", "thinking_model", "slave_model"} & set(json.load(f)["agents"]))
+        # a role whose model nobody serves: the screen is told which, and a goal says where to change it
+        try:
+            self.srv.request("POST", "/api/settings", {"roles": {"thinking": " gone-model "}})
+            st, d = self.srv.request("GET", "/api/agents")
+            self.assertEqual((d["court_models"]["thinking"], d["unserved"]), ("gone-model", {"thinking": "gone-model"}))
+            st, r = self.srv.request("POST", "/api/agents", {"goal": "quick"})
+            self.assertEqual(st, 400, r)
+            self.assertIn("the thinking roles' model gone-model is not served anywhere right now", r["error"])
+            self.assertIn("a role's model in Settings, Roles", r["error"])
+        finally:
+            self.srv.request("POST", "/api/settings", {"roles": {"thinking": ""}})
+        st, d = self.srv.request("GET", "/api/agents")
+        self.assertEqual(d["unserved"], {})
 
     def test_the_run_names_the_goal_and_the_spec_stays_private(self):
         rid, frames, full = self.goal("quick")

@@ -207,24 +207,20 @@ rack runs the same file bare: `python3 rackmon.py serve` with
 
 The agents worker's own GPU and model, read over ssh by the agents poll, is
 drawn as one more unit. The Playground's "engine is busy" hint (when a stream
-goes quiet while a tool call buffers) reads the same monitors; a Prometheus
-that scrapes vLLM (`prometheus_url`) is only asked when no monitor reports an
-engine.
+goes quiet while a tool call buffers) reads the same monitors.
 
 ---
 
-## Model deployment recipes
+## Serve a model
 
-The **Recipes** screen deploys a model from the console. A recipe is a
-parameter form that renders the exact files it would run — install script,
-serve script, systemd unit, litellm entry — so you read them before anything
-executes. **Deploy** runs the script over ssh on the target host with the log
-streamed into the right pane; **Register in litellm** appends the entry to the
-gateway's config (`litellm.ssh`, `litellm.config_path`, `litellm.container` in
-`config.json`) and restarts it, so the new model shows up by name in the
-Models screen and in the harness. Shipped recipes: vLLM on any CUDA GPU (Linux
-or WSL2, tool calling on, rootless service), Ollama on Windows (manual steps),
-vLLM on DGX Spark (docker, one or two nodes).
+The **Deploy** screen serves a model with dgx-serve: on this computer, or on
+any machine you add as you reach it with ssh (a DGX Spark, a Linux box with an
+NVIDIA GPU, a Windows PC through WSL2, an Apple Silicon Mac). Pick the machine,
+then a recipe that fits it. **Read** shows what a recipe runs and **Serve**
+starts it with the log streamed beside it. On this computer the engine becomes
+a gateway by itself once the model answers; a machine you add offers its engine
+as a gateway and its monitor for Cluster. `bb deploy` and `bb pair` do the same
+from a terminal. Details: Docs, *Serve a model*.
 
 ## Skills and plugins
 
@@ -448,7 +444,6 @@ WireGuard) works the same way.
 | `upstream_url` / `upstream_key` | — | legacy single upstream; becomes the gateway `upstream`, and is kept in sync with the first enabled gateway |
 | `uploads_dir` | `data/uploads` | where attachments are saved; put it under a tool's root to let tools read them |
 | `monitors` | *(empty)* | list of `{name, url, token, enabled}`: rack monitors the Cluster screen reads (add them from Cluster › Monitors) |
-| `prometheus_url` | *(empty)* | optional fallback for the Playground's engine-busy hint when no monitor reports an engine |
 | `mcp_servers` | *(empty)* | `command`, `args`, `env`, `enabled` |
 | `frontier_rates_per_mtok` | 3 / 15 | used for the "not spent" figure on Usage |
 | `skills_dirs` | *(empty)* | extra directories of skill packs; point one at the agent harness's `skills/` to share them |
@@ -534,7 +529,7 @@ schedules) and what is deliberately still an empty state.
 
 ```
 server.py     HTTP server: static files, streaming chat proxy, sessions,
-              usage ledger, Prometheus queries, MCP admin
+              usage ledger, MCP admin
 mcp.py        MCP host — stdio JSON-RPC clients, tool discovery and calls
 public/       index.html · console.css · console.js   (no build step)
 config.json   yours, gitignored; config.json.example is the template

@@ -387,8 +387,8 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None,
     is off or unconfigured. The goal is never interpolated into a shell
     unquoted: locally it is its own argv element; over SSH it is shlex-quoted
     inside the single remote command string. instructions, master_name,
-    timeout_s and models ({master, thinking, fast}) are this one run's, over
-    the Agents screen's (a persistent agent's goal)."""
+    timeout_s and models ({master, thinking, fast}) are this one run's own (a
+    persistent agent's goal)."""
     a = agent_cfg(CFG)
     if not a.get("enabled"):
         raise AgentConfigError(
@@ -433,14 +433,15 @@ def build_command(CFG, goal, run_id=None, spec_len=0, spec_path=None, caps=None,
     said = (instructions if instructions is not None else a.get("master_instructions") or "").strip()
     if said:
         envs["BYTEBUNKER_MASTER_INSTRUCTIONS"] = said[:60000]
-    # which engine each role uses — chosen on the Agents screen (or by the router, for an
-    # agent's run), overriding the worker's config.yaml for this run only
-    for key, env, role in (("master_model", "BYTEBUNKER_MASTER_MODEL", "master"),
-                           ("thinking_model", "BYTEBUNKER_THINKING_MODEL", "thinking"),
-                           ("slave_model", "BYTEBUNKER_SLAVE_MODEL", "fast")):
-        chosen = ((models or {}).get(role) or a.get(key) or "").strip()
+    # which engine each role uses, for a harness that takes no run spec (one that does reads them in the
+    # spec and is handed none here): this run's own choice, which a persistent agent's router made. It
+    # overrides the worker's config.yaml for this run only; the router's id@gateway goes by its id. The
+    # app's roles never travel this way: a harness that old keeps its own config
+    for env, role in (("BYTEBUNKER_MASTER_MODEL", "master"), ("BYTEBUNKER_THINKING_MODEL", "thinking"),
+                      ("BYTEBUNKER_SLAVE_MODEL", "fast")):
+        chosen = str((models or {}).get(role) or "").strip()
         if chosen:
-            envs[env] = chosen.rsplit("@", 1)[0] if "@" in chosen and models else chosen
+            envs[env] = chosen.rsplit("@", 1)[0] if "@" in chosen else chosen
 
     if ssh:
         # one remote command string; every interpolated value is quoted. A

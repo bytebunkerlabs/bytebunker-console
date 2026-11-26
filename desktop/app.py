@@ -96,7 +96,7 @@ def first_run_config(home):
         "mcp_servers": servers,
         "agents": {"enabled": False, "ssh": "", "dir": "~/bytebunker-harness", "python": "uv run",
                    "script": "scripts/run_master.py", "master_name": "Sultan", "master_instructions": "",
-                   "run_timeout_s": 10800, "master_model": "", "thinking_model": "", "slave_model": ""},
+                   "run_timeout_s": 10800},
         "frontier_rates_per_mtok": {"input": 3.0, "output": 15.0},
     }
 
@@ -283,7 +283,7 @@ def run_mcp(args):
             stream.reconfigure(encoding="utf-8")
         except Exception:   # noqa: BLE001
             pass
-    sys.argv = [script] + rest          # the terminal server reads its root from argv at import
+    sys.argv = [script] + rest          # the terminal server reads its folder from argv when it starts
     root = code_root()
     if root not in sys.path:
         sys.path.insert(0, root)

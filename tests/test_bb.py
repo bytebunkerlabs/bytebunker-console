@@ -116,6 +116,37 @@ class BBTest(unittest.TestCase):
         second = self.eng.requests[n + 1]["body"]["messages"]
         self.assertEqual([m["content"] for m in second], ["hi", "hello there", "and again"])   # one session
 
+    def test_bb_leaves_the_folder_it_runs_in_as_it_was(self):
+        # the terminal tool once made, on import, a folder named after the program's first argument: `bb ask ...`
+        # left a folder called ask wherever it was run
+        folder = tempfile.mkdtemp()
+        try:
+            self.eng.script([{"content": "hello"}])
+            r = self.bb("ask", "-m", MODEL, "say hi", stdin="", cwd=folder)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.listdir(folder), [])
+            code = ("import sys; sys.path.insert(0, %r); sys.argv = ['prog', 'made-on-import']; import mcp_terminal; "
+                    "print(mcp_terminal.STATE['cwd'])" % ROOT)
+            out = subprocess.run([sys.executable, "-c", code], cwd=folder, capture_output=True, text=True, timeout=30)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(os.listdir(folder), [])
+            # the server itself still makes the folder it is told to work in
+            made = os.path.join(folder, "work here")
+            out = subprocess.run([sys.executable, os.path.join(ROOT, "mcp_terminal.py"), made], input="", cwd=folder,
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertTrue(os.path.isdir(made))
+            # a folder that cannot be made is not kept as the place to work: home is
+            with open(os.path.join(folder, "a-file"), "w") as f:
+                f.write("x")
+            code = ("import os, sys; sys.path.insert(0, %r); import mcp_terminal; mcp_terminal.start_in(%r); "
+                    "print(mcp_terminal.STATE['cwd'] == os.path.expanduser('~'), mcp_terminal.STATE['root'] == os.path.realpath(os.path.expanduser('~')))"
+                    % (ROOT, os.path.join(folder, "a-file", "under-a-file")))
+            out = subprocess.run([sys.executable, "-c", code], cwd=folder, capture_output=True, text=True, timeout=30)
+            self.assertEqual(out.stdout.strip(), "True True", out.stderr)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_the_model_works_in_bbs_folder(self):
         folder = tempfile.mkdtemp()
         try:

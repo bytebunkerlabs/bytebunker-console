@@ -54,12 +54,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler
 
 from traces import TraceLog, StreamCapture, export_lines
 import skills as skillmod
 import agents as agentmod
-import recipes as recipemod
 import mcp_catalog as catmod
 import jobs as jobmod
 import gateways as gwmod
@@ -120,9 +120,6 @@ DEFAULT_CONFIG = {
     # machines serving with dgx-serve, paired over ssh (racks.py):
     # [{"name", "ssh", "paired", "app", "gateway", "monitor"}]
     "racks": [],
-    # optional, legacy: a Prometheus that scrapes vLLM, asked only when no
-    # monitor reports an engine (the playground's "engine is busy" hint)
-    "prometheus_url": "",
     "h3_url": "",
     "netcheck_ssh": "",
     "identity": None,           # who and where, shown in the sidebar: this machine's user and name
@@ -246,7 +243,7 @@ def _default_identity():
 # file is migrated on start (the original kept beside it), and an edit made
 # by hand while the server runs is picked up before the next change, so a
 # save never undoes an edit it has not seen.
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 CONFIG_WARNINGS = []             # shown in the app: what happened to the file and where the original is
 _CFG_STAMP = [None]              # (mtime, size) of config.json as this server last read or wrote it
 _CFG_MIGRATED = []
@@ -283,10 +280,21 @@ def _read_config_file(path):
     return data
 
 
+def _config_version(cfg):
+    """The version a config file says it is; one that says nothing, or nothing usable, is the first."""
+    try:
+        return int(cfg.get("config_version") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+_MIGRATION_NOTES = []            # what a migration changed that its owner should hear about
+
+
 def migrate_config(cfg):
     """Bring a config to CONFIG_VERSION, in order. Returns the steps taken."""
     steps = []
-    v = cfg.get("config_version") or 1
+    v = _config_version(cfg)
     if v < 2:
         # 2 (0.3): model servers are gateways, not one upstream_url; the
         # sparkDash era's keys (replaced by rack monitors in 0.2) go
@@ -298,6 +306,31 @@ def migrate_config(cfg):
         # 3 (0.4.2): the one `rack` becomes the first of `racks`, which Add a rack pairs
         racksmod.migrate(cfg)
         steps.append("3: racks")
+    if v < 4:
+        # 4 (0.9.1): the court's three model pickers are gone. Its master, thinking roles and minions run on
+        # the app's roles (Settings, Roles: big, thinking, fast), so a pick made there moves to its role when
+        # that role names no model yet. Two keys nothing reads go with them: the Prometheus fallback and the
+        # old recipes' LiteLLM target
+        a = cfg.get("agents") or {}
+        for key, role, who in (("master_model", "big", "the master"), ("thinking_model", "thinking", "the thinking roles"),
+                               ("slave_model", "fast", "the minions")):
+            m = a.pop(key, "")
+            m = m.strip() if isinstance(m, str) else ""
+            if not m:
+                continue
+            if not isinstance(cfg.get("roles"), dict):
+                cfg["roles"] = {}
+            had = cfg["roles"].get(role)
+            had = had.strip() if isinstance(had, str) else ""
+            if not had:
+                cfg["roles"][role] = m
+            elif had != m:
+                # two settings said different things. The role stays as it is (profiles, jobs and bb use
+                # it too) and the court follows it from now on: said once, where the app shows its warnings
+                _MIGRATION_NOTES.append("%s ran on %s, and the %s role names %s" % (who, m, role, had))
+        for k in ("prometheus_url", "litellm"):
+            cfg.pop(k, None)
+        steps.append("4: the court's models are the app's roles")
     cfg["config_version"] = CONFIG_VERSION
     return steps
 
@@ -306,6 +339,13 @@ def _fresh_config(disk):
     cfg = dict(DEFAULT_CONFIG)
     cfg["identity"] = _default_identity()
     cfg.update(disk or {})
+    # a hand-edited "roles" or "agents" that is not an object names nothing: every reader takes an object, so
+    # it is dropped here, where a file comes in, and the default stands
+    for k in ("roles", "agents"):
+        if k in cfg and not isinstance(cfg[k], dict):
+            cfg.pop(k)
+            if k in DEFAULT_CONFIG:
+                cfg[k] = dict(DEFAULT_CONFIG[k])
     return cfg
 
 
@@ -318,7 +358,7 @@ def load_config():
                                "Your file is kept as %s." % (str(e)[:160], os.path.basename(kept)))
         disk = None
     cfg = _fresh_config(disk)
-    if disk is not None and (disk.get("config_version") or 1) < CONFIG_VERSION:
+    if disk is not None and _config_version(disk) < CONFIG_VERSION:
         _CFG_MIGRATED.extend(migrate_config(cfg))
     else:
         cfg["config_version"] = CONFIG_VERSION
@@ -1171,7 +1211,7 @@ AUDIT_SKIP = ("/api/chat", "/api/handoff", "/api/tool-call", "/api/usage-event",
 AUDIT_CATEGORY = {"settings": "settings", "profiles": "settings", "update": "settings", "config": "settings",
                   "mcp": "tools", "plugins": "tools", "skills": "tools", "tools": "tools", "git": "access",
                   "gateways": "serving", "monitors": "serving", "racks": "serving", "rack": "serving",
-                  "recipes": "serving", "machines": "serving", "engine": "serving",
+                  "machines": "serving", "engine": "serving",
                   "agents": "agents", "jobs": "runs", "workflows": "runs", "runs": "runs",
                   "approvals": "access", "terminal": "access", "channels": "access",
                   "sessions": "data", "projects": "data", "archive": "data", "export": "data"}
@@ -1228,7 +1268,7 @@ def audit_action(method, path, body, query):
     return cat, action, target, detail
 
 
-AUDIT_OUTCOMES = {"rack": "serving", "machine": "serving", "recipe": "serving", "agents": "agents",
+AUDIT_OUTCOMES = {"rack": "serving", "machine": "serving", "agents": "agents",
                   "mcp": "tools", "update": "settings"}
 
 
@@ -1254,8 +1294,8 @@ TRACE.on_log = audit_from_trace
 
 def agents_spec(models=None, agent=None, court=None, key=""):
     """This run's models for the harness (--spec): master, thinking and fast,
-    from the Agents screen's choices, else the app's roles (big, thinking,
-    fast); each with its gateway's address and key. An engine on this
+    from the app's roles (big, thinking, fast) unless the run has its own;
+    each with its gateway's address and key. An engine on this
     machine's loopback is left to a remote worker's own config (it cannot
     reach it) but given to agents on this computer, which can; a gateway can
     name the address agents use (agents_url).
@@ -1268,10 +1308,7 @@ def agents_spec(models=None, agent=None, court=None, key=""):
     with one (the same harness that knows agents)."""
     a = CFG.get("agents") or {}
     remote = bool((a.get("ssh") or "").strip())
-    roles = CFG.get("roles") or {}
-    pick = {"master": a.get("master_model") or roles.get("big"),
-            "thinking": a.get("thinking_model") or roles.get("thinking"),
-            "fast": a.get("slave_model") or roles.get("fast")}
+    pick = court_models()
     for role, m in (models or {}).items():
         if role in pick and isinstance(m, dict) and m.get("model"):
             pick[role] = m["model"]
@@ -1324,8 +1361,33 @@ def agents_spec(models=None, agent=None, court=None, key=""):
 
 
 EFFORTS = ("off", "low", "medium", "high", "max")
-ROLE_LABELS = {"master_model": "the master", "thinking_model": "the thinking roles",
-               "slave_model": "the minions"}
+# a court role, the app's role it runs on (Settings, Roles), and what it is called when its model is missing
+COURT_ROLES = (("master", "big", "the master"), ("thinking", "thinking", "the thinking roles"),
+               ("fast", "fast", "the minions"))
+
+
+def court_models(chosen=None, roles=True):
+    """{master, thinking, fast: a model, or ""}: this run's own choice (a persistent agent's router made
+    it), else the app's role for it, else "" for the worker's own default. roles=False: without the app's
+    roles, which is all a harness that takes no run spec is ever handed."""
+    named = (CFG.get("roles") or {}) if roles else {}
+    return {r: str((chosen or {}).get(r) or named.get(app) or "").strip() for r, app, _ in COURT_ROLES}
+
+
+def not_served(models):
+    """Those of these models that no gateway serves right now, each once. The gateways are asked afresh
+    once, and only when one is missing: a gateway that is away costs one wait, however many are asked about."""
+    want = [m for m in dict.fromkeys(str(x or "").strip() for x in models) if m]
+    if not want:
+        return []
+
+    def missing():
+        ids = {m["id"] for m in GW.models}
+        return [m for m in want if m not in ids and m not in GW.model_map]
+    GW.refresh()
+    if missing():
+        GW.refresh(force=True)
+    return missing()
 
 
 def model_served(model):
@@ -1341,34 +1403,68 @@ def model_served(model):
     return model in {m["id"] for m in GW.models} or model in GW.model_map
 
 
-def unserved_roles(a=None):
-    """[(who, model)] for each role whose chosen model no gateway serves (a blank
-    choice is the worker's own default, not checked here)."""
+def harness_state(a, caps):
+    """What is known of the worker's harness, as a goal started now would find it. "spec": it takes a run spec, and
+    with it the app's roles. "old": it is too old to. "unread": it is on this computer and cannot be read, which a
+    goal takes as old. "unasked": a worker over ssh that has not answered yet, which a goal asks first. "": no
+    worker is set up."""
+    if caps.get("spec"):
+        return "spec"
+    if caps:
+        return "old"
+    if (a.get("ssh") or "").strip():
+        return "unasked"
+    return "unread" if (a.get("dir") or "").strip() else ""
+
+
+def court_status(a, caps):
+    """What Agents, Settings shows of the court's models, from one look at the gateways. The line shows the app's
+    roles ("" is the worker's own default) unless this worker is known not to be handed them: too old, or not
+    readable. One nobody has asked yet is shown with the roles, and the page says that it has not said.
+    roles_unused: the roles that name a model this worker is not handed. unserved: the shown models no gateway
+    serves. pool_engines: the engines a run's minions would spread over now, as the run spec would name them."""
+    state = harness_state(a, caps)
+    handed = state not in ("old", "unread")
+    shown, fast = court_models(roles=handed), court_models()["fast"]
+    ticked = [str(e["model"]).strip() for e in (a.get("minion_pool") or []) if isinstance(e, dict) and e.get("model")]
+    gone = set(not_served(list(shown.values()) + [fast] + ticked))
+    return {"harness_state": state, "court_models": shown,
+            "roles_unused": [] if handed else [r for r, m in court_models().items() if m],
+            "unserved": {r: m for r, m in shown.items() if m in gone},
+            "pool_engines": [{k: e[k] for k in ("name", "model", "slots")}
+                             for e in minion_pool(a, fast, bool((a.get("ssh") or "").strip()), gone=gone)]}
+
+
+def unserved_roles(chosen=None, a=None):
+    """[(who, model)] for each court role whose model no gateway serves. A run's own choice always counts.
+    The app's role for it counts when the worker's harness takes a run spec: an older one is not handed the
+    roles and keeps its config.yaml (unserved_worker_defaults). A ticked minion engine counts where the
+    harness takes the pool, which travels in the spec."""
     a = a if a is not None else (CFG.get("agents") or {})
-    out = [(ROLE_LABELS[k], a[k]) for k in ("master_model", "thinking_model", "slave_model")
-           if (a.get(k) or "").strip() and not model_served(a[k].strip())]
-    out += [("a minion engine", e["model"]) for e in (a.get("minion_pool") or [])
-            if isinstance(e, dict) and e.get("model") and not model_served(e["model"])]
-    return out
+    caps = a.get("harness") or {}
+    picked = court_models(chosen, roles=bool(caps.get("spec")))
+    pool = [str(e["model"]).strip() for e in (a.get("minion_pool") or []) if isinstance(e, dict) and e.get("model")] \
+        if caps.get("spec") and caps.get("pool") else []
+    gone = set(not_served(list(picked.values()) + pool))
+    return ([(who, picked[r]) for r, _, who in COURT_ROLES if picked[r] in gone]
+            + [("a minion engine", m) for m in pool if m in gone])
 
 
-def unserved_worker_defaults(a=None):
+def unserved_worker_defaults(chosen=None, a=None):
     """[(who, model)] for each role this run leaves to the worker's config.yaml
     (no model chosen here, or a harness that takes no run spec) whose model no
     gateway serves: such a goal would fail at its first call to that role."""
     a = a if a is not None else (CFG.get("agents") or {})
-    roles = CFG.get("roles") or {}
     takes_spec = bool((a.get("harness") or {}).get("spec"))
-    chosen = {"master": a.get("master_model") or roles.get("big"),
-              "thinking": a.get("thinking_model") or roles.get("thinking"),
-              "fast": a.get("slave_model") or roles.get("fast")}
-    left = [r for r in ("master", "thinking", "fast") if not (takes_spec and (chosen[r] or "").strip())]
+    picked = court_models(chosen)
+    left = [r for r in ("master", "thinking", "fast") if not (takes_spec and picked[r])]
     if not left:
         return []
     defaults = agentmod.worker_models(CFG)
     who = {"master": "the master (the worker's config.yaml)", "thinking": "the thinking roles (the worker's config.yaml)",
            "fast": "the minions (the worker's config.yaml)"}
-    return [(who[r], defaults[r]) for r in left if defaults.get(r) and not model_served(defaults[r])]
+    gone = set(not_served([defaults.get(r) for r in left]))
+    return [(who[r], defaults[r]) for r in left if defaults.get(r) and str(defaults[r]).strip() in gone]
 
 
 def _caps_only(caps):
@@ -1402,44 +1498,51 @@ def keep_worker_caps(res, ssh, d):
             a["harness"] = res["harness"]
 
 
+def _not_served_said(who, model):
+    """One missing model in words: "the master's model glm is not served anywhere right now". who may end in
+    where the model is named ("the minions (the worker's config.yaml)"), which goes after the model's name."""
+    whose, _, where = who.partition(" (")
+    return "%s%s model %s%s is not served anywhere right now" % (
+        whose, "'" if whose.endswith("s") else "'s", model, " (" + where if where else "")
+
+
 def agents_ready(goal, models=None):
     """AgentConfigError unless a goal can start: agents set up, and every chosen
     model served somewhere now (a goal that starts anyway spends its workers on one
     error; measured: six on an HTTP 404). models: one run's own choices
-    ({role: model}), over the Agents screen's."""
+    ({role: model}), over the app's roles."""
     agentmod.build_command(CFG, goal)
     agents_caps()                                        # what its harness takes decides which models are checked
     a = None
-    if models:
-        a = dict(CFG.get("agents") or {})
-        for role, key in (("master", "master_model"), ("thinking", "thinking_model"), ("fast", "slave_model")):
-            if models.get(role):
-                a[key] = models[role]
-        if models.get("pool"):
-            a["minion_pool"] = [{"model": m} for m in models["pool"]]
-    missing = unserved_roles(a) + unserved_worker_defaults(a)
+    if models and models.get("pool"):
+        a = dict(CFG.get("agents") or {}, minion_pool=[{"model": m} for m in models["pool"]])
+    missing = unserved_roles(models, a) + unserved_worker_defaults(models, a)
     if missing:
         raise agentmod.AgentConfigError(
-            "not started: " + "; ".join("%s' model %s is not served anywhere right now" % (w, m) for w, m in missing)
-            + ". Pick served models in Agents > Settings > Models, or serve them on the Deploy screen."
+            "not started: " + "; ".join(_not_served_said(w, m) for w, m in missing)
+            + ". Serve it on the Deploy screen, or change it: a role's model in Settings, Roles (big, thinking, fast),"
+              " a minion engine on Agents, Settings."
             + ("" if ((CFG.get("agents") or {}).get("harness") or {}).get("spec") or not any(
                 "config.yaml" in w for w, _ in missing) else
-               " This worker's harness is too old to take the models picked here: Work here updates it."))
+               " This worker's harness is too old to take the models named in this app: Work here updates it."))
 
 
-def minion_pool(a, first, remote):
+def minion_pool(a, first, remote, gone=None):
     """The engines the minions spread over: the minion model's own, then each one
     added in Agents > Settings (agents.minion_pool: [{model, slots}], a model as
     "id" or "id@gateway" for the same model on another machine). An engine on this
-    machine's loopback is left out for a remote worker, which cannot reach it."""
+    machine's loopback is left out for a remote worker, which cannot reach it.
+    gone: the models already found to be served nowhere, when the caller has looked."""
     entries = ([{"model": first, "slots": a.get("minion_slots") or 4}] if first else []) + \
         [e for e in (a.get("minion_pool") or []) if isinstance(e, dict) and e.get("model")]
+    names = [str(e["model"]).strip() for e in entries]
+    gone = set(not_served(names)) if gone is None else gone      # one look, however many are missing
     out, seen = [], set()
-    for e in entries:
-        if not model_served(e["model"]):
+    for e, model in zip(entries, names):
+        if not model or model in gone:
             continue                    # served nowhere: never the first gateway by default
         try:
-            mid, gw = GW.resolve(e["model"])
+            mid, gw = GW.resolve(model)
         except Exception:   # noqa: BLE001
             continue
         if not gw:
@@ -1487,7 +1590,7 @@ def agent_goal(run, emit, goal, via="app", agent=None):
         # a harness from before agents cannot be given this agent's egress list, its memory tools or its
         # home: its workers would reach whatever the worker reaches. The dispatcher answers in one turn
         # instead (agents_court_ready); this is for a harness that changed between its look and now
-        raise AgentConfigError("not started: the worker's harness predates agents that persist. Update it there "
+        raise agentmod.AgentConfigError("not started: the worker's harness predates agents that persist. Update it there "
                                "(Agents, Settings: Work here updates it).")
     # a harness that knows agents signs every protocol line with a key made up for this run (it goes
     # in the spec, a 0600 file or the worker's stdin, and into no prompt). With one, a line that only
@@ -1891,6 +1994,18 @@ def save_config():
         _CFG_STAMP[0] = _stamp(path)
 
 
+def _migration_said(kept):
+    """What a migration changed that its owner should hear about becomes one warning, with the copy kept."""
+    if _MIGRATION_NOTES:
+        CONFIG_WARNINGS.append(
+            "The court's model picks moved to your roles (Settings, Roles). A pick whose role already named "
+            "another model did not move, and the role stays as it is: %s. %s"
+            % ("; ".join(_MIGRATION_NOTES),
+               "Your settings from before are kept as %s." % os.path.basename(kept) if kept and os.path.exists(kept)
+               else "No copy of your settings from before could be made; the file is as it was."))
+        del _MIGRATION_NOTES[:]
+
+
 def config_fresh():
     """Pick up an edit made to config.json while the server runs. Called
     before anything changes the config, so the change lands on top of the
@@ -1907,7 +2022,10 @@ def config_fresh():
         except (OSError, ValueError):
             return False
         fresh = _fresh_config(disk)
+        older = _config_version(disk) < CONFIG_VERSION
         migrate_config(fresh)
+        if older:
+            _migration_said(_set_aside(CONFIG_PATH, "before-v%d" % CONFIG_VERSION))
         for k in [k for k in CFG if k not in fresh]:
             CFG.pop(k, None)
         CFG.update(fresh)              # the same dict: every registry holding it sees the edit
@@ -2116,40 +2234,16 @@ def usage_summary():
 
 
 # ------------------------------------------------------------ engine stats --
-def _prom_query(q):
-    base = CFG.get("prometheus_url", "").rstrip("/")
-    url = base + "/api/v1/query?query=" + urllib.parse.quote(q)
-    with urllib.request.urlopen(url, timeout=3) as r:
-        d = json.load(r)
-    vals = [float(s["value"][1]) for s in d.get("data", {}).get("result", [])]
-    return sum(vals) if vals else None
-
-
 def engine_stats():
     """The engine's own word on whether it is working. Some tool parsers
     (measured: deepseek_v4 — 64s of silent wire, then a whole file in 15
     bursts) buffer a tool call server-side while the GPU streams into a
     buffer. A dead stream and a busy-but-buffered stream are identical from
     the client, so the console asks the engines themselves: the rack
-    monitors read every engine's /metrics. A Prometheus that scrapes vLLM is
-    the fallback. (Colons are legal in Prometheus metric names but not in
-    PromQL bare selectors, hence the __name__ form below.)"""
+    monitors read every engine's /metrics."""
     if MON.list():
-        st = MON.engine_stats()
-        if st.get("ok") or not CFG.get("prometheus_url"):
-            return st
-    if not CFG.get("prometheus_url"):
-        return {"ok": False}
-    try:
-        rate = _prom_query('sum(rate({__name__="vllm:generation_tokens_total"}[20s]))')
-        prompt = _prom_query('sum(rate({__name__="vllm:prompt_tokens_total"}[20s]))')
-        running = _prom_query('sum({__name__="vllm:num_requests_running"})')
-        if rate is None and prompt is None and running is None:
-            return {"ok": False, "error": "prometheus has no vllm metrics"}
-        return {"ok": True, "rate": rate or 0.0, "prompt_rate": prompt or 0.0,
-                "running": -1 if running is None else running}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:120]}
+        return MON.engine_stats()
+    return {"ok": False}
 
 
 # ---------------------------------------------------------------- netcheck --
@@ -4302,24 +4396,16 @@ class Handler(BaseHTTPRequestHandler):
             st["master_name"] = a.get("master_name") or ""
             st["master_instructions"] = a.get("master_instructions") or ""
             st["run_timeout_s"] = agent_run_timeout(CFG)
-            st["master_model"] = a.get("master_model") or ""
-            st["thinking_model"] = a.get("thinking_model") or ""
-            st["slave_model"] = a.get("slave_model") or ""
+            # known once probed (a run, or Test); a harness on this computer is read on the spot
+            caps = (a.get("harness") or {}) if (a.get("ssh") or "").strip() or not a.get("dir") \
+                else (agentmod.harness_caps(CFG) or {})
+            st.update(court_status(a, caps))
             st["minion_pool"] = a.get("minion_pool") or []
             for k in ("master_effort", "thinking_effort", "fast_effort", "master_plan_effort"):
                 st[k] = a.get(k) or ""
-            st["unserved"] = {k: a[k] for k in ("master_model", "thinking_model", "slave_model")
-                              if (a.get(k) or "").strip() and not model_served(a[k].strip())}
             st["minion_slots"] = a.get("minion_slots") or 4
             st["parallel_goals"] = max(1, min(8, _int(a.get("parallel_goals"), 2)))
             st["agents_parallel"] = max(1, min(16, _int(CFG.get("agents_parallel"), 3)))
-            # the engines a run's minions would spread over now, as the run spec would name them
-            st["pool_engines"] = [{k: e[k] for k in ("name", "model", "slots")}
-                                  for e in minion_pool(a, a.get("slave_model") or (CFG.get("roles") or {}).get("fast"),
-                                                       bool((a.get("ssh") or "").strip()))]
-            # known once probed (a run, or Test); a harness on this computer is read on the spot
-            caps = (a.get("harness") or {}) if (a.get("ssh") or "").strip() or not a.get("dir") \
-                else agentmod.harness_caps(CFG)
             st["pool_supported"] = bool(caps.get("pool"))
             runs = []
             for e in TRACE.events(time.strftime("%Y-%m-%d",
@@ -4491,13 +4577,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"catalog": catmod.catalog_view(CFG.get("mcp_servers", {})),
                         "runtimes": catmod.runtimes(), "servers": st,
                         "config": CFG.get("mcp_servers", {})})
-        elif path == "/api/recipes":
-            a = CFG.get("agents") or {}
-            lt = CFG.get("litellm") or {}
-            self._json({"recipes": recipemod.catalog(),
-                        "defaults": {"host": a.get("ssh") or "", "lan_ip": ""},
-                        "litellm": {"configured": bool(lt.get("ssh") and lt.get("config_path")),
-                                    "ssh": lt.get("ssh") or "", "container": lt.get("container") or ""}})
         elif path == "/api/traces":
             self._json(TRACE.stats())
         elif path == "/api/export":
@@ -4623,7 +4702,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/sessions", "/api/usage-event",
                         "/api/tool-call", "/api/mcp", "/api/archive", "/api/rate",
-                        "/api/plugins", "/api/git", "/api/skills", "/api/recipes", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave", "/api/agents/agent", "/api/channels",
+                        "/api/plugins", "/api/git", "/api/skills", "/api/rack", "/api/racks", "/api/machines", "/api/upload", "/api/jobs", "/api/gateways", "/api/monitors", "/api/settings", "/api/agents", "/api/agents/slave", "/api/agents/agent", "/api/channels",
                         "/api/update/apply", "/api/projects", "/api/terminal", "/api/audit", "/api/handoff"):
             self._drain()  # unread bodies desync HTTP/1.1 keep-alive
             self._json({"error": "not found"}, 404)
@@ -4667,8 +4746,6 @@ class Handler(BaseHTTPRequestHandler):
             self._git_admin(body)
         elif path == "/api/skills":
             self._skill_admin(body)
-        elif path == "/api/recipes":
-            self._recipes(body)
         elif path == "/api/jobs":
             if not isinstance(body, dict):
                 self._json({"error": "expected object"}, 400)
@@ -5019,9 +5096,6 @@ class Handler(BaseHTTPRequestHandler):
             a = CFG.setdefault("agents", {})
             a["master_name"] = str(body.get("master_name") or "")[:120]
             a["master_instructions"] = str(body.get("master_instructions") or "")[:8000]
-            for key in ("master_model", "thinking_model", "slave_model"):
-                if key in body:
-                    a[key] = str(body.get(key) or "")[:120]
             for key, allowed in (("master_effort", EFFORTS), ("thinking_effort", EFFORTS), ("fast_effort", EFFORTS),
                                  ("master_plan_effort", EFFORTS + ("same",))):
                 if key in body:
@@ -5066,8 +5140,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "master_name": a["master_name"],
                         "master_instructions": a["master_instructions"],
                         "run_timeout_s": agent_run_timeout(CFG),
-                        "master_model": a.get("master_model") or "", "thinking_model": a.get("thinking_model") or "",
-                        "slave_model": a.get("slave_model") or "", "minion_pool": a.get("minion_pool") or [],
+                        "minion_pool": a.get("minion_pool") or [],
                         **{k: a.get(k) or "" for k in ("master_effort", "thinking_effort", "fast_effort",
                                                         "master_plan_effort")},
                         "minion_slots": a.get("minion_slots") or 4})
@@ -5619,79 +5692,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "note": note})
             return
         self._json({"error": "unknown action"}, 400)
-
-    def _recipes(self, body):
-        """render: the exact files a recipe would run; deploy: run its script
-        over ssh on the target host and stream the output (SSE, like an
-        agent run); register: append the litellm entry on the gateway host
-        and restart the gateway."""
-        import subprocess, shlex as _shlex
-        if not isinstance(body, dict):
-            self._json({"error": "expected object"}, 400)
-            return
-        action = body.get("action") or "render"
-        if action == "register":
-            lt = CFG.get("litellm") or {}
-            entry = str(body.get("entry") or "")
-            if not (lt.get("ssh") and lt.get("config_path")):
-                self._json({"error": "litellm is not configured for the console: set litellm.ssh, litellm.config_path, litellm.container in config.json", "entry": entry}, 400)
-                return
-            if "model_name:" not in entry:
-                self._json({"error": "entry must be a litellm model_list item"}, 400)
-                return
-            script = recipemod.litellm_register_script(lt["config_path"], lt.get("container") or "litellm", entry)
-            try:
-                r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", lt["ssh"], "bash -c " + _shlex.quote(script)],
-                                   capture_output=True, text=True, timeout=90)
-                out = (r.stdout + r.stderr).strip()
-                TRACE.log("recipe", action="register", entry=entry[:400], ok=r.returncode == 0, out=out[:800])
-                self._json({"ok": r.returncode == 0, "output": out[-2000:]})
-            except (OSError, subprocess.TimeoutExpired) as e:
-                self._json({"error": "register failed: %s" % e}, 500)
-            return
-        try:
-            rendered = recipemod.render(str(body.get("id") or ""), body.get("params") or {})
-        except KeyError:
-            self._json({"error": "no such recipe"}, 404)
-            return
-        except (TypeError, ValueError) as e:
-            self._json({"error": "bad parameter: %s" % e}, 400)
-            return
-        if action == "render":
-            self._json({"ok": True, **{k: v for k, v in rendered.items() if k != "deploy_script"},
-                        "deployable": bool(rendered.get("deploy_script"))})
-            return
-        if action != "deploy":
-            self._json({"error": "unknown action"}, 400)
-            return
-        script = rendered.get("deploy_script")
-        host = str(rendered["params"].get("host") or "").strip()
-        if not script or not host:
-            self._json({"error": "this recipe is manual (no ssh target) — run the printed steps yourself"}, 400)
-            return
-        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "bash -c " + _shlex.quote(script)]
-
-        def work(run, emit):
-            emit({"phase": "start", "host": host, "recipe": body.get("id")})
-            captured = []
-
-            def on_line(text):
-                text = _ANSI.sub("", text)        # a terminal's colours are noise in the app
-                if len(captured) < 2000:
-                    captured.append(text)
-                emit({"line": text})
-            try:
-                code, killed = agentmod.run_streaming(cmd, ROOT, on_line, run.cancel_event, timeout_s=3600)
-            except Exception as e:   # noqa: BLE001
-                emit({"error": str(e)})
-                code, killed = -1, "error"
-            emit({"phase": "done", "exit": code, "killed": killed})
-            TRACE.log("recipe", action="deploy", id=body.get("id"), host=host, params=rendered["params"], run=run.id,
-                      exit=code, killed=killed or False, output=captured[-200:])
-            return {"ok": code == 0, "exit": code, "killed": killed or False,
-                    "error": None if code == 0 else "deploy exited %s" % code}
-        self._run_streamed("deploy", "deploy %s on %s" % (body.get("id"), host), work,
-                           meta={"recipe": body.get("id"), "host": host}, key="deploy:" + host)
 
     def _gateways_admin(self, body):
         if not isinstance(body, dict):
@@ -6328,7 +6328,13 @@ def serve(bind=None, port=None, idle_exit=None):
     if _CFG_MIGRATED and os.path.exists(CONFIG_PATH):
         # an older config, brought up to date: the original stays beside it
         kept = _set_aside(CONFIG_PATH, "before-v%d" % CONFIG_VERSION)
-        save_config()
+        _migration_said(kept)
+        try:
+            save_config()
+        except OSError as e:
+            # a folder that cannot be written (a read-only install): the app runs on what it worked out
+            CONFIG_WARNINGS.append("config.json could not be rewritten (%s). The app runs on its updated "
+                                   "settings and has not saved them." % str(e)[:160])
         TRACE.log("config", action="migrated", steps=list(_CFG_MIGRATED), kept=os.path.basename(kept))
         del _CFG_MIGRATED[:]
     inst.publish(srv.server_address[1], version=app_version(), desktop=bool(os.environ.get("BYTEBUNKER_DESKTOP")))

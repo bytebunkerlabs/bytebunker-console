@@ -21,9 +21,9 @@ The safety rule that shaped this: **agents never run where a model is served, an
 
 ### Where things are configured
 
-- Console: `config.json` — upstream gateway + key, model capabilities, skills dirs, plugins, `agents` (ssh host, harness dir, master name and standing instructions, run timeout, worker model metrics), `litellm` (ssh host, config path, container) for recipe registration, `prometheus_url` and `nodes` for the Cluster screen.
+- Console: `config.json` — upstream gateway + key, model capabilities, skills dirs, plugins, `agents` (ssh host, harness dir, master name and standing instructions, run timeout, worker model metrics), `monitors` for the Cluster screen.
 - Harness: `config/config.yaml` on the worker — `llm` (gateway URL and key, `master_model`, `default_slave_model`, `thinking_model`, output caps, context budgets, thinking switches), `concurrency`, `sandbox.runner` (podman/docker/local), `allowed_roles` for network.
-- Gateway: litellm's `model_list` — every engine is a name here, and the console's Recipes screen appends to it.
+- Gateway: every engine is a name here (litellm's `model_list`, or the rack's own gate).
 
 ## The plan: one repo, one installer, one CLI
 
@@ -34,12 +34,12 @@ The pieces are disjoint because they were built in the order the problems appear
 ```
 bytebunker/
   bytebunker/            one Python package
-    console/             server.py, traces.py, skills.py, mcp.py, recipes.py, public/
+    console/             server.py, traces.py, skills.py, mcp.py, public/
     harness/             src/bytebunker_agents/* (master, slaves, tools, graph, harness)
     cli.py               `bytebunker console | worker | run | deploy | export`
   skills/                the ONE skills dir (console and harness read the same files)
   plugins/
-  recipes/               deployment recipes as data (today: recipes.py)
+  recipes/               deployment recipes as data (today: dgx-serve's own)
   docker/                Dockerfile.slave, entrypoint
   install.sh             one-command install (console, optional worker, service)
   config.example.yaml    one config file with sections console:, harness:, gateway:

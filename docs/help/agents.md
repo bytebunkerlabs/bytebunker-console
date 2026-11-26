@@ -7,7 +7,7 @@ summary: Agents that persist: a purpose, rules, a budget and a memory, on your o
 ---
 An agent keeps working between your visits. It has a purpose, rules about what it may do alone, a budget, and a memory it reads when it wakes and writes when it learns something. An ask, a schedule, a chat on your phone, a mail, a feed or the rack itself wakes it; it answers where the ask came from. Its models are picked from what is serving at that moment.
 
-Agents has three tabs: **Agents**, for the ones that persist; **Master**, to hand one goal to the court of sandboxed workers and follow it; and **Settings**, for where agents work, the master's models and the court.
+Agents has three tabs: **Agents**, for the ones that persist; **Master**, to hand one goal to the court of sandboxed workers and follow it; and **Settings**, for where agents work, the master and the court.
 
 ## Make an agent
 
@@ -102,7 +102,7 @@ Minions are most of a goal's work, and each one spends its time waiting on its m
 
 On [Agents](#agents) → Settings, under **Models**:
 
-1. **doers (minions)** is the main minion model; **at once** is how many it runs together (its engine's parallel slots: 4 for the recipes rack ships).
+1. The minions' main model is the **fast** role's ([Settings](#settings), **Roles**); **at once** is how many it runs together (its engine's parallel slots: 4 for the recipes rack ships).
 2. **More engines for the minions** lists every other model your gateways serve. Tick the ones to add, with how many each runs at once. The same model on another machine shows with that machine's name.
 3. The line under it says where the minions will spread, and how many can run at once.
 

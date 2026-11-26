@@ -3,6 +3,59 @@
 What changed in each version of ByteBunker, newest first. After an update the
 app opens on the new version's section, and Settings → What's new shows them all.
 
+## 0.9.1 — 2026-11-25
+
+### Changed
+- **The court runs on your roles.** Agents → Settings had three model pickers,
+  for the master, the thinking roles and the minions, beside the roles in
+  Settings that they fell back to. The pickers are gone: the master runs on
+  **big**, the thinking roles on **thinking**, the minions on **fast**, and a
+  role that names no model still leaves that part to the worker's own config.
+  Agents → Settings shows what each would run on now. A persistent agent still
+  picks its own models on its Setup tab.
+- A pick you had made moves to its role when that role named no model yet.
+  Where a pick and its role named different models the role stays as it is,
+  and the app says so once among its warnings. A copy of your config file from
+  before is kept beside the new one either way.
+- A worker whose harness is too old to take a run's models is not handed your
+  roles and keeps its own. Before, a pick reached such a worker through its
+  environment. **Work here** updates the harness. Agents → Settings says when
+  a worker keeps its own models: its harness is too old, or cannot be read.
+  For a worker over ssh that nobody has asked yet it shows your roles and says
+  that the worker has not answered.
+- A goal is refused at the start when a role's model that it would be handed
+  is not served anywhere. Before, only a model picked on the Agents screen was
+  checked, and a role's was found out at the first call. A ticked minion engine
+  that nobody serves no longer stops a goal on a worker that is never handed
+  the engines.
+
+### Removed
+- **The older recipes on Deploy** (vLLM on a CUDA GPU, Ollama on Windows), with
+  their **Register in litellm**. Deploy serves a model with dgx-serve.
+- **The Prometheus fallback** for the Playground's "engine is busy" hint
+  (`prometheus_url`). The hint reads your rack monitors.
+
+### Fixed
+- `bb` left an empty folder named after its first word wherever it was run:
+  `ask` after `bb ask ...`, `-m` after `bb -m ...`. The terminal tool made it
+  when it was only being loaded. It makes its folder when it starts as a
+  server, and nowhere else.
+- With chats set to run in the tab, a tool call that had to ask first failed
+  with an internal error.
+- An agent's goal on a worker whose harness predates agents failed with an
+  internal error instead of saying that the harness needs updating.
+- The app did not start when `config.json` held its version as text, or when
+  an older file sat in a folder the app could not write. It starts, and says
+  what it could not save.
+- A `roles` or `agents` entry in `config.json` that was edited by hand into
+  something other than an object made the Agents screen fail with an internal
+  error. Such an entry is ignored.
+- With a gateway away, the Agents screen waited once for the minions' model
+  and once more for every ticked engine it could not find. It waits once.
+- A ticked minion engine written with a space around its name passed the
+  check before a goal and was then left out of the engines. Both read the
+  name the same way.
+
 ## 0.9.0 — 2026-11-25
 
 ### New

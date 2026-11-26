@@ -678,7 +678,7 @@
     // (measured: deepseek_v4 — 64s of silence, then a whole file in 15
     // bursts) buffer the call server-side while the GPU streams into a
     // buffer. A dead stream and a busy-but-buffered one look identical from
-    // here; the server-side tok/s from Prometheus is what tells them apart.
+    // here; the engine's own tok/s, read by the rack monitors, is what tells them apart.
     let eng = null, engTick = 0;
     const pollEngine = () => {
       fetch("/api/engine").then((r) => r.json()).then((d) => {
@@ -2490,7 +2490,7 @@
     };
     srow.appendChild(save); srow.appendChild(note); rt.appendChild(srow);
     // roles: what each kind of work runs on; role:fast anywhere a model goes
-    const rc = card("Roles", "what each kind of work runs on: role:fast in a profile, a workflow, a job or bb -m");
+    const rc = card("Roles", "what each kind of work runs on: role:fast in a profile, a workflow, a job or bb -m. The court's master runs on big, its thinking roles on thinking, its minions on fast (a worker with an older harness keeps its own)");
     const roleHelp = { big: "the strongest model, for hard questions", fast: "a quick one, for small steps", vision: "one that reads images", thinking: "one that reasons before it answers" };
     for (const role of ["big", "fast", "vision", "thinking"]) {
       const sel = document.createElement("select"); sel.className = "text-input";
@@ -3857,64 +3857,12 @@
     } catch (e) { append("error: " + e.message); }
   }
 
-  /* ---------------- recipes (model deployment) ---------------- */
-  let recipesCat = null;
+  /* ---------------- Deploy: serve a model with dgx-serve ---------------- */
   async function renderRecipes() {
-    let d = { recipes: [], defaults: {}, litellm: {} };
-    try { d = await (await fetch("/api/recipes")).json(); } catch (e) {}
-    recipesCat = d;
     const left = $("recipes-left"); left.textContent = "";
     $("recipes-sub").textContent = "this computer, or any machine you add";
     left.appendChild(await machinesCard());
     left.appendChild(await rackCard());
-    let older = null;
-    if (d.recipes.length) {
-      older = document.createElement("details"); older.className = "deploy-older";
-      const sm = document.createElement("summary"); sm.className = "hint"; sm.textContent = "Older recipes, without dgx-serve (" + d.recipes.length + ")";
-      older.appendChild(sm); left.appendChild(older);
-    }
-    for (const r of d.recipes) {
-      const card = document.createElement("div");
-      card.className = "card"; card.style.gap = "8px";
-      const head = document.createElement("div"); head.className = "skill-head";
-      head.innerHTML = '<div class="skill-id"><b></b><span class="src mono"></span></div>';
-      head.querySelector("b").textContent = r.title;
-      head.querySelector(".src").textContent = r.target === "ssh" ? "runs over ssh" : "manual steps";
-      const btn = document.createElement("button"); btn.type = "button"; btn.className = "solid-btn"; btn.textContent = "Open";
-      head.appendChild(btn);
-      const desc = document.createElement("div"); desc.className = "skill-desc"; desc.textContent = r.summary;
-      card.appendChild(head); card.appendChild(desc);
-      const form = document.createElement("div"); form.hidden = true; form.style.cssText = "display:flex;flex-direction:column;gap:8px";
-      const inputs = {};
-      for (const p of r.params) {
-        let el;
-        if (p.kind === "select") {
-          el = document.createElement("select"); el.className = "text-input";
-          for (const c of p.choices) { const o = document.createElement("option"); o.value = c; o.textContent = c || "(none)"; el.appendChild(o); }
-          el.value = p.default;
-        } else {
-          el = inputEl(p.help || "", "text-input");
-          if (p.kind === "number") el.type = "number";
-          el.value = (p.name === "host" && !p.default) ? (d.defaults.host || "") : p.default;
-        }
-        el.title = p.help || "";
-        inputs[p.name] = el;
-        const row = formRow(p.label + (p.help ? "  \u2014  " + p.help : ""), el);
-        form.appendChild(row);
-      }
-      const acts = document.createElement("div"); acts.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
-      const prev = document.createElement("button"); prev.type = "button"; prev.className = "ghost-btn"; prev.textContent = "Preview";
-      const dep = document.createElement("button"); dep.type = "button"; dep.className = "solid-btn"; dep.textContent = r.target === "ssh" ? "Deploy over ssh" : "Show steps";
-      const note = document.createElement("span"); note.className = "hint";
-      acts.appendChild(prev); acts.appendChild(dep); acts.appendChild(note);
-      form.appendChild(acts);
-      card.appendChild(form);
-      const params = () => { const o = {}; for (const k in inputs) o[k] = inputs[k].value; return o; };
-      btn.onclick = () => { form.hidden = !form.hidden; btn.textContent = form.hidden ? "Open" : "Close"; };
-      prev.onclick = () => previewRecipe(r, params(), note);
-      dep.onclick = () => (r.target === "ssh" ? deployRecipe(r, params(), note) : previewRecipe(r, params(), note));
-      older.appendChild(card);
-    }
   }
 
   // POST that answers with data: frames (a run streamed to this tab): each object to onObj
@@ -4357,64 +4305,6 @@
     const pre = document.createElement("pre"); pre.className = "skill-body"; pre.style.whiteSpace = "pre-wrap"; pre.textContent = text;
     pane.appendChild(l); pane.appendChild(pre);
     return pre;
-  }
-
-  async function previewRecipe(r, params, note) {
-    note.textContent = "rendering\u2026";
-    let d;
-    try { d = await (await fetch("/api/recipes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "render", id: r.id, params }) })).json(); }
-    catch (e) { note.textContent = "failed: " + e.message; return; }
-    if (d.error) { note.textContent = d.error; return; }
-    note.textContent = "";
-    const pane = recipePane(r.title + " \u00b7 preview");
-    for (const [name, text] of d.files) preBlock(pane, name, text);
-    const lit = preBlock(pane, "litellm entry (model_list item)", d.litellm_entry);
-    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap";
-    const reg = document.createElement("button"); reg.type = "button"; reg.className = "solid-btn"; reg.textContent = "Register in litellm";
-    const rn = document.createElement("span"); rn.className = "hint";
-    reg.onclick = async () => {
-      reg.disabled = true; rn.textContent = "registering\u2026";
-      try {
-        const x = await (await fetch("/api/recipes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "register", entry: d.litellm_entry }) })).json();
-        rn.textContent = x.error ? x.error : (x.ok ? "registered \u00b7 " + (x.output || "").split("\n").slice(-1)[0] : "failed: " + (x.output || ""));
-        if (x.ok) loadModels && loadModels();
-      } catch (e) { rn.textContent = "failed: " + e.message; }
-      reg.disabled = false;
-    };
-    row.appendChild(reg); row.appendChild(rn); pane.appendChild(row);
-    if ((d.notes || []).length) {
-      const n = document.createElement("div"); n.className = "glabel"; n.textContent = "notes"; pane.appendChild(n);
-      const ul = document.createElement("ul"); ul.style.cssText = "margin:0;padding-left:18px;font-size:12.5px;color:var(--muted);display:flex;flex-direction:column;gap:6px";
-      for (const t of d.notes) { const li = document.createElement("li"); li.style.whiteSpace = "pre-wrap"; li.textContent = t; ul.appendChild(li); }
-      pane.appendChild(ul);
-    }
-  }
-
-  async function deployRecipe(r, params, note) {
-    if (!confirm("Run this recipe on " + (params.host || "?") + " now? Preview first if you have not read the script.")) return;
-    const pane = recipePane(r.title + " \u00b7 deploying on " + params.host);
-    const out = preBlock(pane, "log", "");
-    const append = (t) => { out.textContent += t + "\n"; out.scrollTop = out.scrollHeight; };
-    note.textContent = "running\u2026";
-    try {
-      const resp = await fetch("/api/recipes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "deploy", id: r.id, params }) });
-      if (!resp.ok) { append("error: " + upstreamText(await resp.text())); note.textContent = ""; return; }
-      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n"); buf = parts.pop();
-        for (const ln of parts) {
-          if (!ln.startsWith("data:")) continue;
-          let o; try { o = JSON.parse(ln.slice(5).trim()); } catch (e) { continue; }
-          if (o.phase === "start") append("\u2014 running on " + o.host + " \u2014");
-          else if (o.phase === "done") { append("\u2014 finished: " + (o.killed ? o.killed : "exit " + o.exit) + " \u2014"); note.textContent = o.exit === 0 ? "deployed \u00b7 now Preview \u2192 Register in litellm" : "exit " + o.exit; }
-          else if (o.error) append("error: " + o.error);
-          else if (o.line != null) append(o.line);
-        }
-      }
-    } catch (e) { append("error: " + e.message); note.textContent = ""; }
   }
 
   /* ---------------- agents (harness) ---------------- */
@@ -5378,7 +5268,7 @@
     const who = document.createElement("b"); who.textContent = d.master_name || "Your master agent"; line.appendChild(who);
     const where = document.createElement("span"); where.className = "deploy-meta";
     where.textContent = !d.enabled ? "agents are off" : "works on " + (d.mode === "ssh" ? d.host : "this computer") +
-      (d.master_model ? "  ·  master " + d.master_model : "") + (d.slave_model ? "  ·  doers " + d.slave_model : "");
+      ((d.court_models || {}).master ? "  ·  master " + d.court_models.master : "") + ((d.court_models || {}).fast ? "  ·  minions " + d.court_models.fast : "");
     line.appendChild(where);
     const set = document.createElement("button"); set.type = "button"; set.className = "linky"; set.textContent = d.enabled ? "Settings" : "Set up agents";
     set.onclick = d.enabled ? () => agentsTab("settings") : showPlane; line.appendChild(set);
@@ -5455,20 +5345,39 @@
     if (document.activeElement !== $("master-name")) $("master-name").value = d.master_name || "";
     if (document.activeElement !== $("master-instructions")) $("master-instructions").value = d.master_instructions || "";
     if (document.activeElement !== $("run-timeout") && d.run_timeout_s) $("run-timeout").value = Math.round(d.run_timeout_s / 60);
-    // which engine each role uses; blank = whatever the worker's config.yaml says
-    for (const [id, key] of [["model-master", "master_model"], ["model-thinking", "thinking_model"], ["model-slave", "slave_model"]]) {
-      const sel = $(id);
-      if (document.activeElement === sel) continue;
-      sel.textContent = "";
-      const o0 = document.createElement("option"); o0.value = ""; o0.textContent = "(worker default)"; sel.appendChild(o0);
-      const seen = new Set([""]);
-      for (const m of (state.models || []).filter((x) => !modelInfo(x).pinned).concat(d[key] ? [d[key]] : [])) { if (seen.has(m)) continue; seen.add(m); const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o); }
-      sel.value = d[key] || "";
-      // a model no gateway serves: a goal will not start with it
-      let warn = sel.parentElement.querySelector(".not-served");
-      const missing = (d.unserved || {})[key];
-      if (missing && !warn) { warn = document.createElement("span"); warn.className = "not-served"; sel.parentElement.appendChild(warn); }
-      if (warn) { warn.hidden = !missing; warn.textContent = missing ? "not served anywhere" : ""; warn.title = missing ? missing + " is not served by any gateway right now: pick another, or serve it on Deploy" : ""; }
+    // which model each of the court's roles runs on: the app's roles (Settings, Roles). A role that names
+    // no model leaves it to the worker's own config
+    const courtLine = $("court-models"), cm = d.court_models || {}, unused = d.roles_unused || [];
+    if (courtLine) {
+      courtLine.textContent = "";
+      for (const [role, label, app] of [["master", "master", "big"], ["thinking", "thinking (wazir, Malikah, panels)", "thinking"], ["fast", "minions", "fast"]]) {
+        const item = document.createElement("span"); item.dataset.role = role;
+        item.textContent = label + ": " + (cm[role] || "the worker's default");
+        item.title = cm[role] ? "the " + app + " role"
+          : unused.includes(role) ? "the " + app + " role names a model, and this worker is not handed it"
+          : "the " + app + " role names no model, so the worker's own config decides";
+        const missing = (d.unserved || {})[role];
+        if (missing) {
+          // a model no gateway serves: a goal will not start with it
+          const warn = document.createElement("span"); warn.className = "not-served"; warn.textContent = "not served anywhere";
+          warn.title = missing + " is not served by any gateway right now: give the " + app + " role another model, or serve it on Deploy";
+          item.appendChild(document.createTextNode(" ")); item.appendChild(warn);
+        }
+        courtLine.appendChild(item);
+      }
+      // what this worker's harness does with the roles, where that is not simply "runs on them": too old for
+      // them, not readable (a goal takes that as old), or a worker over ssh nobody has asked yet
+      const named = Object.values(cm).some(Boolean);
+      const said = d.harness_state === "old" && unused.length ? "this worker's harness is too old to take your roles: Work here updates it"
+        : d.harness_state === "unread" && unused.length ? "this worker's harness could not be read, so it keeps its own models: Work here sets one up"
+        : d.harness_state === "unasked" && named ? "this worker has not said yet whether it takes your roles: Test asks it"
+        : "";
+      if (said) {
+        const old = document.createElement("span"); old.className = "not-served"; old.id = "court-models-old";
+        old.dataset.state = d.harness_state; old.textContent = said;
+        courtLine.appendChild(old);
+      }
+      $("court-models-roles").onclick = () => { state.settingsTab = "models"; try { localStorage.setItem("bb.settingsTab", "models"); } catch (e) {} go("settings"); };
     }
     renderMinionPool(d);
     for (const sel of document.querySelectorAll(".effort-sel")) {
@@ -5752,7 +5661,6 @@
           master_name: $("master-name").value.trim(),
           master_instructions: $("master-instructions").value.trim(),
           run_timeout_s: Math.max(5, parseInt($("run-timeout").value, 10) || 180) * 60,
-          master_model: $("model-master").value, thinking_model: $("model-thinking").value, slave_model: $("model-slave").value,
           minion_pool: minionPoolValue(), minion_slots: parseInt($("minion-slots").value, 10) || 4,
           ...Object.fromEntries([...document.querySelectorAll(".effort-sel")].map((x) => [x.dataset.key, x.value])) }),
       });
@@ -5769,7 +5677,7 @@
     box.textContent = "";
     const chosen = new Map((d.minion_pool || []).map((e) => [e.model, e.slots || 4]));
     if (document.activeElement !== $("minion-slots")) $("minion-slots").value = d.minion_slots || 4;
-    const main = $("model-slave").value;
+    const main = (d.court_models || {}).fast || "";
     const ids = (state.models || []).filter((m) => m !== main);
     if (!ids.length) { const h = document.createElement("span"); h.className = "hint"; h.textContent = "Serve a model on another machine (or the same model on a second one) and it appears here."; box.appendChild(h); }
     for (const m of ids) {
@@ -5789,7 +5697,7 @@
       ? (d.pool_supported ? "Minions spread over " : "Chosen, but this worker's harness predates engine pools (Update it): ") +
         eng.map((e) => e.name + " (" + e.model + ", " + e.slots + " at once)").join(" · ") +
         " — up to " + eng.reduce((a, e) => a + e.slots, 0) + " minions at once."
-      : "Minions run on " + (eng[0] ? eng[0].name + " (" + eng[0].model + ")" : "the doers' model") + ". Tick more engines to spread them.";
+      : "Minions run on " + (eng[0] ? eng[0].name + " (" + eng[0].model + ")" : "the fast role's model") + ". Tick more engines to spread them.";
   }
   function minionPoolValue() {
     return [...document.querySelectorAll("#minion-pool input[type=checkbox]:checked")].map((cb) => ({

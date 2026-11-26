@@ -29,11 +29,11 @@ class Server:
 
     def __init__(self, data, config=None, keep_config=False, env=None):
         self.data = data
-        self.cfg = os.path.join(data, "config.json")
+        self.cfg = (env or {}).get("BYTEBUNKER_CONFIG") or os.path.join(data, "config.json")
         if not keep_config:
             with open(self.cfg, "w") as f:
                 json.dump(dict({"gateways": [], "monitors": []}, **(config or {})), f)
-        env = dict(os.environ, BYTEBUNKER_DATA=data, BYTEBUNKER_CONFIG=self.cfg, PYTHONDONTWRITEBYTECODE="1",
+        env = dict(dict(os.environ, BYTEBUNKER_DATA=data, BYTEBUNKER_CONFIG=self.cfg, PYTHONDONTWRITEBYTECODE="1"),
                    **(env or {}))
         code = ("import sys; sys.path.insert(0, %r); import server; "
                 "srv = server.serve('127.0.0.1', 0); srv.serve_forever()" % ROOT)
@@ -213,6 +213,17 @@ class ApiTest(unittest.TestCase):
         st, body = self.srv.request("POST", "/api/runs/run-nope/cancel", {})
         self.assertEqual(st, 409)
         self.assertFalse(body["ok"])
+
+    def test_the_engine_busy_hint_without_a_monitor(self):
+        st, d = self.srv.request("GET", "/api/engine")
+        self.assertEqual((st, d), (200, {"ok": False}))
+
+    def test_the_old_recipes_are_gone(self):
+        # 0.9.1 removed the script recipes and their Register in litellm: both routes say so at once
+        st, _ = self.srv.request("GET", "/api/recipes")
+        self.assertEqual(st, 404)
+        st, _ = self.srv.request("POST", "/api/recipes", {"action": "render", "id": "vllm-cuda"})
+        self.assertEqual(st, 404)
 
     def test_bad_numbers_do_not_break_requests(self):
         st, body = self.srv.request("GET", "/api/runs?limit=lots")

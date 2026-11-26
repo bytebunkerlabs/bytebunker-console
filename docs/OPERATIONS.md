@@ -30,7 +30,7 @@ The rule behind the layout: **agents never run on a model host or on the control
 | `bytebunkerlabs/dgx-spark-serve` | public | | spark-1 `~/dgx/dgx-spark-serve` (`rack` CLI, recipes for the Sparks, `monitor/` = the rack monitor) |
 | `bytebunkerlabs/dgx-spark-setup` | | | spark-1 `~/dgx/dgx-spark-setup` (host prep; litellm and Prometheus configs live here) |
 
-Console layout: `server.py` (HTTP server, all API routes), `agents.py` (harness launch, live views, worker stats, agent usage), `recipes.py` (model deployment recipes), `skills.py` (skills + plugins), `traces.py` (trace log + training export), `mcp.py` / `mcp_terminal.py` (MCP host and the terminal tool), `public/` (one HTML, one JS, one CSS), `skills/` (built-in skills), `plugins/`, `docs/`, `install.sh`.
+Console layout: `server.py` (HTTP server, all API routes), `agents.py` (harness launch, live views, worker stats, agent usage), `skills.py` (skills + plugins), `traces.py` (trace log + training export), `mcp.py` / `mcp_terminal.py` (MCP host and the terminal tool), `public/` (one HTML, one JS, one CSS), `skills/` (built-in skills), `plugins/`, `docs/`, `install.sh`.
 
 Harness layout (`src/bytebunker_agents/`): `master/` (the Sultan: `agent.py` loop and tools, `prompts.py` doctrine), `slaves/` (`runner.py` the in-container loop, `archetypes.py` roles, `factory.py` spec building, `prompts.py`), `tools/restricted.py` (the tool registry: files, shell, `fetch_url`, `cve_record`, `kev_lookup`), `harness/` (`spawn.py` podman/docker/local runner + the unix-socket LLM proxy, `cost.py`), `graph/verifier.py` (skeptic panels), `trajectories/` (tracer + spawn ledger), `llm.py` (HTTP client with keepalive and deadline), `config.py`; plus `scripts/run_master.py`, `docker/Dockerfile.slave`, `docker/entrypoint.sh`, `skills/`, `config/config.yaml`.
 
@@ -41,8 +41,8 @@ Harness layout (`src/bytebunker_agents/`): `master/` (the Sultan: `agent.py` loo
 ### the console host
 - **Console**: launchd `ai.bytebunker.console` → `/usr/bin/python3 ~/bytebunker-console/server.py`, port 8765, log `~/bytebunker-console/data/console.log`.
   `launchctl kickstart -k gui/501/ai.bytebunker.console` restarts it. **Never restart while an agent run is streaming**: the run's ssh session dies with the server.
-  `public/*.js|html|css` are read from disk on every request: copy and reload the browser, no restart. `server.py`, `agents.py`, `recipes.py`, `skills.py`, `config.json` need a restart.
-- **Tunnels**: launchd `ai.bytebunker.tunnel` → `ssh -N … -L 127.0.0.1:19090:127.0.0.1:9090 -L 127.0.0.1:18091:127.0.0.1:8091 -L 127.0.0.1:15555:127.0.0.1:5555 you@<spark-1-lan-ip>`. 18091 is the video studio's H3; 19090 (Prometheus) is the engine-busy fallback; 15555 (sparkDash) is unused since 0.2.0 and can go. Edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel && launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read ProgramArguments).
+  `public/*.js|html|css` are read from disk on every request: copy and reload the browser, no restart. `server.py`, `agents.py`, `skills.py`, `config.json` need a restart.
+- **Tunnels**: launchd `ai.bytebunker.tunnel` → `ssh -N … -L 127.0.0.1:19090:127.0.0.1:9090 -L 127.0.0.1:18091:127.0.0.1:8091 -L 127.0.0.1:15555:127.0.0.1:5555 you@<spark-1-lan-ip>`. 18091 is the video studio's H3; 19090 (Prometheus) feeds Grafana only, since the console stopped asking it in 0.9.1; 15555 (sparkDash) is unused since 0.2.0 and can go. Edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel && launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read ProgramArguments).
 - Data: `data/config.json` is **not** the config; the live config is `~/bytebunker-console/config.json`. `data/traces/<day>.jsonl` (every chat, tool call, rating, agent run, recipe action), `data/usage.jsonl` (chat token ledger), `data/sessions/`.
 
 ### spark-1 / spark-2 (model plane)
@@ -68,7 +68,7 @@ Everything the console needs from Windows is one-time and already done; redo aft
    netsh advfirewall firewall add rule name="vllm-8001" dir=in action=allow protocol=TCP localport=8001
    ```
    litellm reaches the model at `http://<windows-lan-ip>:8001/v1` through this forward. There is no forward for ssh: the console reaches the VM over its tailnet address.
-4. Ollama on Windows is installed but not part of the stack; it can be registered in litellm with the Ollama recipe if wanted.
+4. Ollama on Windows is installed but not part of the stack; it can be added as a gateway of its own if wanted.
 
 ---
 
@@ -78,16 +78,15 @@ Everything the console needs from Windows is one-time and already done; redo aft
 - `gateways`: every OpenAI-compatible endpoint (on the console host one, `upstream` = litellm `http://<spark-1-lan-ip>:4000/v1`, migrated from the old `upstream_url`/`upstream_key`, which are now kept in sync with the first enabled gateway). Add more on the Gateways screen; models are merged and routed by name, `model@gateway` pins a duplicate. `model_capabilities`: per-model context and thinking switches (`deepseek-v4-vision` 262144 with `ctk thinking:true`; `qwen3-4b-fast` 24576 with `enable_thinking:false`).
 - `skills_dirs: ["~/bytebunker-console/skills-harness"]` — a copy of the harness `skills/`. `plugins` state, `plugins_dirs`.
 - `agents`: `enabled`, `ssh worker`, `dir ~/bytebunker-harness`, `python "/home/you/.local/bin/uv run"`, `script scripts/run_master.py`, `master_name Sultan`, `master_instructions` (the court doctrine; editable on the Agents screen), `run_timeout_s 10800`, `worker_model_metrics http://127.0.0.1:8001/metrics`, `worker_model_label`.
-- `litellm`: `ssh spark-1`, `config_path`, `container` — for the Recipes screen's Register button.
-- `rack`: `ssh spark-1`, `dir ~/dgx/dgx-spark-serve` — for the Recipes screen's Spark card.
-- `monitors`: `rack` → `http://<spark-1-tailnet-ip>:9177` with the token from `rack monitor token` (Cluster › Monitors writes it). `prometheus_url http://127.0.0.1:19090` stays as the engine-busy fallback. The pre-0.2.0 keys (`nodes`, `sparkdash_url`, `sparkdash_open_url`, `telemetry_source`) are ignored.
+- `rack`: `ssh spark-1`, `dir ~/dgx/dgx-spark-serve` — for the Deploy screen's rack card.
+- `monitors`: `rack` → `http://<spark-1-tailnet-ip>:9177` with the token from `rack monitor token` (Cluster › Monitors writes it). The engine-busy hint reads the monitors only: `prometheus_url` is no longer read (0.9.1). The pre-0.2.0 keys (`nodes`, `sparkdash_url`, `sparkdash_open_url`, `telemetry_source`) are ignored.
 
 **Harness `config/config.yaml` (worker)**
 - `llm`: `base_url http://<spark-1-lan-ip>:4000/v1` (LAN, never the tailnet), `api_key` (the litellm key), `master_model <big-model>`, `default_slave_model qwen3-4b-fast`, `thinking_model <big-model>`, `timeout_s 900`, `master_max_tokens 8000`, `slave_max_tokens 3000`, `slave_transcript_chars 36000`, `fetch_max_chars 8000`; defaults in code: `thinking_extra` (on, max effort) and `thinking_off_extra`.
 - `concurrency`: `max_concurrent_slaves 3`, `max_slaves_per_goal 16`, `default_slave_timeout_s 1800`.
 - `sandbox.runner podman`, `llm_bridge uds`, `allowed_roles` for network (internet_agent, researcher, minion, wazir, malikah).
 
-**litellm `model_list`**: one entry per engine; `rack up` writes the Spark one, the console's Register writes others.
+**litellm `model_list`**: one entry per engine; `rack up` writes the Spark one, others are added by hand.
 
 ---
 
@@ -105,7 +104,7 @@ Everything the console needs from Windows is one-time and already done; redo aft
 
 **Console** (from the laptop checkout):
 ```
-scp server.py agents.py recipes.py skills.py console-host:bytebunker-console/
+scp server.py agents.py skills.py console-host:bytebunker-console/
 scp public/index.html public/console.js public/console.css console-host:bytebunker-console/public/
 ssh console-host 'ssh worker "pgrep -fc \"python scripts/run_maste[r].py\""'   # must be 0 before a restart
 ssh console-host 'launchctl kickstart -k gui/501/ai.bytebunker.console'
@@ -119,9 +118,9 @@ ssh console-host 'ssh worker "cd ~/bytebunker-harness && podman build -q -f dock
 ```
 Host-side files (`master/*`, `harness/spawn.py`, `config.py`, `trajectories/*`, `graph/verifier.py`) take effect on the next run without a rebuild; anything the runner imports needs the rebuild.
 
-**Small model**: Recipes screen → vLLM on a CUDA GPU → Deploy (idempotent: it exits early if the served name already answers on the port). To redeploy, first `systemctl --user disable --now vllm-qwen3-4b-fast` on the worker.
+**Small model**: it runs as the systemd user unit `vllm-qwen3-4b-fast` on the worker (script `~/vllm-qwen3-4b-fast.sh`), set up once by a console recipe that 0.9.1 removed. To change it, edit the script and restart the unit; a new engine goes up with dgx-serve on the Deploy screen.
 
-**Sparks**: Recipes screen → rack card, or `rack up <recipe>` on spark-1.
+**Sparks**: Deploy screen → rack card, or `rack up <recipe>` on spark-1.
 
 **rack monitor**: edit `monitor/rackmon.py` in dgx-spark-serve on spark-1, run `python3 -m unittest monitor/test_rackmon.py`, then `rack monitor up`. The image tag is a hash of the code, so `up` rebuilds, ships to spark-2 and restarts both; unchanged code just restarts. The console reads the schema in `/v1/cluster` (`schema: 1`); a breaking change bumps it on both sides.
 
@@ -155,7 +154,7 @@ Useful one-liners on the worker: `ls -td trajectories/goal-* | head -1` (latest 
 - **A new skill**: Skills screen → New skill (or a `skills/<name>/SKILL.md` in the harness repo, then copy to both places). The Sultan sees the catalog's `description`/`whenToUse`; the body is injected into the agent's system prompt.
 - **A new tool for agents**: `tools/restricted.py` → define a function returning `ToolResult`, `reg.register(ToolDef(name, description, json-schema, fn))`, add the name to the right list in `slaves/archetypes.py` (`READ_ONLY_TOOLS`, `READ_WRITE_TOOLS`, `NETWORK_TOOLS`), rebuild the image. `cve_record` / `kev_lookup` are the template for "deterministic facts a small model must not guess".
 - **A new archetype**: `slaves/archetypes.py` → `Archetype(name, tools, max_attempts, depth, thinking, max_tokens, timeout_s, description)`; mention it in the doctrine if the Sultan should use it; add to `allowed_roles` if it needs the network.
-- **A new engine**: Recipes screen (any CUDA host or Ollama on Windows) or a `rack` recipe for the Sparks; then it is a name in litellm and can be set as `default_slave_model`, `thinking_model` or `master_model`.
+- **A new engine**: the Deploy screen (dgx-serve on any machine you add) or a `rack` recipe for the Sparks; then it is a model the gateways list, and a role in Settings, Roles can name it.
 - **A new measurement on the Cluster screen**: add it to the node snapshot in dgx-spark-serve `monitor/rackmon.py` (`Node.sample`), deploy with `rack monitor up`, and draw it in `rackUnit()` in `console.js`. **Another machine on the screen**: run `rackmon.py serve` on it (one file, no dependencies) and add it in Cluster › Monitors, or list it in the head's `MONITOR_PEERS`.
 - **A new console screen**: a `<section class="screen" id="screen-x">` + a nav button `data-nav="x"` in `index.html`, the name in the `screens` array and a `render…()` call in `go()` in `console.js`.
 - **Training data**: `/api/export` (chat traces, optionally `?rated=up`) from the console; `trajectories/spawns.jsonl` and each goal's `master.jsonl` from the worker.

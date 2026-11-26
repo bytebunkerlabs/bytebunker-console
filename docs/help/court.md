@@ -22,7 +22,7 @@ Your master agent (the Sultan, unless you named it otherwise) does not do the wo
 | `general` | general work: read, write, run commands | in its workspace |
 | `khazin` | keeper of the treasury: reads the data you give it and answers from it | never has network; listed once it has access |
 
-The master's model, the thinking model (wazir, malikah) and the doers' model are chosen under **Models** on [Agents](#agents) → Settings.
+The court runs on the app's roles: the master on **big**, the thinking roles (wazir, malikah) on **thinking**, the minions on **fast**. Name their models once in [Settings](#settings), **Roles**; a role that names none leaves it to the worker's own config, and so does a worker whose harness is too old to be handed them. [Agents](#agents) → Settings shows what each would run on now.
 
 ## Make it yours
 

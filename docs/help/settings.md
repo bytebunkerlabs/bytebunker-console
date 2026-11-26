@@ -25,6 +25,8 @@ ByteBunker replaces itself only where it is allowed to write. Installed by anoth
 
 Name the model for each kind of work once: **big** (the strongest), **fast** (quick, for small steps), **vision** (reads images), **thinking** (reasons first). Anywhere a model goes (a profile, a workflow, a job, `bb -m`), write `role:fast` instead of a model's name. When the model behind a role changes, change it here; everything that uses the role follows. A turn whose role names nothing, or a model no gateway serves right now, stops before it starts and says which.
 
+The court uses three of them: its master runs on **big**, its thinking roles on **thinking**, its minions on **fast**. A role that names no model leaves that part of the court to the worker's own config, as does a worker whose harness is too old to be handed your roles. A persistent agent picks its models itself, on its Setup tab. → [The court](help:court)
+
 ## Also here
 
 - **Profiles**: named turn settings. → [Profiles](help:profiles)

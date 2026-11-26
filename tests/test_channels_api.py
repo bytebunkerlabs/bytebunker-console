@@ -112,6 +112,10 @@ class ChannelsApi(unittest.TestCase):
     def inbox(self, agent="ops"):
         return self.get("/api/agents/agent?id=" + agent)["inbox"]
 
+    def test_0_the_engine_busy_hint_reads_the_rack_monitor(self):
+        # the Playground asks this when a stream goes quiet: the monitored engines, summed
+        self.assertEqual(self.get("/api/engine"), {"ok": True, "rate": 0, "prompt_rate": 0, "running": 0, "source": "monitor"})
+
     def test_1_connecting_a_bot_keeps_its_token_in_the_vault_only(self):
         self.post("/api/channels", {"action": "telegram_connect", "token": "not a token"}, 400)
         d = self.post("/api/channels", {"action": "telegram_connect", "token": "999999:WRONGwrongWRONGwrongWRONGwrong"}, 400)

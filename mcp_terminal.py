@@ -37,14 +37,25 @@ MAX_TIMEOUT = 600
 OUTPUT_CAP = 30000          # chars handed back per call; the middle is elided
 CWD_MARK = "\n<<__BB_CWD__>>"   # trailer the wrapper prints so `cd` persists
 
-STATE = {"cwd": os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~")}
-try:
-    os.makedirs(STATE["cwd"], exist_ok=True)   # a folder that is not there yet is made, not refused
-except OSError:
-    pass
-if not os.path.isdir(STATE["cwd"]):
-    STATE["cwd"] = os.path.expanduser("~")
-STATE["root"] = os.path.realpath(STATE["cwd"])     # the folder a sandboxed command may write
+# Where commands run, and the folder a sandboxed one may write. A program that imports this module (bb
+# does, for its own folder) sets both itself; the server sets them from its first argument when it starts
+STATE = {"cwd": os.path.expanduser("~")}
+STATE["root"] = os.path.realpath(STATE["cwd"])
+
+
+def start_in(folder):
+    """The folder this server works in. One that is not there yet is made, not refused. Only the server
+    does this, when it starts: importing the module makes nothing (it once made a folder named after the
+    importing program's first argument, so `bb ask ...` left a folder called ask where it was run)."""
+    cwd = os.path.expanduser(folder or "~")
+    try:
+        os.makedirs(cwd, exist_ok=True)
+    except OSError:
+        pass
+    if not os.path.isdir(cwd):
+        cwd = os.path.expanduser("~")
+    STATE["cwd"] = cwd
+    STATE["root"] = os.path.realpath(cwd)
 
 WINDOWS = os.name == "nt"
 if WINDOWS:
@@ -191,6 +202,7 @@ def reply(rid, result=None, error=None):
 
 
 def main():
+    start_in(sys.argv[1] if len(sys.argv) > 1 else "~")
     for line in sys.stdin:
         line = line.strip()
         if not line:

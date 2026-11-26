@@ -100,14 +100,12 @@ Edit `~/bytebunker-console/config.json` to this (the live values, key redacted):
   "gateways": [{"name": "upstream", "url": "http://<spark-1-lan-ip>:4000/v1", "key": "<LITELLM_KEY>", "enabled": true, "kind": "litellm"}],
   "model_capabilities": { "qwen3-4b-fast": { "tools": true, "effort": [], "ctk": { "enable_thinking": false }, "strip_reasoning": true, "ctx": 24576 } },
   "monitors": [{"name": "rack", "url": "http://<spark-1-tailnet-ip>:9177", "token": "<rack monitor token>", "enabled": true}],
-  "prometheus_url": "http://127.0.0.1:19090",
   "skills_dirs": ["~/bytebunker-console/skills-harness"], "plugins_dirs": [], "plugins": {},
   "agents": {
     "enabled": true, "ssh": "worker", "dir": "~/bytebunker-harness",
     "python": "/home/you/.local/bin/uv run", "script": "scripts/run_master.py",
     "master_name": "Sultan", "master_instructions": "<see 2.5>", "run_timeout_s": 10800,
     "worker_model_metrics": "http://127.0.0.1:8001/metrics", "worker_model_label": "RTX 2070 on the Windows box" },
-  "litellm": { "ssh": "spark-1", "config_path": "/home/you/dgx/dgx-spark-setup/config/litellm.config.yaml", "container": "dgx-inference-litellm-1" },
   "rack": { "ssh": "spark-1", "dir": "~/dgx/dgx-spark-serve" },
   "frontier_rates_per_mtok": { "input": 3.0, "output": 15.0 },
   "identity": { "user": "you@console-host", "host": "mini" }
@@ -158,7 +156,7 @@ PLIST
 console$ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist
 console$ curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:19090/api/v1/query?query=up'
 ```
-18091 carries the video studio's H3; 19090 is Prometheus, which the console only asks when no rack monitor reports an engine. (The live plist on the console host still forwards 127.0.0.1:15555 to sparkDash from before 0.2.0; nothing uses it.) To change forwards later: edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel; launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read the arguments).
+18091 carries the video studio's H3; 19090 is Prometheus, which only Grafana reads: the console stopped asking it in 0.9.1. (The live plist on the console host still forwards 127.0.0.1:15555 to sparkDash from before 0.2.0; nothing uses it.) To change forwards later: edit the plist, then `launchctl bootout gui/501/ai.bytebunker.tunnel; launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.bytebunker.tunnel.plist` (kickstart alone does not re-read the arguments).
 
 ### 2.4 The skills copy the console lists
 ```
@@ -281,7 +279,7 @@ wsl$ tail -1 trajectories/spawns.jsonl | python3 -c 'import sys,json; d=json.loa
 ```
 
 ### 3.5 The small model on the RTX 2070
-Either the console (Recipes → vLLM on a CUDA GPU → host `worker`, LAN address `<windows-lan-ip>` → Deploy), or by hand, which is exactly what the recipe does:
+By hand (a console recipe did exactly this until 0.9.1 removed it):
 ```
 wsl$ uv venv ~/vllm-env --python 3.12
 wsl$ uv pip install --python ~/vllm-env/bin/python vllm huggingface_hub
@@ -324,7 +322,7 @@ spark-1$ curl -s -m 5 http://<windows-lan-ip>:8001/v1/models
 ```
 After a reboot with a new VM address: `PS> netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=8001` and add it again.
 
-Register in litellm (the console's Recipes → Preview → Register does exactly this):
+Register in litellm by hand:
 ```
 spark-1$ F=~/dgx/dgx-spark-setup/config/litellm.config.yaml; cp $F $F.bak-$(date +%Y%m%d-%H%M)
 spark-1$ python3 - <<'PY'
@@ -402,7 +400,6 @@ sparkDash, which fed this screen before 0.2.0, still runs on spark-1 and nothing
 console$ curl -s http://127.0.0.1:8765/api/agents | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["enabled"], d["host"], d["master_name"])'
 console$ curl -s http://127.0.0.1:8765/api/cluster | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(m["name"], m["ok"], m.get("error","")) for m in d["monitors"]]; [print(n["name"], n.get("ok"), (n.get("gpus") or [{}])[0].get("util"), [e["models"] for e in n.get("engines",[])]) for n in d["nodes"]]'
 console$ curl -s http://127.0.0.1:8765/api/rack | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["serving"], len(d["recipes"]))'
-console$ curl -s http://127.0.0.1:8765/api/recipes | python3 -c 'import sys,json; d=json.load(sys.stdin); print([r["id"] for r in d["recipes"]], d["litellm"])'
 console$ cat > /tmp/goal.json <<'GOAL'
 {"goal": "Give me the vulnerability details of CVE-2026-88778 (Citrix NetScaler): affected versions, whether it is exploited in the wild per CISA KEV, the fix, CVSS and CWE. Every claim needs a source URL. One quick minion is enough."}
 GOAL
@@ -419,7 +416,7 @@ Expected: the goal spawns one minion on `qwen3-4b-fast`, it calls `cve_record` a
 **Update the console** (laptop checkout → the console host):
 ```
 laptop$ cd ~/Documents/AI/bytebunker-console && git pull
-laptop$ scp server.py agents.py recipes.py skills.py traces.py mcp.py mcp_terminal.py console-host:bytebunker-console/ && scp public/* console-host:bytebunker-console/public/
+laptop$ scp server.py agents.py skills.py traces.py mcp.py mcp_terminal.py console-host:bytebunker-console/ && scp public/* console-host:bytebunker-console/public/
 laptop$ ssh console-host 'ssh worker "pgrep -fc \"python scripts/run_maste[r].py\""; launchctl kickstart -k gui/501/ai.bytebunker.console'
 ```
 **Update the harness** (laptop checkout → worker; the worker's deploy key has a passphrase, so `git pull` there fails non-interactively):
@@ -427,10 +424,10 @@ laptop$ ssh console-host 'ssh worker "pgrep -fc \"python scripts/run_maste[r].py
 laptop$ cd ~/Documents/AI/bytebunker-harness && git pull && uv run pytest -q
 laptop$ COPYFILE_DISABLE=1 tar c --no-xattrs src scripts docker skills | ssh console-host 'ssh worker "cd ~/bytebunker-harness && tar x; find . -name \"._*\" -delete; podman build -q -f docker/Dockerfile.slave -t bytebunker-slave:latest ."'
 ```
-**Update the small model** (new model or flags): edit `~/vllm-qwen3-4b-fast.sh`, `systemctl --user restart vllm-qwen3-4b-fast`, watch `~/vllm-qwen3-4b-fast.log`; or change the recipe parameters on the Recipes screen, stop the unit, Deploy.
+**Update the small model** (new model or flags): edit `~/vllm-qwen3-4b-fast.sh`, `systemctl --user restart vllm-qwen3-4b-fast`, watch `~/vllm-qwen3-4b-fast.log`.
 
-**Change what the Sparks serve**: Recipes screen → rack card, or `spark-1$ rack up <recipe>` (`rack down` first when switching between TP=2 recipes).
+**Change what the Sparks serve**: Deploy screen → rack card, or `spark-1$ rack up <recipe>` (`rack down` first when switching between TP=2 recipes).
 
-**Backups worth taking**: the console host `~/bytebunker-console/config.json` and `data/` (traces, usage, sessions); worker `~/bytebunker-harness/config/config.yaml` and `trajectories/`; spark-1 `~/dgx/dgx-spark-setup/config/litellm.config.yaml` (the console keeps `*.bak-*` copies beside it) and `~/.config/rack/monitor.token` (or rotate it: `rack monitor token --rotate`).
+**Backups worth taking**: the console host `~/bytebunker-console/config.json` and `data/` (traces, usage, sessions); worker `~/bytebunker-harness/config/config.yaml` and `trajectories/`; spark-1 `~/dgx/dgx-spark-setup/config/litellm.config.yaml` (keep a copy before you edit it) and `~/.config/rack/monitor.token` (or rotate it: `rack monitor token --rotate`).
 
 **Rollback**: console files are plain copies, so `git checkout <sha>` on the laptop and re-copy; harness image tags are not versioned, so rebuild from the checkout at the wanted commit; litellm from its `.bak-*`.
